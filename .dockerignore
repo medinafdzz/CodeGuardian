@@ -1,0 +1,8 @@
+jenkins-data/
+sonarqube_data/
+sonarqube_logs/
+sonarqube_extensions/
+sonarqube_temp/
+prometheus_data/
+grafana_data/
+.git/

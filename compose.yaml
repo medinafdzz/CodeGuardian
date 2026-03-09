@@ -1,0 +1,90 @@
+networks:
+  services-net:
+    name: "services-net"
+    driver: "bridge" # Allows communication between containers on the same network
+
+services:
+
+  # -- JENKINS WITH BLUE OCEAN --
+  jenkins-blueocean:
+
+    container_name: "jenkins-blueocean"
+
+    # Build using the project's Dockerfile
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    group_add:
+      - "999" # Add Jenkins user to the Docker group (group ID 999) to allow Docker socket access
+      - "0"   # Add Jenkins user to the root group to allow Docker socket access
+
+    # Environment variables; the rest are defined in the Dockerfile
+    environment:
+      - TZ=Europe/Madrid # Set timezone for consistent SonarQube and Jenkins logs
+
+    networks:
+      - "services-net"
+
+    ports:
+      - "50000:50000/tcp"
+      - "8080:8080/tcp"
+
+    restart: "on-failure"
+    
+    volumes:
+      - "./jenkins-data:/var/jenkins_home"
+      - "/var/run/docker.sock:/var/run/docker.sock" # Allow Jenkins to control Docker on the host
+
+  # -- SONARQUBE SERVER --
+  sonarqube-server:
+
+    container_name: "sonarqube-server"
+
+    environment:
+      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
+
+    image: "sonarqube:community"
+
+    networks:
+      - "services-net"
+
+    ports:
+      - "9000:9000/tcp"
+
+    volumes:
+      - "./sonarqube_logs:/opt/sonarqube/logs"
+      - "./sonarqube_data:/opt/sonarqube/data"
+      - "./sonarqube_temp:/opt/sonarqube/temp"
+      - "./sonarqube_extensions:/opt/sonarqube/extensions"
+
+  # -- PROMETHEUS, PUSHGATEWAY AND GRAFANA --
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - services-net
+    ports:
+      - "9090:9090"
+
+  # Pushgateway to receive metrics from the agent and expose them to Prometheus
+  pushgateway:
+    image: prom/pushgateway:latest
+    container_name: pushgateway
+    networks:
+      - services-net
+    ports:
+      - "9091:9091"
+
+  # Grafana to visualize the metrics stored in Prometheus
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    networks:
+      - services-net
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
