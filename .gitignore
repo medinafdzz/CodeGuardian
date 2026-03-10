@@ -8,6 +8,8 @@ sonarqube_data/
 sonarqube_extensions/
 sonarqube_logs/
 sonarqube_temp/
+prometheus_data/
+grafana_data/
 
 # Log files
 *.log
