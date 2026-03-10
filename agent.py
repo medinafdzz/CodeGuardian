@@ -364,7 +364,28 @@ async def post_comment(
         except Exception as e:
             logger.error(f"Failed to add comment: {e}")
 
-
+# Function to create a draft PR (using to report in case of push events)
+async def create_draft_pr(session: ClientSession, project_key: str, workspace: str, source_branch: str) -> str:
+    try:
+        logger.info(f"Creating draft pull request for project {project_key} in branch {source_branch} to report the analysis results.")
+        results= await session.call_tool(
+            name="createDraftPullRequest",
+            arguments={
+                "workspace": workspace,
+                "repo_slug": project_key,
+                "title": f"Analysis Report {project_key} : {source_branch}",
+                "source_branch": source_branch,
+            },
+        )
+        pr_data = json.loads(results.content[0].text)
+        new_pr_id = pr_data.get("id")
+        
+        logger.info(f"Draft pull request created successfully for project {project_key}")
+        return new_pr_id
+    except Exception as e:
+        logger.error(f"Failed to create draft pull request: {e}")
+        return None
+    
 # Function to decline the pull request on Bitbucket using the MCP tool
 async def decline_pull_request(
     session: ClientSession, pr_id: str, project_key: str, workspace: str
@@ -487,9 +508,7 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
 
                     # Sugestion inline comments for each issue
                     if decision.issues:
-                        logger.info(
-                            f"\n--- INLINE COMMENTS FOR THE MOST CRITICAL ISSUES ---"
-                        )
+                        logger.info(f"\n--- INLINE COMMENTS FOR THE MOST CRITICAL ISSUES ---")
                         for issue in decision.issues:
                             await post_inline_comment(
                                 session_bb, pr_id, project_key, issue, workspace
@@ -499,45 +518,57 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
                             )  # Sleep to avoid hitting rate limits when posting multiple inline comments
                     # CASE 1.1: If the AI detects critical issues, decline the PR and stop the build
                     if decline:
-                        await decline_pull_request(
-                            session_bb, pr_id, project_key, workspace
-                        )
+                        await decline_pull_request(session_bb, pr_id, project_key, workspace)
                         should_exit = True  # Set the flag to stop the build after reporting to Bitbucket
                     # CASE 1.2: LOW/MEDIUM issues, approve by the agent
                     else:
                         # Approve no merge, bc the merge is function of the developer
-                        await approve_pull_request(
-                            session_bb, pr_id, project_key, workspace
-                        )
-                        logger.info(
-                            "Build approved based on the analysis results. No critical issues found."
-                        )
+                        await approve_pull_request(session_bb, pr_id, project_key, workspace)
+                        logger.info("Build approved based on the analysis results. No critical issues found.")
                 # CASE 2: PUSH EVENT
                 else:
                     # Show the report on Jenkins logs
                     logger.info("\n--- PUSH EVENT ---")
-                    logger.info(
-                        f"CodeGuardian analysis summary for the push in project '{project_key}':\n\n{decision.comment}\n\n"
-                    )
+                    current_branch = os.getenv("GIT_BRANCH") or os.getenv("BRANCH_NAME") or "unknown"
+                    # Clean the branch name, removing "origin/", etc
+                    if "/" in current_branch and current_branch.startswith("origin/"):
+                        current_branch = current_branch.split("/",1)[1]
+                    logger.info(f"CodeGuardian analysis summary for the push in project '{project_key}':\n\n{decision.comment}\n\n")
 
+                    #Log individual issues detected in AI analysis
                     if decision.issues:
                         for index, issue in enumerate(decision.issues):
-                            logger.info(
-                                f"**- Problem {index+1} ({issue.severity}) ({issue.file} :{issue.line}):** {issue.problem}"
-                            )
+                            logger.info(f"**- Problem {index+1} ({issue.severity}) ({issue.file} :{issue.line}):** {issue.problem}")
                             logger.info(f"  **Proposed fix:** {issue.solution}\n")
-                    # CASE 2.1: Push with critical issues
-                    if decline:
-                        should_exit = True  # Set the flag to stop the build after reporting to Bitbucket
+                    # CASE 2.1: CRITICAL ISSUES DETECTED - Create a Draft PR to notify the developer and stop the build
+                    if decline and current_branch not in ["main", "master", "unknown"]:
+                        logger.warning(f"Critical issues detected by the AI agent in the push event. Opening a Draft PR for {current_branch} to report them")
+                        # Use the MCP tool to automatically create a Draft PR
+                        draft_pr_id = await create_draft_pr(session_bb, project_key, workspace, current_branch)     
+                        # If the Draft PR was successfully created, add to the analysis results                  
+                        if draft_pr_id:
+                            summary = [f"**Analysis Summary for {current_branch}**\n\n{decision.comment}\n\n"]
+                            await post_comment( session_bb, draft_pr_id, project_key, summary, workspace)
+                            
+                            # Add the specific inline comments for each issue in the Draft PR
+                            for issue in decision.issues:
+                                await post_inline_comment( session_bb, draft_pr_id, project_key, issue, workspace)
+                                await asyncio.sleep(1)
+                                
+                            # Close the Draft PR to indicate that the code is rejected due to the critical issues detected, stop the build 
+                            await decline_pull_request( session_bb, draft_pr_id, project_key, workspace)
+                            should_exit = True  
+                        # CASE 2.1.1: Failed to create the Draft PR
+                        else:
+                            logger.error("Failed to create draft pull request to report the analysis results for the push event.")
+                            should_exit = True  
+                    # CASE 2.2: CRITICAL ISSUES DETECTED and push in main branch
+                    elif decline:
+                        logger.error("Critical issues detected by the AI agent in the push event. Please check the analysis summary above. Stopping the build.")
+                        should_exit = True  
+                    # CASE 2.3: NO CRITICAL ISSUES - Allow the push to proceed normally
                     else:
-                        # CASE 2.2 Push with low/medium issues, just show the comment on the logs without declining the build
-                        logger.info(
-                            "No critical issues found in the push. Build can proceed."
-                        )
-
-                await asyncio.sleep(
-                    5
-                )  # Wait a moment to ensure all the comments are posted before closing the session
+                        logger.info("No critical issues detected by the AI agent in the push event. Build approved.")
     except Exception as e:
         logger.error(f"Failed to connect to Bitbucket {e}")
         sys.exit(1)
