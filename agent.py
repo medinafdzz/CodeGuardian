@@ -257,7 +257,10 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
 
     # Calculate duration of the response
     duration = time.time() - start_time
-
+    
+    # Execution time to order in Grafana the different executions of the agent
+    current_timestamp = time.time()
+    
     # Extract the token usage
     try:
         metric_prompt = int(response.usage_metadata.prompt_token_count)
@@ -274,6 +277,14 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         "Response time of Gemini model (s)",
         registry=registry,
     )
+    
+    # 
+    execution_time = Gauge(
+        "codeguardian_last_execution_timestamp",
+        "Timestamp of the last agent execution",
+        registry=registry,
+    )
+    execution_time.set(current_timestamp)
 
     prompt_tokens = Gauge(
         "codeguardian_analysis_prompt_tokens",
@@ -318,6 +329,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
                 "event_type": event_type,
                 "display_id": display_label,
                 "repository": project_key,
+                "exec_timestamp": str(int(current_timestamp)),
             },
             registry=registry,
         )
