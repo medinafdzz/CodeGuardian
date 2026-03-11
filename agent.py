@@ -24,19 +24,16 @@ from prometheus_client import (
     push_to_gateway,
 )  # Libraries for Prometheus metrics
 
-
 # Configure logging to show timestamps and log levels for better debugging and monitoring
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     stream=sys.stdout,  # added because avoid the 2> dev/null in Jenkins to show the logs
 )
-
+# Set the logging level to WARNING to reduce noise in the logs
 logger = logging.getLogger(__name__)
-
 logging.getLogger("google").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
 
 # -- DATA MODELS --
 class Issue(BaseModel):
@@ -49,12 +46,10 @@ class Issue(BaseModel):
     solution: str
     proposed_code: str
 
-
 class Decision(BaseModel):
     decline_pr: bool
     issues: list[Issue]
     comment: str
-
 
 # -- CLEANING AND EXTRACTING FUNCTIONS --
 # Function that loads the json file received from webhook and extract the context
@@ -71,7 +66,6 @@ def load_webhook_data(filepath: str) -> tuple[str, str]:
     project_key = project_key.replace(".git", "").split("/")[-1].lower()
 
     return pr_id, project_key
-
 
 # Function that extract the specific code block affected by the issue
 def get_code_context(filepath: str, line_number: int, context_window: int = 15) -> str:
@@ -98,7 +92,6 @@ def get_code_context(filepath: str, line_number: int, context_window: int = 15) 
         return "\n".join(snippet)
     except Exception as e:
         return f"Error reading code context: {e}"
-
 
 # Function to save tokens and clean the json format of the SonarQube results
 def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
@@ -134,7 +127,6 @@ def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
     except Exception as e:
         logger.error(f"Error cleaning SonarQube results: {e}")
         return []
-
 
 # -- TOOL INTERACTION FUNCTIONS (MCP AND LLM API) --
 # Function that search for SonarQube issues using the MCP tool
@@ -202,7 +194,6 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
         issue["code_context"] = get_code_context(issue["file"], issue["line"])
 
     return top_issues
-
 
 # Function that sends the SonarQube issues to the Gemini model for analysis and receives the decision
 def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
@@ -351,7 +342,6 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         logger.error(f"The response from the model was: {response.text}")
         sys.exit(1)  # If the AI fails, stop the build
 
-
 # Function to post comment on Bitbucketusing the MCP tool
 async def post_comment(
     session: ClientSession,
@@ -434,7 +424,6 @@ async def decline_pull_request(
     except Exception as e:
         logger.error(f"Failed to decline PR: {e}")
 
-
 # Function to post inline comments on specfic lines of the pull request on BitBucket using MCP tool
 async def post_inline_comment(
     session: ClientSession, pr_id: str, project_key: str, issue: Issue, workspace: str
@@ -470,7 +459,6 @@ async def post_inline_comment(
     except Exception as e:
         logger.error(f"Failed to add inline comment: {e}")
 
-
 # Function to approve the pull request on Bitbucket using the MCP tool
 async def approve_pull_request(
     session: ClientSession, pr_id: str, project_key: str, workspace: str
@@ -488,7 +476,6 @@ async def approve_pull_request(
         logger.info(f"Pull request {pr_id} approved successfully.")
     except Exception as e:
         logger.error(f"Failed to approve PR: {e}")
-
 
 # Function to report the analysis results to Bitbucket
 async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) -> None:
@@ -620,7 +607,6 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
         logger.error("Build stopped due to critical issues detected by the AI agent.")
         sys.exit(1)
 
-
 # -- PRINCIPAL FUNCTION TO ORCHESTRATE THE STEPS --
 async def main() -> None:
     # Parse the command-line arguments to get the path to the JSON file
@@ -667,7 +653,6 @@ async def main() -> None:
 
     # Report and act in SOnarQube based on the AI decision
     await report_to_bitbucket(pr_id, project_key, decision)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
