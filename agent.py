@@ -308,7 +308,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             display_label = f"{project_key} - PR-{pr_id}"
         else:
             event_type = "push"
-            display_label = f"{project_key} - Push-{build_id}"
+            display_label = f"{project_key}-Push-{build_id}"
 
         push_to_gateway(
             "pushgateway:9091",
