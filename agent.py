@@ -585,6 +585,7 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
 
                             await publish_draft_pr(session_bb, draft_pr_id, project_key, workspace)
                             logger.info(f"Draft PR {draft_pr_id} published for developer review.")
+                            should_exit = True
                         else:
                             logger.error("Failed to create draft pull request to report push analysis results.")
                             should_exit = True
