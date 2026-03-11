@@ -305,10 +305,10 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         build_id = os.getenv("BUILD_NUMBER", "local_build")
         if pr_id:
             event_type = "pull_request"
-            display_label = f"PR-{pr_id}"
+            display_label = f"{project_key} - PR-{pr_id}"
         else:
             event_type = "push"
-            display_label = f"Push-{build_id}"
+            display_label = f"{project_key} - Push-{build_id}"
 
         push_to_gateway(
             "pushgateway:9091",
