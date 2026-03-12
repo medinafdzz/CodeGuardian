@@ -35,7 +35,8 @@ logger = logging.getLogger(__name__)
 logging.getLogger("google").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# -- DATA MODELS --
+# DATA MODELS for the issues and the decision of the AI, using Pydantic for validation and easy JSON parsing
+#A model from the SonarQube results after the cleaning and extracting process, with the specific information that the AI needs to analyze and propose a fix
 class Issue(BaseModel):
     file: str
     target_type: str
@@ -46,6 +47,7 @@ class Issue(BaseModel):
     solution: str
     proposed_code: str
 
+# A model for the AI decision, with the information about whether decline the PR, the issues detected and explained by the AI and a high-level comment for the developer
 class Decision(BaseModel):
     decline_pr: bool
     issues: list[Issue]
@@ -513,7 +515,7 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
                 is_pr = pr_id and str(pr_id).lower() != "null"
 
                 # Manage the pull request and push cases based on the model's decision
-                # CASE 1: PULL REQUEST EVENT
+                # TODO: REMOVE CASE 1: PULL REQUEST EVENT BC IT WILL BE ANALYZE IN PUSHES AND NOT IN PRs, SO I CAN SIMPLIFY THE CODE AND AVOID DUPLICATIONS
                 if is_pr:
                     logger.info(f"\n--- PULL REQUEST DETECTED - {pr_id} ---")
                     summary_comment = [
@@ -607,7 +609,7 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
         logger.error("Build stopped due to critical issues detected by the AI agent.")
         sys.exit(1)
 
-# -- PRINCIPAL FUNCTION TO ORCHESTRATE THE STEPS --
+# PRINCIPAL FUNCTION
 async def main() -> None:
     # Parse the command-line arguments to get the path to the JSON file
     parser = argparse.ArgumentParser()
