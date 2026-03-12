@@ -10,6 +10,7 @@ sonarqube_logs/
 sonarqube_temp/
 prometheus_data/
 grafana_data/
+pushgateway_data/
 
 # Log files
 *.log
