@@ -540,12 +540,10 @@ async def report_to_bitbucket(project_key: str, decision: Decision) -> None:
                         summary = [f"**Analysis Summary for {current_branch}**\n\n{decision.comment}\n\n"]
                         await post_comment(session_bb, draft_pr_id, project_key, summary, workspace)
 
-                        # Asynchronously task to post all inline comments at the same time to optimize the time
-                        tasks = [
-                            post_inline_comment(session_bb, draft_pr_id, project_key, issue, workspace)
-                            for issue in decision.issues
-                        ]
-                        await asyncio.gather(*tasks)
+                        # Post inline comments sequentially to avoid Bitbucket API duplicating comments
+                        for issue in decision.issues:
+                            await post_inline_comment(session_bb, draft_pr_id, project_key, issue, workspace)
+                            await asyncio.sleep(1) # Bc not to overheat Bitbucket
 
                         await publish_draft_pr(session_bb, draft_pr_id, project_key, workspace)
                         logger.info(f"Draft PR {draft_pr_id} published for developer review.")
