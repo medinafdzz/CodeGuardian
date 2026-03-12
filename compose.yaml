@@ -64,7 +64,7 @@ services:
     container_name: prometheus
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
+      - ./prometheus_data:/prometheus
     networks:
       - services-net
     ports:
@@ -74,6 +74,11 @@ services:
   pushgateway:
     image: prom/pushgateway:latest
     container_name: pushgateway
+    command:
+      - "--persistence.file=/data/metrics.data"
+      - "--persistence.interval=1m"
+    volumes:
+      - ./pushgateway_data:/data
     networks:
       - services-net
     ports:
@@ -84,15 +89,10 @@ services:
     image: grafana/grafana:latest
     container_name: grafana
     volumes:
-      - grafana_data:/var/lib/grafana
+      - ./grafana_data:/var/lib/grafana
     networks:
       - services-net
     ports:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
-
-volumes:
-  prometheus_data:
-  grafana_data:
-
