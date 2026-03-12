@@ -55,19 +55,17 @@ class Decision(BaseModel):
 
 # -- CLEANING AND EXTRACTING FUNCTIONS --
 # Function that loads the json file received from webhook and extract the context
-def load_webhook_data(filepath: str) -> tuple[str, str]:
+def load_webhook_data(filepath: str) -> str:
     # Load the JSON file
     with open(filepath, "r") as file:
         data = json.load(file)
 
-    # Extract the pull request ID and project key from the JSON data
-    pr_id = data.get("pr_id") or os.getenv(
-        "CHANGE_ID"
-    )  # Try to get the pr_id from the JSON, if not found, try to get it from the environment variable (for Jenkins compatibility)
     project_key = data.get("project_key")
-    project_key = project_key.replace(".git", "").split("/")[-1].lower()
+    if not project_key:
+        logger.error("Project key not found in the JSON file.")
+        return ""
 
-    return pr_id, project_key
+    return project_key.replace(".git", "").split("/")[-1].lower()
 
 # Function that extract the specific code block affected by the issue
 def get_code_context(filepath: str, line_number: int, context_window: int = 15) -> str:
@@ -146,7 +144,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
             "--network",
             "services-net",
             "-e",
-            f"SONARQUBE_URL=http://sonarqube-server:9000",
+            "SONARQUBE_URL=http://sonarqube-server:9000",
             "-e",
             f"SONARQUBE_TOKEN={os.getenv('SONARQUBE_AUTH_TOKEN')}",
             "mcp/sonarqube",
@@ -305,14 +303,10 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     # Send the metrics to Prometheus Pushgateway
     try:
         # To set a tag in grafana
-        pr_id = os.getenv("CHANGE_ID")
         build_id = os.getenv("BUILD_NUMBER", "local_build")
-        if pr_id:
-            event_type = "pull_request"
-            display_label = f"{project_key}-PR-{pr_id}"
-        else:
-            event_type = "push"
-            display_label = f"{project_key}-Push-{build_id}"
+
+        event_type = "push"
+        display_label = f"{project_key}-Push-{build_id}"
 
         push_to_gateway(
             "pushgateway:9091",
@@ -364,7 +358,7 @@ async def post_comment(
                 },
             )
             logger.info(f"Comment added successfully to the pull request {pr_id}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(1) # To avoid overheating the bitbucket API
         except Exception as e:
             logger.error(f"Failed to add comment: {e}")
 
@@ -408,7 +402,7 @@ async def publish_draft_pr(session: ClientSession, pr_id: str, project_key: str,
     except Exception as e:
         logger.error(f"Failed to publish draft pull request: {e}")
 
-# Function to decline the pull request on Bitbucket using the MCP tool
+# Function to decline the pull request on Bitbucket using the MCP tool -> Not used at the moment but can be used in future cases
 async def decline_pull_request(
     session: ClientSession, pr_id: str, project_key: str, workspace: str
 ) -> None:
@@ -461,7 +455,7 @@ async def post_inline_comment(
     except Exception as e:
         logger.error(f"Failed to add inline comment: {e}")
 
-# Function to approve the pull request on Bitbucket using the MCP tool
+# Function to approve the pull request on Bitbucket using the MCP tool -> Not used at the moment but can be used in future cases
 async def approve_pull_request(
     session: ClientSession, pr_id: str, project_key: str, workspace: str
 ) -> None:
@@ -480,7 +474,7 @@ async def approve_pull_request(
         logger.error(f"Failed to approve PR: {e}")
 
 # Function to report the analysis results to Bitbucket
-async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) -> None:
+async def report_to_bitbucket(project_key: str, decision: Decision) -> None:
     # Configure the Bitbucket tool parameters
     bitbucket_env = os.environ.copy()  # Need this bc need to inherit the PATH
     bitbucket_env.update(
@@ -511,96 +505,65 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
             async with ClientSession(read, write) as session_bb:
                 await session_bb.initialize()
 
-                # Check if there is a pr_id and is valid
-                is_pr = pr_id and str(pr_id).lower() != "null"
+                # PUSH EVENT
+                logger.info("\n--- PUSH EVENT ---")
+                current_branch = os.getenv("GIT_BRANCH") or os.getenv("BRANCH_NAME") or "unknown"
 
-                # Manage the pull request and push cases based on the model's decision
-                # TODO: REMOVE CASE 1: PULL REQUEST EVENT BC IT WILL BE ANALYZE IN PUSHES AND NOT IN PRs, SO I CAN SIMPLIFY THE CODE AND AVOID DUPLICATIONS
-                if is_pr:
-                    logger.info(f"\n--- PULL REQUEST DETECTED - {pr_id} ---")
-                    summary_comment = [
-                        f"**CodeGuardian Analysis Summary**\n\n{decision.comment}\n\n"
-                    ]  # between [] bc post_commend need a list of strings
-                    await post_comment(
-                        session_bb, pr_id, project_key, summary_comment, workspace
+                # Normalize branch names from Jenkins formats
+                if current_branch.startswith("origin/"):
+                    current_branch = current_branch.split("/", 1)[1]
+                if current_branch.startswith("refs/heads/"):
+                    current_branch = current_branch.replace("refs/heads/", "", 1)
+
+                target_branch = os.getenv("DEFAULT_BRANCH", "main")
+
+                logger.info(
+                    f"CodeGuardian analysis summary for the push in project '{project_key}':\n\n{decision.comment}\n\n"
+                )
+
+                if decision.issues:
+                    for index, issue in enumerate(decision.issues):
+                        logger.info(
+                            f"**- Problem {index+1} ({issue.severity}) ({issue.file} :{issue.line}):** {issue.problem}"
+                        )
+                        logger.info(f"  **Proposed fix:** {issue.solution}\n")
+
+                # CASE 1: CRITICAL ISSUES DETECTED - Create a Draft PR to notify the developer and stop the build
+                if decline and current_branch not in ["main", "master", "unknown"] and current_branch != target_branch:
+                    logger.warning(
+                        f"Critical issues detected. Opening Draft PR for branch '{current_branch}' -> '{target_branch}'."
                     )
 
-                    # Sugestion inline comments for each issue
-                    if decision.issues:
-                        logger.info(f"\n--- INLINE COMMENTS FOR THE MOST CRITICAL ISSUES ---")
-                        for issue in decision.issues:
-                            await post_inline_comment(
-                                session_bb, pr_id, project_key, issue, workspace
-                            )
-                            await asyncio.sleep(
-                                1
-                            )  # Sleep to avoid hitting rate limits when posting multiple inline comments
-                    # CASE 1.1: If the AI detects critical issues, decline the PR and stop the build
-                    if decline:
-                        await decline_pull_request(session_bb, pr_id, project_key, workspace)
-                        should_exit = True  # Set the flag to stop the build after reporting to Bitbucket
-                    # CASE 1.2: LOW/MEDIUM issues, approve by the agent
+                    draft_pr_id = await create_draft_pr(session_bb, project_key, workspace, current_branch)
+
+                    if draft_pr_id:
+                        summary = [f"**Analysis Summary for {current_branch}**\n\n{decision.comment}\n\n"]
+                        await post_comment(session_bb, draft_pr_id, project_key, summary, workspace)
+
+                        # Asynchronously task to post all inline comments at the same time to optimize the time
+                        tasks = [
+                            post_inline_comment(session_bb, draft_pr_id, project_key, issue, workspace)
+                            for issue in decision.issues
+                        ]
+                        await asyncio.gather(*tasks)
+
+                        await publish_draft_pr(session_bb, draft_pr_id, project_key, workspace)
+                        logger.info(f"Draft PR {draft_pr_id} published for developer review.")
+                        should_exit = True
                     else:
-                        # Approve no merge, bc the merge is function of the developer
-                        await approve_pull_request(session_bb, pr_id, project_key, workspace)
-                        logger.info("Build approved based on the analysis results. No critical issues found.")
-                # CASE 2: PUSH EVENT
-                else:
-                    logger.info("\n--- PUSH EVENT ---")
-                    current_branch = os.getenv("GIT_BRANCH") or os.getenv("BRANCH_NAME") or "unknown"
-
-                    # Normalize branch names from Jenkins formats
-                    if current_branch.startswith("origin/"):
-                        current_branch = current_branch.split("/", 1)[1]
-                    if current_branch.startswith("refs/heads/"):
-                        current_branch = current_branch.replace("refs/heads/", "", 1)
-
-                    target_branch = os.getenv("DEFAULT_BRANCH", "main")
-
-                    logger.info(
-                        f"CodeGuardian analysis summary for the push in project '{project_key}':\n\n{decision.comment}\n\n"
-                    )
-
-                    if decision.issues:
-                        for index, issue in enumerate(decision.issues):
-                            logger.info(
-                                f"**- Problem {index+1} ({issue.severity}) ({issue.file} :{issue.line}):** {issue.problem}"
-                            )
-                            logger.info(f"  **Proposed fix:** {issue.solution}\n")
-
-                    # CASE 2.1: CRITICAL ISSUES DETECTED - Create a Draft PR to notify the developer and stop the build
-                    if decline and current_branch not in ["main", "master", "unknown"] and current_branch != target_branch:
-                        logger.warning(
-                            f"Critical issues detected. Opening Draft PR for branch '{current_branch}' -> '{target_branch}'."
-                        )
-
-                        draft_pr_id = await create_draft_pr(session_bb, project_key, workspace, current_branch)
-
-                        if draft_pr_id:
-                            summary = [f"**Analysis Summary for {current_branch}**\n\n{decision.comment}\n\n"]
-                            await post_comment(session_bb, draft_pr_id, project_key, summary, workspace)
-
-                            for issue in decision.issues:
-                                await post_inline_comment(session_bb, draft_pr_id, project_key, issue, workspace)
-                                await asyncio.sleep(1)
-
-                            await publish_draft_pr(session_bb, draft_pr_id, project_key, workspace)
-                            logger.info(f"Draft PR {draft_pr_id} published for developer review.")
-                            should_exit = True
-                        else:
-                            logger.error("Failed to create draft pull request to report push analysis results.")
-                            should_exit = True
-
-                    # CASE 2.2: Critical issues in default branch
-                    elif decline:
-                        logger.error(
-                            "Critical issues detected by the AI agent in push event. Stopping the build."
-                        )
+                        logger.error("Failed to create draft pull request to report push analysis results.")
                         should_exit = True
 
-                    # CASE 2.3: No critical issues
-                    else:
-                        logger.info("No critical issues detected by the AI agent in the push event. Build approved.")
+                # CASE 2: Critical issues in default branch
+                elif decline:
+                    logger.error(
+                        "Critical issues detected by the AI agent in push event. Stopping the build."
+                    )
+                    should_exit = True
+
+                # CASE 3: No critical issues
+                else:
+                    logger.info("No critical issues detected by the AI agent in the push event. Build approved.")
     except Exception as e:
         logger.error(f"Failed to connect to Bitbucket {e}")
         sys.exit(1)
@@ -619,7 +582,7 @@ async def main() -> None:
     args = parser.parse_args()
 
     # First step: load the context
-    pr_id, project_key = load_webhook_data(args.file)
+    project_key = load_webhook_data(args.file)
     if not project_key:
         logger.error(
             "Project key not found in the JSON file. Please provide a valid project key."
@@ -631,16 +594,16 @@ async def main() -> None:
 
     if not issues:
         logger.info(
-            "No critical issues found by SonarQube. Approving the pull request without AI analysis."
+            "No critical issues found by SonarQube. No action required."
         )
 
         auto_decision = Decision(
             decline_pr=False,
             issues=[],
-            comment="CodeGuardian has automatically approved this Pull Request. SonarQube did not detect any CRITICAL or BLOCKER issues in the modified code.",
+            comment="CodeGuardian analyzed this push and did not detect any CRITICAL or BLOCKER issues in the modified code.",
         )
 
-        await report_to_bitbucket(pr_id, project_key, auto_decision)
+        await report_to_bitbucket(project_key, auto_decision)
         return
 
     logger.info(
@@ -654,7 +617,7 @@ async def main() -> None:
     )
 
     # Report and act in SOnarQube based on the AI decision
-    await report_to_bitbucket(pr_id, project_key, decision)
+    await report_to_bitbucket(project_key, decision)
 
 if __name__ == "__main__":
     asyncio.run(main())
