@@ -534,7 +534,7 @@ async def report_to_bitbucket(project_key: str, decision: Decision) -> None:
                 await session_bb.initialize()
 
                 # PUSH EVENT
-                logger.info("\n\n Push event case")
+                logger.info("\n\nPUS EVENT")
                 current_branch = os.getenv("GIT_BRANCH") or os.getenv("BRANCH_NAME") or "unknown"
 
                 # Normalize branch names from Jenkins formats
@@ -544,13 +544,6 @@ async def report_to_bitbucket(project_key: str, decision: Decision) -> None:
                     current_branch = current_branch.replace("refs/heads/", "", 1)
 
                 target_branch = os.getenv("DEFAULT_BRANCH", "main")
-
-                if decision.issues:
-                    for index, issue in enumerate(decision.issues):
-                        logger.info(
-                            f"**- Problem {index+1} ({issue.severity}) ({issue.file} :{issue.line}):** {issue.problem}"
-                        )
-                        logger.info(f"  **Proposed fix:** {issue.solution}\n")
 
                 # CASE 1: CRITICAL ISSUES DETECTED - Create a Draft PR to notify the developer and stop the build
                 if decline and current_branch not in ["main", "master", "unknown"] and current_branch != target_branch:
