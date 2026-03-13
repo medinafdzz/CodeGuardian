@@ -534,7 +534,7 @@ async def report_to_bitbucket(project_key: str, decision: Decision) -> None:
                 await session_bb.initialize()
 
                 # PUSH EVENT
-                logger.info("\n--- PUSH EVENT ---")
+                logger.info("\n\n Push event case")
                 current_branch = os.getenv("GIT_BRANCH") or os.getenv("BRANCH_NAME") or "unknown"
 
                 # Normalize branch names from Jenkins formats
@@ -544,10 +544,6 @@ async def report_to_bitbucket(project_key: str, decision: Decision) -> None:
                     current_branch = current_branch.replace("refs/heads/", "", 1)
 
                 target_branch = os.getenv("DEFAULT_BRANCH", "main")
-
-                logger.info(
-                    f"CodeGuardian analysis summary for the push in project '{project_key}':\n\n{decision.comment}\n\n"
-                )
 
                 if decision.issues:
                     for index, issue in enumerate(decision.issues):
