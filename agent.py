@@ -243,6 +243,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=Decision,
+            temperature=0,  # Adjust the temperature to cold trying to get the same response
         ),
     )
 
