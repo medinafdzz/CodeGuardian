@@ -24,7 +24,7 @@ from prometheus_client import (
     push_to_gateway,
 )  # Libraries for Prometheus metrics
 
-# Configure logging to show timestamps and log levels for better debugging and monitoring
+# Keep Jenkins logs readable without hiding useful info when something breaks.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -35,8 +35,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger("google").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# DATA MODELS for the issues and the decision of the AI, using Pydantic for validation and easy JSON parsing
-#A model from the SonarQube results after the cleaning and extracting process, with the specific information that the AI needs to analyze and propose a fix
+# These models are the data the agent moves around between Sonar, Gemini and Bitbucket.class
 class Issue(BaseModel):
     file: str
     target_type: str
@@ -47,14 +46,12 @@ class Issue(BaseModel):
     solution: str
     proposed_code: str
 
-# A model for the AI decision, with the information about whether decline the PR, the issues detected and explained by the AI and a high-level comment for the developer
 class Decision(BaseModel):
     decline_pr: bool
     issues: list[Issue]
     comment: str
 
-# -- CLEANING AND EXTRACTING FUNCTIONS --
-# Function that loads the json file received from webhook and extract the context
+# Get the project key from the webhook input and leave it in a format the rest of the flow can reuse.
 def load_webhook_data(filepath: str) -> str:
     # Load the JSON file
     with open(filepath, "r") as file:
@@ -67,7 +64,7 @@ def load_webhook_data(filepath: str) -> str:
 
     return project_key.replace(".git", "").split("/")[-1].lower()
 
-# Function that extract the specific code block affected by the issue
+# Add nearby lines around the issue so the AI can understand the problem with some real context.
 def get_code_context(filepath: str, line_number: int, context_window: int = 15) -> str:
     try:
         if not os.path.exists(
@@ -93,7 +90,7 @@ def get_code_context(filepath: str, line_number: int, context_window: int = 15) 
     except Exception as e:
         return f"Error reading code context: {e}"
 
-# Function to save tokens and clean the json format of the SonarQube results
+# Trim the Sonar response before sending it to the LLM so the prompt stays smaller and cleaner.
 def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
     try:
         # Extract the content text from the raw results and parse it as JSON
@@ -129,7 +126,7 @@ def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
         return []
 
 # -- TOOL INTERACTION FUNCTIONS (MCP AND LLM API) --
-# Function that search for SonarQube issues using the MCP tool
+# Pull only the serious unresolved issues from new code so old debt does not mix into this run.
 async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
     # Configure the SonarQube parameters
@@ -195,7 +192,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
     return top_issues
 
-# Function that sends the SonarQube issues to the Gemini model for analysis and receives the decision
+# Ask Gemini for the final verdict once the most relevant Sonar findings have already been filtered.
 def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     # Configure the Gemini model parameters
     client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
@@ -339,7 +336,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         logger.error(f"The response from the model was: {response.text}")
         sys.exit(1)  # If the AI fails, stop the build
 
-# Function to post comment on Bitbucketusing the MCP tool
+# Leave the general summary in the PR so the developer can see the main result quickly.
 async def post_comment(
     session: ClientSession,
     pr_id: str,
@@ -363,7 +360,7 @@ async def post_comment(
         except Exception as e:
             logger.error(f"Failed to add comment: {e}")
 
-# Function to create a draft PR (using to report in case of push events)
+# Open a draft PR when a push has critical issues and the branch is not the default one.
 async def create_draft_pr(session: ClientSession, project_key: str, workspace: str, source_branch: str) -> str | None:
     try:
         logger.info(f"Creating draft pull request for project {project_key} in branch {source_branch} to report the analysis results.")
@@ -388,7 +385,7 @@ async def create_draft_pr(session: ClientSession, project_key: str, workspace: s
         logger.error(f"Failed to create draft pull request: {e}")
         return None
 
-# Function to publish the draft PR on Bitbucket using the MCP tool (in case we want to notify the developer with the draft PR and let them decide)
+# Publish the draft only after the report is ready so the developer sees everything at once.
 async def publish_draft_pr(session: ClientSession, pr_id: str, project_key: str, workspace: str) -> None:
     try:
         await session.call_tool(
@@ -403,7 +400,7 @@ async def publish_draft_pr(session: ClientSession, pr_id: str, project_key: str,
     except Exception as e:
         logger.error(f"Failed to publish draft pull request: {e}")
 
-# Function to post inline comments on specfic lines of the pull request on BitBucket using MCP tool
+# Add each comment to its exact line so the developer does not have to search for it by hand.
 async def post_inline_comment(
     session: ClientSession, pr_id: str, project_key: str, issue: Issue, workspace: str
 ) -> None:
@@ -438,7 +435,7 @@ async def post_inline_comment(
     except Exception as e:
         logger.error(f"Failed to add inline comment: {e}")
 
-# When a PR is just created, dont need to overwrite or create new comments
+# Avoid posting the same comments again when there is already an open PR for the same branches.
 async def skip_comments_for_pr(session:ClientSession, workspace: str, repo_slug: str, source_branch: str, target_branch: str) -> bool:
     try:
         results = await session.call_tool(
@@ -465,7 +462,7 @@ async def skip_comments_for_pr(session:ClientSession, workspace: str, repo_slug:
         return False
         
 # TODO: remove in case decide not to use at the end of the tfg
-# Function to approve the pull request on Bitbucket using the MCP tool -> Not used at the moment but can be used in future cases
+# Keep this here in case automatic approval is added later, even though the current flow does not use it.
 async def approve_pull_request(
     session: ClientSession, pr_id: str, project_key: str, workspace: str
 ) -> None:
@@ -482,8 +479,8 @@ async def approve_pull_request(
         logger.info(f"Pull request {pr_id} approved successfully.")
     except Exception as e:
         logger.error(f"Failed to approve PR: {e}")
-
-# Function to decline the pull request on Bitbucket using the MCP tool -> Not used at the moment but can be used in future cases
+# TODO: remove in case decide not to use at the end of the tfg
+# Keep this here in case automatic decline is added later, even though the current flow does not use it.
 async def decline_pull_request(
     session: ClientSession, pr_id: str, project_key: str, workspace: str
 ) -> None:
@@ -501,7 +498,7 @@ async def decline_pull_request(
     except Exception as e:
         logger.error(f"Failed to decline PR: {e}")
 
-# Function to report the analysis results to Bitbucket
+# Turn the final AI decision into visible feedback in Bitbucket and decide whether the build should stop.
 async def report_to_bitbucket(project_key: str, decision: Decision) -> None:
     # Configure the Bitbucket tool parameters
     bitbucket_env = os.environ.copy()  # Need this bc need to inherit the PATH
@@ -593,7 +590,7 @@ async def report_to_bitbucket(project_key: str, decision: Decision) -> None:
         logger.error("Build stopped due to critical issues detected by the AI agent.")
         sys.exit(1)
 
-# PRINCIPAL FUNCTION
+# Tie the whole flow together from webhook input to Sonar, AI review and Bitbucket reporting.
 async def main() -> None:
     # Parse the command-line arguments to get the path to the JSON file
     parser = argparse.ArgumentParser()
