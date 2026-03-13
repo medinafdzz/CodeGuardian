@@ -403,24 +403,6 @@ async def publish_draft_pr(session: ClientSession, pr_id: str, project_key: str,
     except Exception as e:
         logger.error(f"Failed to publish draft pull request: {e}")
 
-# Function to decline the pull request on Bitbucket using the MCP tool -> Not used at the moment but can be used in future cases
-async def decline_pull_request(
-    session: ClientSession, pr_id: str, project_key: str, workspace: str
-) -> None:
-    try:
-        await session.call_tool(
-            name="declinePullRequest",
-            arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": project_key,
-                "message": "Pull request declined by CodeGuardian. Found CRITICAL/BLOCKER issues.",
-            },
-        )
-        logger.info(f"Pull request {pr_id} declined successfully.")
-    except Exception as e:
-        logger.error(f"Failed to decline PR: {e}")
-
 # Function to post inline comments on specfic lines of the pull request on BitBucket using MCP tool
 async def post_inline_comment(
     session: ClientSession, pr_id: str, project_key: str, issue: Issue, workspace: str
@@ -456,6 +438,33 @@ async def post_inline_comment(
     except Exception as e:
         logger.error(f"Failed to add inline comment: {e}")
 
+# When a PR is just created, dont need to overwrite or create new comments
+async def skip_comments_for_pr(session:ClientSession, workspace: str, repo_slug: str, source_branch: str, target_branch: str) -> bool:
+    try:
+        results = await session.call_tool(
+            name="getPullRequests",
+            arguments={
+                "workspace": workspace,
+                "repo_slug": repo_slug,
+                "state": "OPEN",
+                "all": True
+            }
+        )
+        pr_data = json.loads(results.content[0].text)
+        prs= pr_data.get("values", []) if isinstance(pr_data, dict) else pr_data
+        
+        for pr in prs:
+            src= pr.get("source", {}).get("branch", {}).get("name")
+            dst= pr.get("destination", {}).get("branch", {}).get("name")
+            if src == source_branch and dst == target_branch:
+                logger.info(f"An open PR already exists for source branch {source_branch} to target branch {target_branch}. Skipping comments to avoid duplication.")
+                return True
+        return False
+    except Exception as e:
+        logger.error(f"Failed to check existing pull requests: {e}")
+        return False
+        
+# TODO: remove in case decide not to use at the end of the tfg
 # Function to approve the pull request on Bitbucket using the MCP tool -> Not used at the moment but can be used in future cases
 async def approve_pull_request(
     session: ClientSession, pr_id: str, project_key: str, workspace: str
@@ -473,6 +482,24 @@ async def approve_pull_request(
         logger.info(f"Pull request {pr_id} approved successfully.")
     except Exception as e:
         logger.error(f"Failed to approve PR: {e}")
+
+# Function to decline the pull request on Bitbucket using the MCP tool -> Not used at the moment but can be used in future cases
+async def decline_pull_request(
+    session: ClientSession, pr_id: str, project_key: str, workspace: str
+) -> None:
+    try:
+        await session.call_tool(
+            name="declinePullRequest",
+            arguments={
+                "workspace": workspace,
+                "pull_request_id": int(pr_id),
+                "repo_slug": project_key,
+                "message": "Pull request declined by CodeGuardian. Found CRITICAL/BLOCKER issues.",
+            },
+        )
+        logger.info(f"Pull request {pr_id} declined successfully.")
+    except Exception as e:
+        logger.error(f"Failed to decline PR: {e}")
 
 # Function to report the analysis results to Bitbucket
 async def report_to_bitbucket(project_key: str, decision: Decision) -> None:
@@ -534,24 +561,30 @@ async def report_to_bitbucket(project_key: str, decision: Decision) -> None:
                     logger.warning(
                         f"Critical issues detected. Opening Draft PR for branch '{current_branch}' -> '{target_branch}'."
                     )
-
-                    draft_pr_id = await create_draft_pr(session_bb, project_key, workspace, current_branch)
-
-                    if draft_pr_id:
-                        summary = [f"**Analysis Summary for {current_branch}**\n\n{decision.comment}\n\n"]
-                        await post_comment(session_bb, draft_pr_id, project_key, summary, workspace)
-
-                        # Post inline comments sequentially to avoid Bitbucket API duplicating comments
-                        for issue in decision.issues:
-                            await post_inline_comment(session_bb, draft_pr_id, project_key, issue, workspace)
-                            await asyncio.sleep(1) # Bc not to overheat Bitbucket
-
-                        await publish_draft_pr(session_bb, draft_pr_id, project_key, workspace)
-                        logger.info(f"Draft PR {draft_pr_id} published for developer review.")
+                    
+                    pr_exist = await skip_comments_for_pr(session_bb, workspace, project_key, current_branch, target_branch)
+                    if pr_exist:
+                        logger.info("Skipping comment posting to avoid duplication in an existing PR.")
                         should_exit = True
+                            
                     else:
-                        logger.error("Failed to create draft pull request to report push analysis results.")
-                        should_exit = True
+                        draft_pr_id = await create_draft_pr(session_bb, project_key, workspace, current_branch)
+
+                        if draft_pr_id:
+                            summary = [f"**Analysis Summary for {current_branch}**\n\n{decision.comment}\n\n"]
+                            await post_comment(session_bb, draft_pr_id, project_key, summary, workspace)
+
+                            # Post inline comments sequentially to avoid Bitbucket API duplicating comments
+                            for issue in decision.issues:
+                                await post_inline_comment(session_bb, draft_pr_id, project_key, issue, workspace)
+                                await asyncio.sleep(1) # Bc not to overheat Bitbucket
+
+                            await publish_draft_pr(session_bb, draft_pr_id, project_key, workspace)
+                            logger.info(f"Draft PR {draft_pr_id} published for developer review.")
+                            should_exit = True
+                        else:
+                            logger.error("Failed to create draft pull request to report push analysis results.")
+                            should_exit = True
 
                 # CASE 2: Critical issues in default branch
                 elif decline:
