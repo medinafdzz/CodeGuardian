@@ -52,12 +52,14 @@ class Decision(BaseModel):
 
 # Generate a key for each issue
 def build_issue_key(issue: Issue) -> str:
-    return f"{issue.file}|{issue.line}|{issue.target_name}"
+    key = f"{issue.file}|{issue.line}|{issue.target_name}"
+    return key.replace(" ", "")
 
-#Read the key os the issues thta just have been commented
+# Read the key of the issues that just have been commented
 def extract_issue_key(comment_text: str) -> str | None:
-    match = re.search(r"`\[CodeGuardian ID: (.*?)\]`", comment_text)
-    return match.group(1) if match else None
+    
+    match = re.search(r"\[CodeGuardian-ID: (.*?)\]", comment_text)
+    return match.group(1).strip() if match else None
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
 def load_webhook_data(filepath: str) -> tuple[str, str]:
@@ -365,8 +367,9 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
                    f"**Proposed code:**\n\n"
                    f"```{file_extension}\n"
                    f"{issue.proposed_code.replace('\\n', '\n')}\n"
-                   f"```"
-                   f"`[CodeGuardian ID: {issue_key}]`")
+                   f"```\n\n" 
+                f"[CodeGuardian-ID: {issue_key}]")
+        
         await session.call_tool(
             name="addPullRequestComment",
             arguments={
@@ -408,8 +411,12 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
             raw_text = content_data.get("raw", "") if isinstance(content_data, dict) else ""
             
             issue_key = extract_issue_key(raw_text)
+            
+            if "[CodeGuardian-ID:" in raw_text:
+                 logger.info(f"Found existing comment with issue key: {issue_key}")
+            
             if not issue_key:
-                continue  # Skip comments that do not have an issue key
+                continue
             
             # Extract the main metadata
             comment_id = comment.get("id")
