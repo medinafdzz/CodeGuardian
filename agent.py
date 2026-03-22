@@ -52,7 +52,7 @@ class Decision(BaseModel):
 
 # Generate a key for each issue
 def build_issue_key(issue: Issue) -> str:
-    return f"{issue.file}|{issue.target_name}|{issue.severity}|{issue.problem[:80]}"
+    return f"{issue.file}|{issue.line}|{issue.target_name}"
 
 #Read the key os the issues thta just have been commented
 def extract_issue_key(comment_text: str) -> str | None:
