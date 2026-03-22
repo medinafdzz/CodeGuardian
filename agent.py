@@ -57,8 +57,7 @@ def build_issue_key(issue: Issue) -> str:
 
 # Read the key of the issues that just have been commented
 def extract_issue_key(comment_text: str) -> str | None:
-    
-    match = re.search(r"\[CodeGuardian-ID: (.*?)\]", comment_text)
+    match = re.search(r"\[CodeGuardian[- ]ID:\s*(.*?)\]", comment_text)
     return match.group(1).strip() if match else None
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
@@ -202,7 +201,8 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         Analyze the following SonarQube technical findings for the project: '{project_key}'.
 
         ### RULES FOR 'proposed_code':
-        - Return ONLY the specific code block that replaces the problematic part.
+        - Return ONLY the exact, raw code snippet that replaces the problematic part.
+        - DO NOT wrap the code in markdown blocks (e.g., do NOT use ```java or ```). Just return the raw text.
         - DO NOT include 'import' statements unless they are absolutely new and necessary.
         - DO NOT redefine the entire function if only one or two lines change.
         - Match the indentation and style of the provided 'code_context'.
@@ -359,6 +359,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
         # Extract the file extension to color in bitbucket
         file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
         issue_key = build_issue_key(issue)
+        
         content = (f"**File:** `{issue.file}`\n\n"
                    f"**Type:** `{issue.target_type}()` | **Name:** `{issue.target_name}`\n\n"
                    f"**Line:** `{issue.line}`\n\n"
@@ -368,7 +369,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
                    f"```{file_extension}\n"
                    f"{issue.proposed_code.replace('\\n', '\n')}\n"
                    f"```\n\n" 
-                f"[CodeGuardian-ID: {issue_key}]")
+                   f"*[CodeGuardian-ID: {issue_key}]*")
         
         await session.call_tool(
             name="addPullRequestComment",
