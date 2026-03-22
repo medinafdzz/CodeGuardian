@@ -127,7 +127,6 @@ def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
         logger.error(f"Error cleaning SonarQube results: {e}")
         return []
 
-# -- TOOL INTERACTION FUNCTIONS (MCP AND LLM API) --
 # Pull only the serious unresolved issues from new code so old debt does not mix into this run.
 async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
@@ -449,34 +448,6 @@ async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key
         logger.error(f"Failed to resolve comment {comment_id}: {e}")
         raise
     
-    
-async def synchronize_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str,issues: list[Issue]) -> int:
-    active_inline_comments = await get_inline_comments(session, pr_id, project_key, workspace)
-    
-    current_issues_by_key = {build_issue_key(issue): issue for issue in issues}
-    current_issue_keys= set(current_issues_by_key.keys())
-    active_issue_keys = set(active_inline_comments.keys())
-    
-    # Resolve comments that are no longer relevant
-    resolved_comments = active_issue_keys - current_issue_keys
-    for issue_key in resolved_comments:
-        comment_info = active_inline_comments[issue_key]
-        if not comment_info.get("resolved", False):
-            await resolve_inline_comment(session, pr_id, project_key, comment_info["comment_id"], workspace)
-            await asyncio.sleep(1)
-    
-    # Create new comments only for issues that appear in the current analysis but do not have an existing inline comment
-    new_issue_keys= current_issue_keys - active_issue_keys
-    created_comments = 0
-    
-    for issue_key in new_issue_keys:
-        issue = current_issues_by_key[issue_key]
-        await post_inline_comment(session, pr_id, project_key, issue, workspace)
-        created_comments += 1
-        await asyncio.sleep(1)
-        
-    return created_comments
-
 # When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
 async def synchronize_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str,issues: list[Issue]) -> int:
     active_inline_comments = await get_inline_comments(session, pr_id, project_key, workspace)
