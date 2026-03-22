@@ -56,7 +56,7 @@ def build_issue_key(issue: Issue) -> str:
 
 #Read the key os the issues thta just have been commented
 def extract_issue_key(comment_text: str) -> str | None:
-    match = re.search(r"<!-- CODEGUARDIAN:(.*?) -->", comment_text)
+    match = re.search(r"`\[CodeGuardian ID: (.*?)\]`", comment_text)
     return match.group(1) if match else None
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
@@ -366,7 +366,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
                    f"```{file_extension}\n"
                    f"{issue.proposed_code.replace('\\n', '\n')}\n"
                    f"```"
-                   f"<!-- CODEGUARDIAN:{issue_key} -->")
+                   f"`[CodeGuardian ID: {issue_key}]`")
         await session.call_tool(
             name="addPullRequestComment",
             arguments={
