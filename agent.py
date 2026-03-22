@@ -6,6 +6,7 @@ import sys
 import google.genai as genai
 import logging
 import time
+import re
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
 from google.genai import (
     types,)  # Library to manage the configuration and types for the Gemini model API
@@ -48,6 +49,15 @@ class Decision(BaseModel):
     decline_pr: bool
     issues: list[Issue]
     comment: str
+
+# Generate a key for each issue
+def build_issue_key(issue: Issue) -> str:
+    return f"{issue.file}|{issue.target_name}|{issue.severity}|{issue.problem[:80]}"
+
+#Read the key os the issues thta just have been commented
+def extract_issue_key(comment_text: str) -> str | None:
+    match = re.search(r"<!-- CODEGUARDIAN:(.*?) -->", comment_text)
+    return match.group(1) if match else None
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
 def load_webhook_data(filepath: str) -> tuple[str, str]:
@@ -347,6 +357,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
     try:
         # Extract the file extension to color in bitbucket
         file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
+        issue_key = build_issue_key(issue)
         content = (f"**File:** `{issue.file}`\n\n"
                    f"**Type:** `{issue.target_type}()` | **Name:** `{issue.target_name}`\n\n"
                    f"**Line:** `{issue.line}`\n\n"
@@ -355,7 +366,8 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
                    f"**Proposed code:**\n\n"
                    f"```{file_extension}\n"
                    f"{issue.proposed_code.replace('\\n', '\n')}\n"
-                   f"```")
+                   f"```"
+                   f"<!-- CODEGUARDIAN:{issue_key} -->")
         await session.call_tool(
             name="addPullRequestComment",
             arguments={
@@ -374,6 +386,125 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
         logger.error(f"Failed to add inline comment: {e}")
         raise
 
+# Request all comments from the pull request so we can inspect previous feedback
+async def get_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str) -> list[dict]:
+    try:
+        results = await session.call_tool(
+            name="getPullRequestComments",
+            arguments={
+                "workspace": workspace,
+                "pull_request_id": int(pr_id),
+                "repo_slug": project_key,
+                "all": True,  # Get all comments, including inline ones
+            },
+        )
+        
+        comments_data = json.loads(results.content[0].text)
+        comments= comments_data.get("values", []) if isinstance(comments_data, dict) else []
+        active_inline_comments = {}
+        
+        # Review every comment in the PR to find the ones created by the agent
+        for comment in comments:
+            content_data = comment.get("content", {})
+            raw_text = content_data.get("raw", "") if isinstance(content_data, dict) else ""
+            
+            issue_key = extract_issue_key(raw_text)
+            if not issue_key:
+                continue  # Skip comments that do not have an issue key
+            
+            # Extract the main metadata
+            comment_id = comment.get("id")
+            resolved = comment.get("resolved", False)
+            inline_data = comment.get("inline", {})
+            
+            # Keep only inline comments that belong to the agent
+            if inline_data and comment_id:
+                active_inline_comments[issue_key] = {
+                    "comment_id": comment_id,
+                    "resolved": resolved,
+                    "inline": inline_data,
+                    "raw_text": raw_text,
+                }
+                
+        return active_inline_comments
+    
+    except Exception as e:
+        logger.error(f"Failed to retrieve inline comments: {e}")
+        raise
+
+# If an issue was solve it must be indicated by marking the comment as resolved in Bitbucket
+async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key: str, comment_id: str, workspace: str) -> None:
+    try:
+        await session.call_tool(
+            name="resolveComment",
+            arguments={
+                "workspace": workspace,
+                "pull_request_id": int(pr_id),
+                "repo_slug": project_key,
+                "comment_id": comment_id,
+            },
+        )
+        logger.info(f"Comment {comment_id} resolved successfully in pull request {pr_id}")
+    except Exception as e:
+        logger.error(f"Failed to resolve comment {comment_id}: {e}")
+        raise
+    
+    
+async def synchronize_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str,issues: list[Issue]) -> int:
+    active_inline_comments = await get_inline_comments(session, pr_id, project_key, workspace)
+    
+    current_issues_by_key = {build_issue_key(issue): issue for issue in issues}
+    current_issue_keys= set(current_issues_by_key.keys())
+    active_issue_keys = set(active_inline_comments.keys())
+    
+    # Resolve comments that are no longer relevant
+    resolved_comments = active_issue_keys - current_issue_keys
+    for issue_key in resolved_comments:
+        comment_info = active_inline_comments[issue_key]
+        if not comment_info.get("resolved", False):
+            await resolve_inline_comment(session, pr_id, project_key, comment_info["comment_id"], workspace)
+            await asyncio.sleep(1)
+    
+    # Create new comments only for issues that appear in the current analysis but do not have an existing inline comment
+    new_issue_keys= current_issue_keys - active_issue_keys
+    created_comments = 0
+    
+    for issue_key in new_issue_keys:
+        issue = current_issues_by_key[issue_key]
+        await post_inline_comment(session, pr_id, project_key, issue, workspace)
+        created_comments += 1
+        await asyncio.sleep(1)
+        
+    return created_comments
+
+# When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
+async def synchronize_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str,issues: list[Issue]) -> int:
+    active_inline_comments = await get_inline_comments(session, pr_id, project_key, workspace)
+    
+    current_issues_by_key = {build_issue_key(issue): issue for issue in issues}
+    current_issue_keys= set(current_issues_by_key.keys())
+    active_issue_keys = set(active_inline_comments.keys())
+    
+    # Resolve comments that are no longer relevant
+    fixed_comments = active_issue_keys - current_issue_keys
+    for issue_key in fixed_comments:
+        comment_info = active_inline_comments[issue_key]
+        if not comment_info.get("resolved", False):
+            await resolve_inline_comment(session, pr_id, project_key, comment_info["comment_id"], workspace)
+            await asyncio.sleep(1)
+    
+    # Create new comments only for the new issues that do not appear in the analysis
+    new_issue_keys= current_issue_keys - active_issue_keys
+    created_comments = 0
+    
+    for issue_key in new_issue_keys:
+        issue = current_issues_by_key[issue_key]
+        await post_inline_comment(session, pr_id, project_key, issue, workspace)
+        created_comments += 1
+        await asyncio.sleep(1)
+        
+    return created_comments
+    
 # Turn the final AI decision into visible comments in Bitbucket for a pull request.
 async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) -> None:
     # Configure the Bitbucket tool parameters
@@ -402,30 +533,32 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
                 )) as (read, write):
             async with ClientSession(read, write) as session_bb:
                 await session_bb.initialize()
-
-                # PR EVENT
-                # Public general comment of the analysis results
+                # Publish the general summary comment in the PR activity
                 if decline:
                     summary_comment = (
                         f"**CodeGuardian Analysis Summary**\n\n"
                         f"Critical issues have been detected in this pull request and should be reviewed before merging.\n\n"
-                        f"{decision.comment}\n\n")
+                        f"{decision.comment}\n\n"
+                    )
                 else:
-                    summary_comment = (f"**CodeGuardian Analysis Summary**\n\n"
-                                       f"No critical issues have been detected in this pull request.\n\n"
-                                       f"{decision.comment}\n\n")
+                    summary_comment = (
+                        f"**CodeGuardian Analysis Summary**\n\n"
+                        f"No critical issues have been detected in this pull request.\n\n"
+                        f"{decision.comment}\n\n"
+                    )
+
                 await post_comment(session_bb, pr_id, project_key, summary_comment, workspace)
 
-                # Post a comment for each error line with the proposed fix by the AI
-                if decision.issues:
-                    for issue in decision.issues:
-                        await post_inline_comment(session_bb, pr_id, project_key, issue, workspace)
-                        await asyncio.sleep(1)
-
-                issue_count = len(decision.issues) if decision.issues else 0
-
-                logger.info(f"Analysis results posted to PR {pr_id}: "
-                            f"Added summary comment and {issue_count} inline comments.")
+                #Synchronize the inline comments with the issues detected by the AI
+                created_inline_comments = await synchronize_inline_comments(session_bb, pr_id, project_key, workspace, decision.issues)
+                
+                issue_count = len(decision.issues)
+                
+                logger.info(
+                    f"Analysis results posted to PR {pr_id}: "
+                    f"{issue_count} active issues in current analysis, "
+                    f"{created_inline_comments} new inline comments created."
+                )
 
     except Exception as e:
         logger.error(f"Failed to report analysis results to Bitbucket: {e}")
