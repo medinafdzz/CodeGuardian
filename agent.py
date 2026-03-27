@@ -221,8 +221,8 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
            - 'target_name': The exact name of the affected target (e.g., "conn", "procesar()"). Do NOT invent names.
            - 'problem': A technical explanation of WHY this is a risk based on reading the actual code snippet.
            - 'solution': Clear instruction on how to fix it. Use actual variable names from the snippet. Do NOT invent code.
-           - 'original_code': The exact raw block of code from the snippet that needs to be replaced.
-           - 'proposed_code': The clean code snippet fixing the issue. Keep it concise.
+           - 'original_code': The exact BUGGY code as it appears now in the snippet. Do not include the fix here.
+           - 'proposed_code': The clean code snippet fixing the issue.The NEW FIXED code. This must be strictly DIFFERENT from 'original_code'. Keep it concise.
         3. 'comment': A 2-sentence high-level executive summary for the lead developer.
         4. 'decline_pr': Set to 'true' ONLY if there are findings with 'BLOCKER' or 'CRITICAL' severity.
 
@@ -364,24 +364,20 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
         file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
         issue_key = build_issue_key(issue)
         
-        clean_code = issue.proposed_code.replace('\\n', '\n').strip()
-        if clean_code.startswith("```"):
-            clean_code = clean_code.split("\n", 1)[-1]
-        if clean_code.endswith("```"):
-            clean_code = clean_code.rsplit("```", 1)[0]
-        clean_code = clean_code.strip()
-        content = (f"**File:** `{issue.file}`\n\n"
-                   f"**Type:** `{issue.target_type}()` | **Name:** `{issue.target_name}`\n\n"
-                   f"**Line:** `{issue.line}`\n\n"
-                   f"**Problem (`{issue.severity}`):** {issue.problem}\n\n"
-                   f"**Proposed solution:** {issue.solution}\n\n"
-                   f"**Block to substitute:**\n\n"
+        # Clean both blocks to avoid markdown issues
+        clean_orig = issue.original_code.replace('\\n', '\n').strip('`').strip()
+        clean_prop = issue.proposed_code.replace('\\n', '\n').strip('`').strip()
+        
+        content = (f"### Code Issue\n\n"
+                   f"**Problem ({issue.severity}):** {issue.problem}\n\n"
+                   f"**Solution:** {issue.solution}\n\n"
+                   f"**Block to substitute:**\n"
                    f"```{file_extension}\n"
-                   f"{issue.original_code.replace('\\n', '\n')}\n"
+                   f"{clean_orig}\n"
                    f"```\n\n"
-                   f"**Proposed code:**\n\n"
+                   f"**Refactored Code:**\n"
                    f"```{file_extension}\n"
-                   f"{issue.proposed_code.replace('\\n', '\n')}\n"
+                   f"{clean_prop}\n"
                    f"```\n\n" 
                    f"*[CodeGuardian-ID: `{issue_key}`]*")
         
@@ -529,11 +525,6 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         max_line = issue_group[-1].line
         base_issue = issue_group[0]
 
-        # clean the original code
-        clean_original = base_issue.original_code.replace('\\n', '\n').strip()
-        if clean_original.startswith("```"):
-            clean_original = clean_original.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
         if len(issue_group) == 1:
             await post_inline_comment(session, pr_id, project_key, base_issue, workspace)
             created_comments += 1
@@ -544,6 +535,10 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         combined_problems = "\n".join([f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group])
         combined_ids = " ".join([f"*[CodeGuardian-ID: `{build_issue_key(i)}`]*" for i in issue_group])
         
+        # Simplified robust cleaning
+        clean_original = base_issue.original_code.replace('\\n', '\n').strip('`').strip()
+        clean_code = base_issue.proposed_code.replace('\\n', '\n').strip('`').strip()
+            
         content = (f"### Block Refactor (Lines {min_line} - {max_line})\n\n"
                    f"**Issues Resolved:**\n\n"
                    f"{combined_problems}\n\n"
