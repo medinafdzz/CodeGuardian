@@ -221,7 +221,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
            - 'target_name': The exact name of the affected target (e.g., "conn", "procesar()"). Do NOT invent names.
            - 'problem': A technical explanation of WHY this is a risk based on reading the actual code snippet.
            - 'solution': Clear instruction on how to fix it. Use actual variable names from the snippet. Do NOT invent code.
-           - 'original_code': The exact BUGGY code as it appears now in the snippet. Do not include the fix here.
+           - 'original_code': The ENTIRE continuous block of original code from the 'code_context' that will be replaced. Do not just return one line; return the whole logical block (e.g., the full method body or the complete try/catch/finally sequence) that corresponds to the refactored solution.
            - 'proposed_code': The clean code snippet fixing the issue.The NEW FIXED code. This must be strictly DIFFERENT from 'original_code'. Keep it concise.
         3. 'comment': A 2-sentence high-level executive summary for the lead developer.
         4. 'decline_pr': Set to 'true' ONLY if there are findings with 'BLOCKER' or 'CRITICAL' severity.
