@@ -44,6 +44,7 @@ class Issue(BaseModel):
     problem: str
     severity: str
     solution: str
+    original_code: str
     proposed_code: str
 
 class Decision(BaseModel):
@@ -220,6 +221,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
            - 'target_name': The exact name of the affected target (e.g., "conn", "procesar()"). Do NOT invent names.
            - 'problem': A technical explanation of WHY this is a risk based on reading the actual code snippet.
            - 'solution': Clear instruction on how to fix it. Use actual variable names from the snippet. Do NOT invent code.
+           - 'original_code': The exact raw block of code from the snippet that needs to be replaced.
            - 'proposed_code': The clean code snippet fixing the issue. Keep it concise.
         3. 'comment': A 2-sentence high-level executive summary for the lead developer.
         4. 'decline_pr': Set to 'true' ONLY if there are findings with 'BLOCKER' or 'CRITICAL' severity.
@@ -522,44 +524,26 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
     
     for (file_path, clean_code), issue_group in grouped_new_issues.items():
         
-        # Order the issues by line
         issue_group.sort(key=lambda x: x.line)
         min_line = issue_group[0].line
         max_line = issue_group[-1].line
-        
-        # Take the first issue as the base
         base_issue = issue_group[0]
-        
-        # If there is only one issue, use the original function
+
+        # clean the original code
+        clean_original = base_issue.original_code.replace('\\n', '\n').strip()
+        if clean_original.startswith("```"):
+            clean_original = clean_original.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
         if len(issue_group) == 1:
             await post_inline_comment(session, pr_id, project_key, base_issue, workspace)
             created_comments += 1
             await asyncio.sleep(1)
             continue
             
-        # Extract the file extension to color in bitbucket
         file_extension = file_path.split(".")[-1] if "." in file_path else "txt"
-        
-        # If there are multiple problem, agroup them
         combined_problems = "\n".join([f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group])
-        combined_ids = "\n".join([f"*[CodeGuardian-ID: `{build_issue_key(i)}`]*" for i in issue_group])
+        combined_ids = " ".join([f"*[CodeGuardian-ID: `{build_issue_key(i)}`]*" for i in issue_group])
         
-        # Clean the original code block to remove markdown wrappers if they exist, to avoid double wrapping in the comment
-        clean_original = base_issue.original_code.replace('\\n', '\n').strip()
-        if clean_original.startswith("```"):
-            clean_original = clean_original.split("\n", 1)[-1]
-        if clean_original.endswith("```"):
-            clean_original = clean_original.rsplit("```", 1)[0]
-        clean_original = clean_original.strip()
-        
-        # Clean the proposed code block to remove markdown wrappers if they exist, to avoid double wrapping in the comment
-        clean_code = base_issue.proposed_code.replace('\\n', '\n').strip()
-        if clean_code.startswith("```"):
-            clean_code = clean_code.split("\n", 1)[-1]
-        if clean_code.endswith("```"):
-            clean_code = clean_code.rsplit("```", 1)[0]
-        clean_code = clean_code.strip()
-
         content = (f"### Block Refactor (Lines {min_line} - {max_line})\n\n"
                    f"**Issues Resolved:**\n\n"
                    f"{combined_problems}\n\n"
