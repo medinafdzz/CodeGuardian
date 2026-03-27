@@ -373,6 +373,10 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
                    f"**Line:** `{issue.line}`\n\n"
                    f"**Problem (`{issue.severity}`):** {issue.problem}\n\n"
                    f"**Proposed solution:** {issue.solution}\n\n"
+                   f"**Block to substitute:**\n\n"
+                   f"```{file_extension}\n"
+                   f"{issue.original_code.replace('\\n', '\n')}\n"
+                   f"```\n\n"
                    f"**Proposed code:**\n\n"
                    f"```{file_extension}\n"
                    f"{issue.proposed_code.replace('\\n', '\n')}\n"
@@ -540,11 +544,31 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         combined_problems = "\n".join([f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group])
         combined_ids = "\n".join([f"*[CodeGuardian-ID: `{build_issue_key(i)}`]*" for i in issue_group])
         
-        content = (f"**File:** `{file_path}`\n\n"
-                   f"**Multiple issues resolved by this refactor:**\n"
+        # Clean the original code block to remove markdown wrappers if they exist, to avoid double wrapping in the comment
+        clean_original = base_issue.original_code.replace('\\n', '\n').strip()
+        if clean_original.startswith("```"):
+            clean_original = clean_original.split("\n", 1)[-1]
+        if clean_original.endswith("```"):
+            clean_original = clean_original.rsplit("```", 1)[0]
+        clean_original = clean_original.strip()
+        
+        # Clean the proposed code block to remove markdown wrappers if they exist, to avoid double wrapping in the comment
+        clean_code = base_issue.proposed_code.replace('\\n', '\n').strip()
+        if clean_code.startswith("```"):
+            clean_code = clean_code.split("\n", 1)[-1]
+        if clean_code.endswith("```"):
+            clean_code = clean_code.rsplit("```", 1)[0]
+        clean_code = clean_code.strip()
+
+        content = (f"### Block Refactor (Lines {min_line} - {max_line})\n\n"
+                   f"**Issues Resolved:**\n\n"
                    f"{combined_problems}\n\n"
-                   f"**Proposed solution:** {base_issue.solution}\n\n"
-                   f"**Proposed block replacement:**\n\n"
+                   f"**Solution:** {base_issue.solution}\n\n"
+                   f"**Block to substitute:**\n"
+                   f"```{file_extension}\n"
+                   f"{clean_original}\n"
+                   f"```\n\n"
+                   f"**Refactored Code:**\n"
                    f"```{file_extension}\n"
                    f"{clean_code}\n"
                    f"```\n\n" 
