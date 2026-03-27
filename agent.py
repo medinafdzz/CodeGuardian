@@ -36,6 +36,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # These models are the data the agent moves around between Sonar, Gemini and Bitbucket.class
 class Issue(BaseModel):
+    sonar_key: str
     file: str
     target_type: str
     target_name: str
@@ -52,8 +53,7 @@ class Decision(BaseModel):
 
 # Generate a key for each issue
 def build_issue_key(issue: Issue) -> str:
-    key = f"{issue.file}|{issue.line}|{issue.target_name}"
-    return key.replace(" ", "")
+    return issue.sonar_key
 
 # Read the key of the issues that just have been commented
 def extract_issue_key(comment_text: str) -> str | None:
@@ -115,6 +115,7 @@ def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
         if isinstance(issues_list, list):
             for issue in issues_list:
                 cleaned.append({
+                    "sonar_key": issue.get("key", "NO_KEY"),
                     "severity": issue.get("severity"),
                     "component": issue.get("component"),
                     "message": issue.get("message"),
@@ -212,6 +213,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         ### TASK:
         1. Identify the 10 most critical issues (if existing) based on severity and technical debt.
         2. For each issue, analyze the 'code_context' snippet to understand the exact code, then provide:
+           - 'sonar_key': The exact 'sonar_key' value provided in the SONARQUBE DATA. Do NOT invent it.
            - 'file': The exact filename/path.
            - 'line': The specific line number.
            - 'target_type': The type of the affected code structure (e.g., "Variable", "Method", "Class", "Interface").
@@ -360,6 +362,12 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
         file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
         issue_key = build_issue_key(issue)
         
+        clean_code = issue.proposed_code.replace('\\n', '\n').strip()
+        if clean_code.startswith("```"):
+            clean_code = clean_code.split("\n", 1)[-1]
+        if clean_code.endswith("```"):
+            clean_code = clean_code.rsplit("```", 1)[0]
+        clean_code = clean_code.strip()
         content = (f"**File:** `{issue.file}`\n\n"
                    f"**Type:** `{issue.target_type}()` | **Name:** `{issue.target_name}`\n\n"
                    f"**Line:** `{issue.line}`\n\n"
@@ -408,6 +416,10 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
         
         # Review every comment in the PR to find the ones created by the agent
         for comment in comments:
+            
+            if comment.get("deleted", False):
+                continue
+            
             content_data = comment.get("content", {})
             raw_text = content_data.get("raw", "") if isinstance(content_data, dict) else ""
             
