@@ -57,8 +57,8 @@ def build_issue_key(issue: Issue) -> str:
 
 # Read the key of the issues that just have been commented
 def extract_issue_key(comment_text: str) -> str | None:
-    match = re.search(r"CodeGuardian[- ]ID.*?([a-zA-Z0-9_\-]{8,})", comment_text)
-    return match.group(1).strip() if match else None
+    matches = re.findall(r"CodeGuardian[- ]ID.*?([a-zA-Z0-9_\-]{8,})", comment_text)
+    return [match.strip() for match in matches] if matches else []
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
 def load_webhook_data(filepath: str) -> tuple[str, str]:
@@ -419,7 +419,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
         else:
             comments = []
             
-        logger.info(f"DEBUG: Bitbucket API devolvió {len(comments)} comentarios en total para esta PR.")
+        logger.info(f"DEBUG: Bitbucket returned {len(comments)} comments in total for this PR.")
         active_inline_comments = {}
         
         # Review every comment in the PR to find the ones created by the agent
@@ -430,9 +430,9 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
             
             comment_str = json.dumps(comment)
             
-            issue_key = extract_issue_key(comment_str)
+            issue_keys = extract_issue_key(comment_str)
 
-            if issue_key:
+            if issue_keys:
             # Extract the main metadata
                 comment_id = comment.get("id")
                 resolved = comment.get("resolved", False)
@@ -440,11 +440,12 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
                 
                 # Keep only inline comments that belong to the agent
                 if inline_data and comment_id:
-                    active_inline_comments[issue_key] = {
-                        "comment_id": comment_id,
-                        "resolved": resolved,
-                        "inline": inline_data,
-                    }
+                    for issue_key in issue_keys:
+                        active_inline_comments[issue_key] = {
+                            "comment_id": comment_id,
+                            "resolved": resolved,
+                            "inline": inline_data,
+                        }
                 
         return active_inline_comments
     
@@ -479,22 +480,97 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
     
     # Resolve comments that are no longer relevant
     fixed_comments = active_issue_keys - current_issue_keys
+    resolved_ids = set() # Avoid to callthe API if is the same comment
+    
     for issue_key in fixed_comments:
         comment_info = active_inline_comments[issue_key]
-        if not comment_info.get("resolved", False):
-            await resolve_inline_comment(session, pr_id, project_key, comment_info["comment_id"], workspace)
+        c_id = comment_info["comment_id"]
+        if not comment_info.get("resolved", False) and c_id not in resolved_ids:
+            await resolve_inline_comment(session, pr_id, project_key, c_id, workspace)
+            resolved_ids.add(c_id)
             await asyncio.sleep(1)
     
     # Create new comments only for the new issues that do not appear in the analysis
-    new_issue_keys= current_issue_keys - active_issue_keys
-    created_comments = 0
+    new_issue_keys = current_issue_keys - active_issue_keys
+    grouped_new_issues = {}
     
     for issue_key in new_issue_keys:
         issue = current_issues_by_key[issue_key]
-        await post_inline_comment(session, pr_id, project_key, issue, workspace)
-        created_comments += 1
-        await asyncio.sleep(1)
         
+        # Clean code
+        clean_code = issue.proposed_code.replace('\\n', '\n').strip()
+        if clean_code.startswith("```"):
+            clean_code = clean_code.split("\n", 1)[-1]
+        if clean_code.endswith("```"):
+            clean_code = clean_code.rsplit("```", 1)[0]
+        clean_code = clean_code.strip()
+        
+        group_key = (issue.file, clean_code)
+        
+        if group_key not in grouped_new_issues:
+            grouped_new_issues[group_key] = []
+            
+        grouped_new_issues[group_key].append(issue)
+    
+    created_comments = 0
+    
+    #Publication of the comments
+    
+    for (file_path, clean_code), issue_group in grouped_new_issues.items():
+        
+        # Order the issues by line
+        issue_group.sort(key=lambda x: x.line)
+        min_line = issue_group[0].line
+        max_line = issue_group[-1].line
+        
+        # Take the first issue as the base
+        base_issue = issue_group[0]
+        
+        # If there is only one issue, use the original function
+        if len(issue_group) == 1:
+            await post_inline_comment(session, pr_id, project_key, base_issue, workspace)
+            created_comments += 1
+            await asyncio.sleep(1)
+            continue
+            
+        # Extract the file extension to color in bitbucket
+        file_extension = file_path.split(".")[-1] if "." in file_path else "txt"
+        
+        # If there are multiple problem, agroup them
+        combined_problems = "\n".join([f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group])
+        combined_ids = "\n".join([f"*[CodeGuardian-ID: `{build_issue_key(i)}`]*" for i in issue_group])
+        
+        content = (f"**File:** `{file_path}`\n\n"
+                   f"**Multiple issues resolved by this refactor:**\n"
+                   f"{combined_problems}\n\n"
+                   f"**Proposed solution:** {base_issue.solution}\n\n"
+                   f"**Proposed block replacement:**\n\n"
+                   f"```{file_extension}\n"
+                   f"{clean_code}\n"
+                   f"```\n\n" 
+                   f"{combined_ids}")
+        
+        try:
+            await session.call_tool(
+                name="addPullRequestComment",
+                arguments={
+                    "workspace": workspace,
+                    "pull_request_id": int(pr_id),
+                    "repo_slug": project_key,
+                    "content": content,
+                    "inline": {
+                        "path": file_path,
+                        "to": int(min_line),
+                    },
+                },
+            )
+            logger.info(f"Grouped inline comment covering lines {min_line}-{max_line} added successfully to PR {pr_id}")
+            created_comments += 1
+            await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"Failed to add grouped inline comment: {e}")
+            raise
+            
     return created_comments
     
 # Turn the final AI decision into visible comments in Bitbucket for a pull request.
