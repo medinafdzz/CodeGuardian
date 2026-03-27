@@ -57,7 +57,7 @@ def build_issue_key(issue: Issue) -> str:
 
 # Read the key of the issues that just have been commented
 def extract_issue_key(comment_text: str) -> str | None:
-    match = re.search(r"\[CodeGuardian[- ]ID:\s*`?([^`\]]+)`?\]", comment_text)
+    match = re.search(r"CodeGuardian[- ]ID.*?([a-zA-Z0-9_\-]{8,})", comment_text)
     return match.group(1).strip() if match else None
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
@@ -411,7 +411,15 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
         )
         
         comments_data = json.loads(results.content[0].text)
-        comments= comments_data.get("values", []) if isinstance(comments_data, dict) else []
+        
+        if isinstance(comments_data, dict):
+            comments = comments_data.get("values", [])
+        elif isinstance(comments_data, list):
+            comments = comments_data
+        else:
+            comments = []
+            
+        logger.info(f"DEBUG: Bitbucket API devolvió {len(comments)} comentarios en total para esta PR.")
         active_inline_comments = {}
         
         # Review every comment in the PR to find the ones created by the agent
@@ -420,30 +428,23 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
             if comment.get("deleted", False):
                 continue
             
-            content_data = comment.get("content", {})
-            raw_text = content_data.get("raw", "") if isinstance(content_data, dict) else ""
+            comment_str = json.dumps(comment)
             
-            issue_key = extract_issue_key(raw_text)
-            
-            if "[CodeGuardian-ID:" in raw_text:
-                 logger.info(f"Found existing comment with issue key: {issue_key}")
-            
-            if not issue_key:
-                continue
-            
+            issue_key = extract_issue_key(comment_str)
+
+            if issue_key:
             # Extract the main metadata
-            comment_id = comment.get("id")
-            resolved = comment.get("resolved", False)
-            inline_data = comment.get("inline", {})
-            
-            # Keep only inline comments that belong to the agent
-            if inline_data and comment_id:
-                active_inline_comments[issue_key] = {
-                    "comment_id": comment_id,
-                    "resolved": resolved,
-                    "inline": inline_data,
-                    "raw_text": raw_text,
-                }
+                comment_id = comment.get("id")
+                resolved = comment.get("resolved", False)
+                inline_data = comment.get("inline", {})
+                
+                # Keep only inline comments that belong to the agent
+                if inline_data and comment_id:
+                    active_inline_comments[issue_key] = {
+                        "comment_id": comment_id,
+                        "resolved": resolved,
+                        "inline": inline_data,
+                    }
                 
         return active_inline_comments
     
