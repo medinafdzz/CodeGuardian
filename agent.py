@@ -220,11 +220,11 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
            - 'file': The exact filename/path.
            - 'line': The specific line number.
            - 'target_type': The type of the affected code structure (e.g., "Variable", "Method", "Class", "Interface").
-           - 'target_name': The exact name of the affected target (e.g., "conn", "procesar()"). Do NOT invent names.
-            - 'problem': TECHNICAL RISK EXPLANATION. MAX 15 WORDS.
+           - 'target_name': The exact name of the affected target. Do NOT invent names.
+           - 'problem': TECHNICAL RISK EXPLANATION. MAX 15 WORDS.
            - 'solution': STEP-BY-STEP FIX. MAX 15 WORDS. BE PRECISE AND TECHNICAL. DO NOT INVENT GENERAL SOLUTIONS.
-           - 'original_code': The ENTIRE continuous block of original code from the 'code_context' that will be replaced. Do not just return one line; return the whole logical block (e.g., the full method body or the complete try/catch/finally sequence) that corresponds to the refactored solution.
-           - 'proposed_code': NEW FIXED code block. Strictly DIFFERENT from 'original_code'. NO EXPLANATIONS.
+           - 'original_code': ONLY the specific problematic line(s). Do not include surrounding context lines.
+           - 'proposed_code': ONLY the specific new line(s) that replace the 'original_code'. Minimalist snippet.
         3. 'comment': HIGH-LEVEL EXECUTIVE SUMMARY. MAX 20 WORDS.
         4. 'decline_pr': Set to 'true' ONLY if there are findings with 'BLOCKER' or 'CRITICAL' severity.
 
@@ -247,6 +247,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             response_mime_type="application/json",
             response_schema=Decision,
             temperature=0,  # Adjust the temperature to cold trying to get the same response
+            tools=[], # Avoid searching tools/functions to keep the response deterministic and focused on the analysis
         ),
     )
 
@@ -354,7 +355,6 @@ async def post_comment(session: ClientSession, pr_id: str, project_key: str, com
             },
         )
         logger.info(f"Comment added successfully to the pull request {pr_id}")
-        await asyncio.sleep(0.2)  # To avoid overheating the bitbucket API
     except Exception as e:
         logger.error(f"Failed to add comment: {e}")
         raise
