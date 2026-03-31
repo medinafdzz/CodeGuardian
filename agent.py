@@ -247,7 +247,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             response_mime_type="application/json",
             response_schema=Decision,
             temperature=0,  # Adjust the temperature to cold trying to get the same response
-            tools=[], # Avoid searching tools/functions to keep the response deterministic and focused on the analysis
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
         ),
     )
 
