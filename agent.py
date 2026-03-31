@@ -221,11 +221,11 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
            - 'line': The specific line number.
            - 'target_type': The type of the affected code structure (e.g., "Variable", "Method", "Class", "Interface").
            - 'target_name': The exact name of the affected target (e.g., "conn", "procesar()"). Do NOT invent names.
-           - 'problem': A technical explanation of WHY this is a risk based on reading the actual code snippet.
-           - 'solution': Clear instruction on how to fix it. Use actual variable names from the snippet. Do NOT invent code.
+            - 'problem': TECHNICAL RISK EXPLANATION. MAX 15 WORDS.
+           - 'solution': STEP-BY-STEP FIX. MAX 15 WORDS. BE PRECISE AND TECHNICAL. DO NOT INVENT GENERAL SOLUTIONS.
            - 'original_code': The ENTIRE continuous block of original code from the 'code_context' that will be replaced. Do not just return one line; return the whole logical block (e.g., the full method body or the complete try/catch/finally sequence) that corresponds to the refactored solution.
-           - 'proposed_code': The clean code snippet fixing the issue.The NEW FIXED code. This must be strictly DIFFERENT from 'original_code'. Keep it concise.
-        3. 'comment': A 2-sentence high-level executive summary for the lead developer.
+           - 'proposed_code': NEW FIXED code block. Strictly DIFFERENT from 'original_code'. NO EXPLANATIONS.
+        3. 'comment': HIGH-LEVEL EXECUTIVE SUMMARY. MAX 20 WORDS.
         4. 'decline_pr': Set to 'true' ONLY if there are findings with 'BLOCKER' or 'CRITICAL' severity.
 
         ### OUTPUT FORMAT:
@@ -354,7 +354,7 @@ async def post_comment(session: ClientSession, pr_id: str, project_key: str, com
             },
         )
         logger.info(f"Comment added successfully to the pull request {pr_id}")
-        await asyncio.sleep(1)  # To avoid overheating the bitbucket API
+        await asyncio.sleep(0.2)  # To avoid overheating the bitbucket API
     except Exception as e:
         logger.error(f"Failed to add comment: {e}")
         raise
@@ -499,7 +499,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         if not comment_info.get("resolved", False) and c_id not in resolved_ids:
             await resolve_inline_comment(session, pr_id, project_key, c_id, workspace)
             resolved_ids.add(c_id)
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.2)
 
     # Create new comments only for the new issues that do not appear in the analysis
     new_issue_keys = current_issue_keys - active_issue_keys
@@ -508,14 +508,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
     for issue_key in new_issue_keys:
         issue = current_issues_by_key[issue_key]
 
-        # Clean code
-        clean_code = issue.proposed_code.replace('\\n', '\n').strip()
-        if clean_code.startswith("```"):
-            clean_code = clean_code.split("\n", 1)[-1]
-        if clean_code.endswith("```"):
-            clean_code = clean_code.rsplit("```", 1)[0]
-        clean_code = clean_code.strip()
-
+        clean_code = issue.proposed_code.replace('\\n', '\n').strip('`').strip()
         group_key = (issue.file, clean_code)
 
         if group_key not in grouped_new_issues:
@@ -537,7 +530,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         if len(issue_group) == 1:
             await post_inline_comment(session, pr_id, project_key, base_issue, workspace)
             created_comments += 1
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.2)
             continue
 
         file_extension = file_path.split(".")[-1] if "." in file_path else "txt"
@@ -577,7 +570,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             )
             logger.info(f"Grouped inline comment covering lines {min_line}-{max_line} added successfully to PR {pr_id}")
             created_comments += 1
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.2)
         except Exception as e:
             logger.error(f"Failed to add grouped inline comment: {e}")
             raise
@@ -607,8 +600,8 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
         # Start the MCP client session for Bitbucket
         async with stdio_client(
                 StdioServerParameters(
-                    command="npx",
-                    args=["--no-install", "--quiet", "bitbucket-mcp@latest"],
+                    command="bitbucket-mcp",
+                    args=[],
                     env=bitbucket_env,
                 )) as (read, write):
             async with ClientSession(read, write) as session_bb:
