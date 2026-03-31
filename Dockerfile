@@ -21,6 +21,9 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip
 
+# Installation of Python packages for the Jenkins pipelines, including MCP and the Google GenAI client library
+RUN python3 -m pip install -q google-genai mcp prometheus-client pydantic --break-system-packages
+
 # Add the Jenkins user to the Docker group to allow it to run Docker commands
 RUN groupadd -g 999 docker && usermod -aG docker jenkins
 
