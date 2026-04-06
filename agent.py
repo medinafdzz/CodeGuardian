@@ -3,6 +3,7 @@ import json
 import asyncio
 import os
 import sys
+from functools import lru_cache
 import google.genai as genai
 import logging
 import time
@@ -86,12 +87,17 @@ def load_webhook_data(filepath: str) -> tuple[str, str]:
 
 
 # Add nearby lines around the issue so the AI can understand the problem with some real context.
+@lru_cache(maxsize=256)
+def _read_file_lines(filepath: str) -> list[str]:
+    if not os.path.exists(filepath):
+        raise FileNotFoundError("File not found.")
+    with open(filepath, "r", encoding="utf-8") as file:
+        return file.readlines()
+
+
 def get_code_context(filepath: str, line_number: int, context_window: int = 15) -> str:
     try:
-        if not os.path.exists(filepath):
-            return "File not found."
-        with open(filepath, "r", encoding="utf-8") as file:
-            lines = file.readlines()
+        lines = _read_file_lines(filepath)
 
         # Calculate the start and end lines for the code snippet
         start_line = max(0, line_number - context_window - 1)  # -1 because line numbers are typically 1-indexed
