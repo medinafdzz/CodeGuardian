@@ -1,4 +1,3 @@
-# For Jenkins, I need the Dockerfile since I need to install things inside that don't come in the default image.
 FROM jenkins/jenkins:2.541.2-jdk21
 USER root
 RUN apt-get update && apt-get install -y lsb-release
@@ -9,12 +8,20 @@ RUN echo "deb [arch=$(dpkg --print-architecture) \
   https://download.docker.com/linux/debian \
   $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
 
-# Installation of Docker CLI + Node.js/NPM to use it in Jenkins pipelines
-RUN apt-get update && apt-get install -y \
+  RUN echo "Acquire::http::Pipeline-Depth 0;" > /etc/apt/apt.conf.d/99fixbadproxy && \
+    echo "Acquire::http::No-Cache true;" >> /etc/apt/apt.conf.d/99fixbadproxy && \
+    echo "Acquire::BrokenProxy true;" >> /etc/apt/apt.conf.d/99fixbadproxy
+    
+# Installation of Docker CLI, Node.js/NPM, and C++ Build Tools (NUEVO)
+RUN apt-get clean && rm -rf /var/lib/apt/lists/* && \
+    apt-get update --fix-missing && apt-get install -y --fix-missing \
     docker-ce-cli \
     git \
     nodejs \
-    npm
+    npm \
+    build-essential \
+    cmake \
+    cppcheck
 
 # Installation of Python and pip to use it in Jenkins pipelines
 RUN apt-get update && apt-get install -y \
