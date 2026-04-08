@@ -499,6 +499,9 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
 
             if comment.get("resolved", False):
                 continue
+            
+            if comment.get("parent"):
+                continue
 
             raw_text = comment.get("content", {}).get("raw", "")
             issue_keys = extract_issue_key(raw_text)
@@ -539,9 +542,10 @@ async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key
             },
         )
         logger.info(f"Comment {comment_id} resolved successfully in pull request {pr_id}")
+        return True
     except Exception as e:
         logger.error(f"Failed to resolve comment {comment_id}: {e}")
-        raise
+        return False
 
 
 # When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
@@ -574,9 +578,10 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             comment_info = active_inline_comments[sample_issue_key]
 
             if not comment_info.get("resolved", False):
-                await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
-                resolved_ids.add(comment_id)
-                await asyncio.sleep(0.2)
+                resolved= await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
+                if resolved:
+                    resolved_ids.add(comment_id)
+                    await asyncio.sleep(0.2)
 
     # Create new comments only for the new issues that do not appear in the analysis
     new_issue_keys = current_issue_keys - active_issue_keys
