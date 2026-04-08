@@ -78,8 +78,16 @@ def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
 
 # Read the key of the issues that just have been commented
 def extract_issue_key(comment_text: str) -> list[str]:
-    matches = re.findall(r"CodeGuardian[- ]ID.*?([a-zA-Z0-9_\-]{8,})", comment_text)
-    return [match.strip() for match in matches] if matches else []
+    keys = set()
+
+    blocks = re.findall(r"<!--\s*CodeGuardian-IDs:\s*([^>]+?)\s*-->", comment_text)
+    for block in blocks:
+        for key in block.split(","):
+            key = key.strip()
+            if key:
+                keys.add(key)
+
+    return list(keys)
 
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
@@ -205,10 +213,32 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
         sys.exit(1)  # If SonarQube fails, stop the build to avoid false positives in the pull request analysis
     # Clean the SonarQube results to save tokens and optimize the prompt by the most critical issues
     all_issues = clean_sonar_results(results)
-    severities = ["BLOCKER", "CRITICAL"]
-    cleaned_issues = [issue for issue in all_issues if issue["severity"] in severities]
+    severity_order = {
+        "BLOCKER": 0,
+        "CRITICAL": 1,
+        "HIGH": 1,
+        "MAJOR": 2,
+        "MEDIUM": 2,
+        "MINOR": 3,
+        "LOW": 3,
+        "INFO": 4,
+    }
 
-    top_issues = cleaned_issues[:10]  # Limit to the 10 most critical issues
+    cleaned_issues = [
+        issue for issue in all_issues
+        if issue.get("severity") in severity_order
+    ]
+
+    cleaned_issues.sort(
+        key=lambda issue: (
+            severity_order.get(issue.get("severity"), 99),
+            issue.get("file", ""),
+            issue.get("line", 0),
+        )
+    )
+
+    max_issues = int(os.getenv("CODEGUARDIAN_MAX_ISSUES", "20"))
+    top_issues = cleaned_issues[:max_issues]  # Limit the number of issues sent to the AI after sorting by severity
 
     for issue in top_issues:
         issue["code_context"] = get_code_context(issue["file"], issue["line"])
@@ -238,7 +268,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         - MUST use physical line breaks (hard returns) for multiple lines. DO NOT use literal '\n' characters.
 
         ### TASK:
-        1. Identify the 10 most critical issues (if existing) based on severity and technical debt.
+        1. Analyze all provided issues (if existing) based on severity and technical debt.
         2. For each issue, analyze the 'code_context' snippet to understand the exact code, then provide:
            - 'sonar_key': The exact 'sonar_key' value provided in the SONARQUBE DATA. Do NOT invent it.
            - 'file': The exact filename/path.
@@ -411,7 +441,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
                    f"```{file_extension}\n"
                    f"{clean_prop}\n"
                    f"```\n\n"
-                   f"*[CodeGuardian-ID: `{issue_key}`]*")
+                   f"<!-- CodeGuardian-IDs: {issue_key} -->")
 
         await session.call_tool(
             name="addPullRequestComment",
@@ -599,9 +629,8 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         combined_problems = "\n".join(
             [f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group]
         )
-        combined_ids = " ".join(
-            [f"*[CodeGuardian-ID: `{build_issue_key(i)}`]*" for i in issue_group]
-        )
+        group_issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issue_group))
+        hidden_ids = f"<!-- CodeGuardian-IDs: {','.join(group_issue_keys)} -->"
 
         content = (f"### Block Refactor (Lines {min_line} - {max_line})\n\n"
                    f"**Issues Detected in this block:**\n\n"
@@ -615,7 +644,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                    f"```{file_extension}\n"
                    f"{clean_proposed}\n"
                    f"```\n\n"
-                   f"{combined_ids}")
+                   f"{hidden_ids}")
 
         try:
             await session.call_tool(
@@ -676,11 +705,20 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
                     summary_comment = (
                         f"**CodeGuardian Analysis Summary**\n\n"
                         f"Critical issues have been detected in this pull request and should be reviewed before merging.\n\n"
-                        f"{decision.comment}\n\n")
+                        f"{decision.comment}\n\n"
+                    )
+                elif decision.issues:
+                    summary_comment = (
+                        f"**CodeGuardian Analysis Summary**\n\n"
+                        f"Issues have been detected in this pull request, but none of them require rejecting the PR.\n\n"
+                        f"{decision.comment}\n\n"
+                    )
                 else:
-                    summary_comment = (f"**CodeGuardian Analysis Summary**\n\n"
-                                       f"No critical issues have been detected in this pull request.\n\n"
-                                       f"{decision.comment}\n\n")
+                    summary_comment = (
+                        f"**CodeGuardian Analysis Summary**\n\n"
+                        f"No relevant issues have been detected in this pull request.\n\n"
+                        f"{decision.comment}\n\n"
+                    )
 
                 await post_comment(session_bb, pr_id, project_key, summary_comment, workspace)
 
@@ -716,19 +754,19 @@ async def main() -> None:
     issues = await fetch_sonar_issues(project_key)
 
     if not issues:
-        logger.info("No critical issues found by SonarQube. Posting a clean analysis summary to the pull request.")
+        logger.info("No relevant issues found by SonarQube. Posting a clean analysis summary to the pull request.")
 
         auto_decision = Decision(
             decline_pr=False,
             issues=[],
             comment=
-            "CodeGuardian analyzed this pull request and did not detect any CRITICAL or BLOCKER issues in the modified code.",
+            "CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
         )
 
         await report_to_bitbucket(pr_id, project_key, auto_decision)
         return
 
-    logger.info(f"CRITICAL or BLOCKER issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
+    logger.info(f"Relevant issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
     # Analyze the code with the AI
     decision = analyze_code_with_gemini(project_key, issues)
     decision.issues = deduplicate_issues(decision.issues)
