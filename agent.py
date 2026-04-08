@@ -430,6 +430,10 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
         clean_orig = issue.original_code.replace('\\n', '\n').strip('`').strip()
         clean_prop = issue.proposed_code.replace('\\n', '\n').strip('`').strip()
 
+        if not clean_orig or not clean_prop or clean_orig == clean_prop:
+            logger.info(f"Skipping issue {issue_key} because it does not produce a real code change.")
+            return
+    
         content = (f"### Code Issue\n\n"
                    f"**Problem ({issue.severity}):** {issue.problem}\n\n"
                    f"**Solution:** {issue.solution}\n\n"
@@ -622,6 +626,12 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             await post_inline_comment(session, pr_id, project_key, base_issue, workspace)
             created_comments += 1
             await asyncio.sleep(0.2)
+            continue
+
+        if not clean_original or not clean_proposed or clean_original == clean_proposed:
+            logger.info(
+                f"Skipping grouped comment in {file_path} lines {min_line}-{max_line} because it does not produce a real code change."
+            )
             continue
 
         file_extension = file_path.split(".")[-1] if "." in file_path else "txt"
