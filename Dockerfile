@@ -1,47 +1,77 @@
-FROM jenkins/jenkins:2.541.2-jdk21
-USER root
-RUN apt-get update && apt-get install -y lsb-release
-RUN curl -fsSLo /usr/share/keyrings/docker-archive-keyring.asc \
-  https://download.docker.com/linux/debian/gpg
-RUN echo "deb [arch=$(dpkg --print-architecture) \
-  signed-by=/usr/share/keyrings/docker-archive-keyring.asc] \
-  https://download.docker.com/linux/debian \
-  $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+FROM jenkins/jenkins:2.541.3-jdk21
 
-  RUN echo "Acquire::http::Pipeline-Depth 0;" > /etc/apt/apt.conf.d/99fixbadproxy && \
+USER root
+
+# Base utilities + Docker repo
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    gnupg \
+    lsb-release \
+    unzip \
+    zip \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
+    -o /usr/share/keyrings/docker-archive-keyring.asc
+
+RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.asc] \
+    https://download.docker.com/linux/debian \
+    $(lsb_release -cs) stable" \
+    > /etc/apt/sources.list.d/docker.list
+
+# Avoid flaky proxy/cache issues during apt
+RUN echo "Acquire::http::Pipeline-Depth 0;" > /etc/apt/apt.conf.d/99fixbadproxy && \
     echo "Acquire::http::No-Cache true;" >> /etc/apt/apt.conf.d/99fixbadproxy && \
     echo "Acquire::BrokenProxy true;" >> /etc/apt/apt.conf.d/99fixbadproxy
-    
-# Installation of Docker CLI, Node.js/NPM, and C++ Build Tools (NUEVO)
-RUN apt-get clean && rm -rf /var/lib/apt/lists/* && \
-    apt-get update --fix-missing && apt-get install -y --fix-missing \
+
+# Main toolchain: Docker CLI + Java build tools + Python + C/C++ + Node
+RUN apt-get update && apt-get install -y --no-install-recommends \
     docker-ce-cli \
-    git \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    python-is-python3 \
+    maven \
+    gradle \
     nodejs \
     npm \
     build-essential \
+    gcc \
+    g++ \
+    make \
     cmake \
-    cppcheck
+    ninja-build \
+    cppcheck \
+    clang \
+    clang-tidy \
+    gdb \
+    valgrind \
+    shellcheck \
+    && rm -rf /var/lib/apt/lists/*
 
-# Installation of Python and pip to use it in Jenkins pipelines
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip
+# Python packages used by your pipelines / agent
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+    google-genai \
+    mcp \
+    prometheus-client \
+    pydantic
 
-# Installation of Python packages for the Jenkins pipelines, including MCP and the Google GenAI client library
-RUN python3 -m pip install -q google-genai mcp prometheus-client pydantic --break-system-packages
-
-# Add the Jenkins user to the Docker group to allow it to run Docker commands
-RUN groupadd -g 999 docker && usermod -aG docker jenkins
-
-# Installation of SonarScanner and MCP Servers for GitHub and SonarQube
+# Global npm tools
+# Keep your current package names if they already work in your environment
 RUN npm install -g \
     @sonar/scan \
     mcp-sonarqube \
     bitbucket-mcp
 
-# Installation of Jenkins plugins for the pipeline
-RUN jenkins-plugin-cli --plugins "blueocean docker-workflow json-path-api"
+# Jenkins plugins
+RUN jenkins-plugin-cli --plugins \
+    "blueocean docker-workflow json-path-api"
 
-# Jenkins needs to run as the jenkins user
+# Docker group access for Jenkins user
+RUN groupadd -f docker && usermod -aG docker jenkins
+
 USER jenkins
