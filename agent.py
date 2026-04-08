@@ -58,8 +58,23 @@ class Decision(BaseModel):
 
 # Generate a key for each issue
 def build_issue_key(issue: Issue) -> str:
-    return issue.sonar_key
+    if issue.sonar_key and issue.sonar_key != "NO_KEY":
+        return issue.sonar_key
+    return f"{issue.file}:{issue.line}:{issue.target_name}:{issue.severity}"
 
+# In case the AI returns duplicated issues, we can filter them by their SonarQube key to avoid duplicated comments in Bitbucket.
+def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
+    seen = set()
+    unique_issues = []
+
+    for issue in issues:
+        issue_key = build_issue_key(issue)
+        if issue_key in seen:
+            continue
+        seen.add(issue_key)
+        unique_issues.append(issue)
+
+    return unique_issues
 
 # Read the key of the issues that just have been commented
 def extract_issue_key(comment_text: str) -> list[str]:
@@ -211,6 +226,9 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         Analyze the following SonarQube technical findings for the project: '{project_key}'.
 
         ### RULES FOR 'proposed_code':
+        - If multiple nearby issues in the same file are fixed by the same block replacement,
+          generate ONE shared replacement block, not separate per-line fixes.
+        - Prefer the simplest valid fix with the fewest code changes possible.        
         - Return ONLY the exact, raw code snippet that replaces the problematic part.
         - DO NOT wrap the code in markdown blocks (e.g., do NOT use ```java or ```). Just return the raw text.
         - DO NOT include 'import' statements unless they are absolutely new and necessary.
@@ -228,9 +246,13 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
            - 'target_type': The type of the affected code structure (e.g., "Variable", "Method", "Class", "Interface").
            - 'target_name': The exact name of the affected target. Do NOT invent names.
            - 'problem': TECHNICAL RISK EXPLANATION. MAX 15 WORDS.
-           - 'solution': STEP-BY-STEP FIX. MAX 15 WORDS. BE PRECISE AND TECHNICAL. DO NOT INVENT GENERAL SOLUTIONS.
-           - 'original_code': ONLY the specific problematic line(s). Do not include surrounding context lines.
-           - 'proposed_code': ONLY the specific new line(s) that replace the 'original_code'. Minimalist snippet.
+           - 'solution': STEP-BY-STEP FIX. MAX 15 WORDS. BE PRECISE AND TECHNICAL.
+           - 'original_code': RETURN THE COMPLETE CONTIGUOUS CODE BLOCK THAT MUST BE REPLACED.
+             If two or more nearby issues in the same file can be solved with the same refactor,
+             return the SAME full 'original_code' block for all of them.
+           - 'proposed_code': RETURN THE COMPLETE REPLACEMENT BLOCK FOR 'original_code'.
+             Apply the SMALLEST SAFE CHANGE that fixes the issue or grouped nearby issues.
+             DO NOT return only one line if the real fix is a block replacement.
         3. 'comment': HIGH-LEVEL EXECUTIVE SUMMARY. MAX 20 WORDS.
         4. 'decline_pr': Set to 'true' ONLY if there are findings with 'BLOCKER' or 'CRITICAL' severity.
 
@@ -411,7 +433,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
 
 
 # Request all comments from the pull request so can inspect previous feedback
-async def get_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str) -> list[dict]:
+async def get_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str) -> dict[str, dict]:
     try:
         results = await session.call_tool(
             name="getPullRequestComments",
@@ -441,9 +463,11 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
             if comment.get("deleted", False):
                 continue
 
-            comment_str = json.dumps(comment)
+            if comment.get("resolved", False):
+                continue
 
-            issue_keys = extract_issue_key(comment_str)
+            raw_text = comment.get("content", {}).get("raw", "")
+            issue_keys = extract_issue_key(raw_text)
 
             if issue_keys:
                 # Extract the main metadata
@@ -495,38 +519,69 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
     current_issue_keys = set(current_issues_by_key.keys())
     active_issue_keys = set(active_inline_comments.keys())
 
-    # Resolve comments that are no longer relevant
-    fixed_comments = active_issue_keys - current_issue_keys
-    resolved_ids = set()  # Avoid to callthe API if is the same comment
+    # Group the tracked issue keys by comment_id to avoid resolving a grouped comment too early
+    comment_to_issue_keys = {}
 
-    for issue_key in fixed_comments:
-        comment_info = active_inline_comments[issue_key]
-        c_id = comment_info["comment_id"]
-        if not comment_info.get("resolved", False) and c_id not in resolved_ids:
-            await resolve_inline_comment(session, pr_id, project_key, c_id, workspace)
-            resolved_ids.add(c_id)
-            await asyncio.sleep(0.2)
+    for issue_key, comment_info in active_inline_comments.items():
+        comment_id = comment_info["comment_id"]
+        if comment_id not in comment_to_issue_keys:
+            comment_to_issue_keys[comment_id] = set()
+        comment_to_issue_keys[comment_id].add(issue_key)
+
+    resolved_ids = set()
+
+    # Resolve a comment only when ALL its tracked issues have disappeared from the current analysis
+    for comment_id, comment_issue_keys in comment_to_issue_keys.items():
+        if comment_id in resolved_ids:
+            continue
+
+        if comment_issue_keys.isdisjoint(current_issue_keys):
+            sample_issue_key = next(iter(comment_issue_keys))
+            comment_info = active_inline_comments[sample_issue_key]
+
+            if not comment_info.get("resolved", False):
+                await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
+                resolved_ids.add(comment_id)
+                await asyncio.sleep(0.2)
 
     # Create new comments only for the new issues that do not appear in the analysis
     new_issue_keys = current_issue_keys - active_issue_keys
-    grouped_new_issues = {}
+    grouped_candidates = {}
 
     for issue_key in new_issue_keys:
         issue = current_issues_by_key[issue_key]
 
-        clean_code = issue.proposed_code.replace('\\n', '\n').strip('`').strip()
-        group_key = (issue.file, clean_code)
+        clean_original = issue.original_code.replace('\\n', '\n').strip('`').strip()
+        clean_proposed = issue.proposed_code.replace('\\n', '\n').strip('`').strip()
 
-        if group_key not in grouped_new_issues:
-            grouped_new_issues[group_key] = []
+        group_key = (issue.file, clean_original, clean_proposed)
 
-        grouped_new_issues[group_key].append(issue)
+        if group_key not in grouped_candidates:
+            grouped_candidates[group_key] = []
+
+        grouped_candidates[group_key].append(issue)
+
+    grouped_new_issues = []
+
+    for (file_path, clean_original, clean_proposed), issues_in_group in grouped_candidates.items():
+        issues_in_group.sort(key=lambda x: x.line)
+
+        current_cluster = [issues_in_group[0]]
+
+        for issue in issues_in_group[1:]:
+            if issue.line - current_cluster[-1].line <= 3:
+                current_cluster.append(issue)
+            else:
+                grouped_new_issues.append((file_path, clean_original, clean_proposed, current_cluster))
+                current_cluster = [issue]
+
+        grouped_new_issues.append((file_path, clean_original, clean_proposed, current_cluster))
 
     created_comments = 0
 
     #Publication of the comments
 
-    for (file_path, clean_code), issue_group in grouped_new_issues.items():
+    for file_path, clean_original, clean_proposed, issue_group in grouped_new_issues:
 
         issue_group.sort(key=lambda x: x.line)
         min_line = issue_group[0].line
@@ -540,14 +595,16 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             continue
 
         file_extension = file_path.split(".")[-1] if "." in file_path else "txt"
-        combined_problems = "\n".join([f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group])
-        combined_ids = " ".join([f"*[CodeGuardian-ID: `{build_issue_key(i)}`]*" for i in issue_group])
 
-        # Simplified robust cleaning
-        clean_original = base_issue.original_code.replace('\\n', '\n').strip('`').strip()
+        combined_problems = "\n".join(
+            [f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group]
+        )
+        combined_ids = " ".join(
+            [f"*[CodeGuardian-ID: `{build_issue_key(i)}`]*" for i in issue_group]
+        )
 
         content = (f"### Block Refactor (Lines {min_line} - {max_line})\n\n"
-                   f"**Issues Resolved:**\n\n"
+                   f"**Issues Detected in this block:**\n\n"
                    f"{combined_problems}\n\n"
                    f"**Solution:** {base_issue.solution}\n\n"
                    f"**Block to substitute:**\n"
@@ -556,7 +613,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                    f"```\n\n"
                    f"**Refactored Code:**\n"
                    f"```{file_extension}\n"
-                   f"{clean_code}\n"
+                   f"{clean_proposed}\n"
                    f"```\n\n"
                    f"{combined_ids}")
 
@@ -574,7 +631,9 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                     },
                 },
             )
-            logger.info(f"Grouped inline comment covering lines {min_line}-{max_line} added successfully to PR {pr_id}")
+            logger.info(
+                f"Grouped inline comment covering lines {min_line}-{max_line} added successfully to PR {pr_id}"
+            )
             created_comments += 1
             await asyncio.sleep(0.2)
         except Exception as e:
@@ -672,6 +731,7 @@ async def main() -> None:
     logger.info(f"CRITICAL or BLOCKER issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
     # Analyze the code with the AI
     decision = analyze_code_with_gemini(project_key, issues)
+    decision.issues = deduplicate_issues(decision.issues)
 
     logger.info(
         "AI analysis completed, reporting the results to Bitbucket. You can also check the detailed metrics of the analysis in Prometheus or Grafana."
