@@ -118,7 +118,7 @@ def _read_file_lines(filepath: str) -> list[str]:
         return file.readlines()
 
 
-def get_code_context(filepath: str, line_number: int, context_window: int = 15) -> str:
+def get_code_context(filepath: str, line_number: int, context_window: int = 25) -> str:
     try:
         lines = _read_file_lines(filepath)
 
@@ -241,7 +241,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
     top_issues = cleaned_issues[:max_issues]  # Limit the number of issues sent to the AI after sorting by severity
 
     for issue in top_issues:
-        issue["code_context"] = get_code_context(issue["file"], issue["line"])
+        issue["code_context"] = get_code_context(issue["file"], issue["line"], context_window=25)
 
     return top_issues
 
@@ -252,47 +252,79 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
     # Prompt for the model to analyze the SonarQube issues
     prompt = f"""
-        Act as a Senior Software Architect and Security Lead. 
-        Analyze the following SonarQube technical findings for the project: '{project_key}'.
+    Act as a Principal Software Architect, Static Analysis Expert, and Secure Code Reviewer.
 
-        ### RULES FOR 'proposed_code':
-        - If multiple nearby issues in the same file are fixed by the same block replacement,
-          generate ONE shared replacement block, not separate per-line fixes.
-        - Prefer the simplest valid fix with the fewest code changes possible.        
-        - Return ONLY the exact, raw code snippet that replaces the problematic part.
-        - DO NOT wrap the code in markdown blocks (e.g., do NOT use ```java or ```). Just return the raw text.
-        - DO NOT include 'import' statements unless they are absolutely new and necessary.
-        - DO NOT redefine the entire function if only one or two lines change.
-        - Match the indentation and style of the provided 'code_context'.
-        - Ensure the code is production-ready and fixes the specific SonarQube finding.
-        - MUST use physical line breaks (hard returns) for multiple lines. DO NOT use literal '\n' characters.
+    Analyze the following SonarQube technical findings for the project: '{project_key}'.
 
-        ### TASK:
-        1. Analyze all provided issues (if existing) based on severity and technical debt.
-        2. For each issue, analyze the 'code_context' snippet to understand the exact code, then provide:
-           - 'sonar_key': The exact 'sonar_key' value provided in the SONARQUBE DATA. Do NOT invent it.
-           - 'file': The exact filename/path.
-           - 'line': The specific line number.
-           - 'target_type': The type of the affected code structure (e.g., "Variable", "Method", "Class", "Interface").
-           - 'target_name': The exact name of the affected target. Do NOT invent names.
-           - 'problem': TECHNICAL RISK EXPLANATION. MAX 15 WORDS.
-           - 'solution': STEP-BY-STEP FIX. MAX 15 WORDS. BE PRECISE AND TECHNICAL.
-           - 'original_code': RETURN THE COMPLETE CONTIGUOUS CODE BLOCK THAT MUST BE REPLACED.
-             If two or more nearby issues in the same file can be solved with the same refactor,
-             return the SAME full 'original_code' block for all of them.
-           - 'proposed_code': RETURN THE COMPLETE REPLACEMENT BLOCK FOR 'original_code'.
-             Apply the SMALLEST SAFE CHANGE that fixes the issue or grouped nearby issues.
-             DO NOT return only one line if the real fix is a block replacement.
-        3. 'comment': HIGH-LEVEL EXECUTIVE SUMMARY. MAX 20 WORDS.
-        4. 'decline_pr': Set to 'true' ONLY if there are findings with 'BLOCKER' or 'CRITICAL' severity.
+    ### GLOBAL OBJECTIVE
+    For each finding, generate the safest and smallest valid code replacement that fixes the issue without breaking compilation, syntax, scope, control flow, or surrounding behavior.
 
-        ### OUTPUT FORMAT:
-        Return ONLY a strictly valid JSON object that matches the provided schema. 
-        Do not include markdown wrappers like ```json.
+    ### RULES FOR 'proposed_code'
+    - Return ONLY the exact raw code snippet that replaces the problematic region.
+    - DO NOT wrap the code in markdown blocks.
+    - DO NOT include explanations inside the code.
+    - Preserve the original programming language, coding style, naming style, formatting style, and indentation style of the provided code context.
+    - Prefer the smallest safe change, but NEVER sacrifice correctness for brevity.
+    - The replacement must be syntactically valid in the original language.
+    - The replacement must remain semantically coherent with the surrounding code context.
+    - DO NOT invent APIs, variables, functions, classes, modules, imports, types, constants, macros, or symbols that are not already present or clearly required.
+    - Only add imports, includes, using statements, dependencies, declarations, or boilerplate when they are strictly necessary for correctness.
+    - NEVER return a partial fragment if a larger replacement region is required for correctness.
+    - Preserve variable lifetime, visibility, ownership, mutability, initialization order, and valid scope.
+    - Preserve resource lifecycle semantics, cleanup semantics, and error-handling semantics when relevant.
+    - Preserve control flow correctness: do not leave unresolved branches, missing returns, broken loops, orphaned conditions, unreachable code, or unbalanced delimiters.
+    - Do not introduce unresolved identifiers, dangling references, invalid state transitions, or invalid object/resource usage.
+    - Do not move declarations into a narrower scope if they are used later.
+    - Do not move statements outside the scope they depend on.
+    - Do not change behavior unrelated to the finding unless strictly necessary to produce a valid fix.
+    - When several nearby findings in the same file are solved by the exact same replacement region, generate the same replacement block for them.
+    - When a correct fix requires replacing a larger logical block, return that larger block instead of a smaller unsafe fragment.
+    - The final replacement must be production-ready.
+    - Assume the replacement will be directly applied over the original_code block, so it must compile, run, or parse correctly in that location.
+    - For interpreted languages, ensure the replacement is executable and structurally valid.
+    - For compiled languages, ensure the replacement is compilable in context.
+    - For memory/resource/concurrency issues, ensure the fix does not introduce leaks, deadlocks, race conditions, invalid ownership, double release, or scope misuse.
+    - Do not return placeholder text such as TODO, FIXME, pseudocode, ellipsis, or comments like "rest of code unchanged".
+    - MUST use physical line breaks for multiline code. DO NOT use literal '\\n' characters.
 
-        ### SONARQUBE DATA:
-        {json.dumps(issues)}
-        """
+    ### TASK
+    1. Analyze all provided findings.
+    2. For each finding, inspect the code_context carefully and provide:
+    - 'sonar_key': The exact sonar_key value provided in the SONARQUBE DATA. Do NOT invent it.
+    - 'file': The exact filename/path.
+    - 'line': The specific line number.
+    - 'target_type': The most accurate type of affected code element (for example: Variable, Function, Method, Class, Module, Statement, Block, Query, Resource, Loop, Condition, Thread, Object, Memory Buffer, File Handle).
+    - 'target_name': The exact name of the affected target when clearly identifiable from the code. Do NOT invent names. If no clear name exists, use the smallest precise existing identifier or construct name from the snippet.
+    - 'problem': A precise technical risk explanation in MAX 20 words.
+    - 'solution': A precise technical fix instruction in MAX 20 words.
+    - 'original_code': The COMPLETE code region that must be replaced so the fix is valid.
+    - 'proposed_code': The COMPLETE replacement for original_code.
+
+    ### STRICT REQUIREMENTS FOR 'original_code'
+    - It must be the minimal FULL replacement region required for a correct fix.
+    - It must include all dependent statements that belong to the same logical block when necessary.
+    - It must not be so small that applying proposed_code would break syntax, scope, lifecycle, or behavior.
+    - It must not be unnecessarily large if a smaller correct region is sufficient.
+
+    ### STRICT REQUIREMENTS FOR 'proposed_code'
+    - It must be a direct replacement for original_code.
+    - It must be complete and self-consistent.
+    - It must preserve the surrounding contract of the code.
+    - It must not rely on omitted hidden lines to remain valid.
+    - It must not require additional unstated edits elsewhere unless absolutely unavoidable and clearly implied by the returned replacement itself.
+
+    ### DECISION
+    3. 'comment': Write a high-level executive summary in MAX 20 words.
+    4. 'decline_pr': Set to true ONLY if there are findings with BLOCKER or CRITICAL severity.
+
+    ### OUTPUT FORMAT
+    Return ONLY one strictly valid JSON object matching the provided schema.
+    Do not include markdown wrappers.
+    Do not include extra text before or after the JSON.
+
+    ### SONARQUBE DATA
+    {json.dumps(issues)}
+    """
 
     # Start of intrumentation to measure latency and token usage of the Gemini model
     start_time = time.time()
