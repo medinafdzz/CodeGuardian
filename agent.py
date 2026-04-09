@@ -606,22 +606,25 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         if comment_id in resolved_ids:
             continue
 
-        if comment_issue_keys.isdisjoint(current_issue_keys):
-            sample_issue_key = next(iter(comment_issue_keys))
-            comment_info = active_inline_comments[sample_issue_key]
+        if not comment_issue_keys.isdisjoint(current_issue_keys):
+            continue
 
-            logger.info(
-                f"Trying to resolve comment_id={comment_id} "
-                f"with issue_keys={list(comment_issue_keys)} "
-                f"comment_info={comment_info}"
-            )
-            
-        if not comment_info.get("resolved", False):
-            resolved= await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
-            if resolved:
-                resolved_ids.add(comment_id)
-                await asyncio.sleep(0.2)
-                continue
+        sample_issue_key = next(iter(comment_issue_keys))
+        comment_info = active_inline_comments.get(sample_issue_key)
+
+        if not comment_info or comment_info.get("resolved", False):
+            continue
+
+        logger.info(
+            f"Trying to resolve comment_id={comment_id} "
+            f"with issue_keys={list(comment_issue_keys)} "
+            f"comment_info={comment_info}"
+        )
+
+        resolved = await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
+        if resolved:
+            resolved_ids.add(comment_id)
+            await asyncio.sleep(0.2)
 
     # Create new comments only for the new issues that do not appear in the analysis
     new_issue_keys = current_issue_keys - active_issue_keys
