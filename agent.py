@@ -610,12 +610,12 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             sample_issue_key = next(iter(comment_issue_keys))
             comment_info = active_inline_comments[sample_issue_key]
 
-
-        logger.info(
-            f"Trying to resolve comment_id={comment_id} "
-            f"with issue_keys={list(comment_issue_keys)} "
-            f"comment_info={comment_info}"
-        )
+            logger.info(
+                f"Trying to resolve comment_id={comment_id} "
+                f"with issue_keys={list(comment_issue_keys)} "
+                f"comment_info={comment_info}"
+            )
+            
         if not comment_info.get("resolved", False):
             resolved= await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
             if resolved:
@@ -668,8 +668,9 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         base_issue = issue_group[0]
 
         if len(issue_group) == 1:
-            await post_inline_comment(session, pr_id, project_key, base_issue, workspace)
-            created_comments += 1
+            created = await post_inline_comment(session, pr_id, project_key, base_issue, workspace)
+            if created:
+                created_comments += 1
             await asyncio.sleep(0.2)
             continue
 
