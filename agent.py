@@ -22,7 +22,7 @@ from prometheus_client import (
     CollectorRegistry,
     Gauge,
     push_to_gateway,
-)  # Libraries for Prometheus metrics
+)
 
 # Keep Jenkins logs readable without hiding useful info when something breaks.
 logging.basicConfig(
@@ -452,7 +452,7 @@ async def post_comment(session: ClientSession, pr_id: str, project_key: str, com
 
 # Add each comment to its exact line so the developer does not have to search for it by hand.
 async def post_inline_comment(session: ClientSession, pr_id: str, project_key: str, issue: Issue,
-                              workspace: str) -> None:
+                              workspace: str) -> bool:
     try:
         # Extract the file extension to color in bitbucket
         file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
@@ -464,7 +464,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
 
         if not clean_orig or not clean_prop or clean_orig == clean_prop:
             logger.info(f"Skipping issue {issue_key} because it does not produce a real code change.")
-            return
+            return False
     
         content = (f"### Code Issue\n\n"
                    f"**Problem ({issue.severity}):** {issue.problem}\n\n"
@@ -493,6 +493,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
             },
         )
         logger.info(f"Inline comment added successfully to the pull request {pr_id}")
+        return True
     except Exception as e:
         logger.error(f"Failed to add inline comment: {e}")
         raise
@@ -540,7 +541,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
 
             if issue_keys:
                 # Extract the main metadata
-                comment_id = comment.get("id")
+                comment_id = int(comment.get("id"))
                 resolved = comment.get("resolved", False)
                 inline_data = comment.get("inline", {})
 
@@ -553,6 +554,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
                             "inline": inline_data,
                         }
 
+            logger.info(f"RAW COMMENT JSON: {json.dumps(comment)}")
         return active_inline_comments
 
     except Exception as e:
@@ -570,7 +572,7 @@ async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key
                 "workspace": workspace,
                 "pull_request_id": int(pr_id),
                 "repo_slug": project_key,
-                "comment_id": comment_id,
+                "comment_id": int(comment_id),
             },
         )
         logger.info(f"Comment {comment_id} resolved successfully in pull request {pr_id}")
@@ -578,7 +580,6 @@ async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key
     except Exception as e:
         logger.error(f"Failed to resolve comment {comment_id}: {e}")
         return False
-
 
 # When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
 async def synchronize_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str,
@@ -609,11 +610,18 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             sample_issue_key = next(iter(comment_issue_keys))
             comment_info = active_inline_comments[sample_issue_key]
 
-            if not comment_info.get("resolved", False):
-                resolved= await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
-                if resolved:
-                    resolved_ids.add(comment_id)
-                    await asyncio.sleep(0.2)
+
+        logger.info(
+            f"Trying to resolve comment_id={comment_id} "
+            f"with issue_keys={list(comment_issue_keys)} "
+            f"comment_info={comment_info}"
+        )
+        if not comment_info.get("resolved", False):
+            resolved= await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
+            if resolved:
+                resolved_ids.add(comment_id)
+                await asyncio.sleep(0.2)
+                continue
 
     # Create new comments only for the new issues that do not appear in the analysis
     new_issue_keys = current_issue_keys - active_issue_keys
