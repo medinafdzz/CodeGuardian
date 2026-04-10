@@ -448,26 +448,32 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
         file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
         issue_key = build_issue_key(issue)
 
-        # Clean both blocks to avoid markdown issues
+       # Clean both blocks to avoid markdown issues
         clean_orig = issue.original_code.replace('\\n', '\n').strip('`').strip()
         clean_prop = issue.proposed_code.replace('\\n', '\n').strip('`').strip()
 
         if not clean_orig or not clean_prop or clean_orig == clean_prop:
             logger.info(f"Skipping issue {issue_key} because it does not produce a real code change.")
             return False
-    
+
+        line_start = int(issue.line)
+        original_line_count = max(1, len(clean_orig.splitlines()))
+        line_end = line_start + original_line_count - 1
+
         content = (f"### Code Issue\n\n"
-                   f"**Problem ({issue.severity}):** {issue.problem}\n\n"
-                   f"**Solution:** {issue.solution}\n\n"
-                   f"**Block to substitute:**\n"
-                   f"```{file_extension}\n"
-                   f"{clean_orig}\n"
-                   f"```\n\n"
-                   f"**Refactored Code:**\n"
-                   f"```{file_extension}\n"
-                   f"{clean_prop}\n"
-                   f"```\n\n"
-                   f"<!-- CodeGuardian-IDs: {issue_key} -->")
+                f"**File:** {issue.file}\n\n"
+                f"**Lines:** {line_start}-{line_end}\n\n"
+                f"**Problem ({issue.severity}):** {issue.problem}\n\n"
+                f"**Solution:** {issue.solution}\n\n"
+                f"**Block to substitute:**\n"
+                f"```{file_extension}\n"
+                f"{clean_orig}\n"
+                f"```\n\n"
+                f"**Refactored Code:**\n"
+                f"```{file_extension}\n"
+                f"{clean_prop}\n"
+                f"```\n\n"
+                f"<!-- CodeGuardian-IDs: {issue_key} -->")
 
         await session.call_tool(
             name="addPullRequestComment",
@@ -701,18 +707,20 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         hidden_ids = f"<!-- CodeGuardian-IDs: {','.join(group_issue_keys)} -->"
 
         content = (f"### Block Refactor (Lines {min_line} - {max_line})\n\n"
-                   f"**Issues Detected in this block:**\n\n"
-                   f"{combined_problems}\n\n"
-                   f"**Solution:** {base_issue.solution}\n\n"
-                   f"**Block to substitute:**\n"
-                   f"```{file_extension}\n"
-                   f"{clean_original}\n"
-                   f"```\n\n"
-                   f"**Refactored Code:**\n"
-                   f"```{file_extension}\n"
-                   f"{clean_proposed}\n"
-                   f"```\n\n"
-                   f"{hidden_ids}")
+                f"**File:** {file_path}\n\n"
+                f"**Lines:** {min_line}-{max_line}\n\n"
+                f"**Issues Detected in this block:**\n\n"
+                f"{combined_problems}\n\n"
+                f"**Solution:** {base_issue.solution}\n\n"
+                f"**Block to substitute:**\n"
+                f"```{file_extension}\n"
+                f"{clean_original}\n"
+                f"```\n\n"
+                f"**Refactored Code:**\n"
+                f"```{file_extension}\n"
+                f"{clean_proposed}\n"
+                f"```\n\n"
+                f"{hidden_ids}")
 
         try:
             await session.call_tool(
