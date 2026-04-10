@@ -587,57 +587,57 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             comment_to_issue_keys[comment_id] = set()
         comment_to_issue_keys[comment_id].add(issue_key)
 
-    resolved_ids = set()
-    forced_republish_keys = set()
+        resolved_ids = set()
+        forced_republish_keys = set()
 
-    # Resolve or refresh comments depending on how their tracked issue keys evolved
-    for comment_id, comment_issue_keys in comment_to_issue_keys.items():
-        if comment_id in resolved_ids:
-            continue
-
-        active_keys_for_comment = comment_issue_keys.intersection(current_issue_keys)
-
-        # Case 1: all keys disappeared -> resolve old comment
-        if not active_keys_for_comment:
-            sample_issue_key = next(iter(comment_issue_keys))
-            comment_info = active_inline_comments.get(sample_issue_key)
-
-            if not comment_info or comment_info.get("resolved", False):
+        # Resolve or refresh comments depending on how their tracked issue keys evolved
+        for comment_id, comment_issue_keys in comment_to_issue_keys.items():
+            if comment_id in resolved_ids:
                 continue
 
-            logger.info(
-                f"Resolving stale comment_id={comment_id} "
-                f"old_keys={list(comment_issue_keys)} "
-                f"active_keys=[]"
-            )
+            active_keys_for_comment = comment_issue_keys.intersection(current_issue_keys)
 
-            resolved = await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
-            if resolved:
-                resolved_ids.add(comment_id)
-                await asyncio.sleep(0.2)
-            continue
+            # Case 1: all keys disappeared -> resolve old comment
+            if not active_keys_for_comment:
+                sample_issue_key = next(iter(comment_issue_keys))
+                comment_info = active_inline_comments.get(sample_issue_key)
 
-        # Case 2: mixed state (some keys resolved, some still active) -> resolve and republish active subset
-        if active_keys_for_comment != comment_issue_keys:
-            sample_issue_key = next(iter(comment_issue_keys))
-            comment_info = active_inline_comments.get(sample_issue_key)
+                if not comment_info or comment_info.get("resolved", False):
+                    continue
 
-            logger.info(
-                f"Refreshing mixed comment_id={comment_id} "
-                f"old_keys={list(comment_issue_keys)} "
-                f"still_active={list(active_keys_for_comment)}"
-            )
+                logger.info(
+                    f"Resolving stale comment_id={comment_id} "
+                    f"old_keys={list(comment_issue_keys)} "
+                    f"active_keys=[]"
+                )
 
-            if comment_info and not comment_info.get("resolved", False):
                 resolved = await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
                 if resolved:
                     resolved_ids.add(comment_id)
                     await asyncio.sleep(0.2)
+                continue
 
-            forced_republish_keys.update(active_keys_for_comment)
+            # Case 2: mixed state (some keys resolved, some still active) -> resolve and republish active subset
+            if active_keys_for_comment != comment_issue_keys:
+                sample_issue_key = next(iter(comment_issue_keys))
+                comment_info = active_inline_comments.get(sample_issue_key)
 
-    # Create comments for truly new issues plus active keys from mixed comments we just refreshed
-    new_issue_keys = (current_issue_keys - active_issue_keys).union(forced_republish_keys)
+                logger.info(
+                    f"Refreshing mixed comment_id={comment_id} "
+                    f"old_keys={list(comment_issue_keys)} "
+                    f"still_active={list(active_keys_for_comment)}"
+                )
+
+                if comment_info and not comment_info.get("resolved", False):
+                    resolved = await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
+                    if resolved:
+                        resolved_ids.add(comment_id)
+                        await asyncio.sleep(0.2)
+
+                forced_republish_keys.update(active_keys_for_comment)
+
+        # Create comments for truly new issues plus active keys from mixed comments we just refreshed
+        new_issue_keys = (current_issue_keys - active_issue_keys).union(forced_republish_keys)
     grouped_candidates = {}
 
     for issue_key in new_issue_keys:
