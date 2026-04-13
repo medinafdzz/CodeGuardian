@@ -674,47 +674,76 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
 
     # Create comments for truly new issues plus active keys from mixed comments we just refreshed
     new_issue_keys = (current_issue_keys - active_issue_keys).union(forced_republish_keys)
-    grouped_candidates = {}
+    merge_gap = int(os.getenv("CODEGUARDIAN_MERGE_GAP_LINES", "5"))
+    issues_by_file: dict[str, list[Issue]] = {}
 
     for issue_key in new_issue_keys:
         issue = current_issues_by_key[issue_key]
-
-        clean_original = issue.original_code.replace('\\n', '\n').strip('`').strip()
-        clean_proposed = issue.proposed_code.replace('\\n', '\n').strip('`').strip()
-
-        group_key = (issue.file, clean_original, clean_proposed)
-
-        if group_key not in grouped_candidates:
-            grouped_candidates[group_key] = []
-
-        grouped_candidates[group_key].append(issue)
+        if not is_valid_replacement(issue):
+            continue
+        issues_by_file.setdefault(issue.file, []).append(issue)
 
     grouped_new_issues = []
 
-    for (file_path, clean_original, clean_proposed), issues_in_group in grouped_candidates.items():
-        issues_in_group.sort(key=lambda x: x.line)
+    for file_path, file_issues in issues_by_file.items():
+        if not file_issues:
+            continue
 
-        current_cluster = [issues_in_group[0]]
+        def issue_start(i: Issue) -> int:
+            return int(getattr(i, "original_start_line", i.line))
 
-        for issue in issues_in_group[1:]:
-            if issue.line - current_cluster[-1].line <= 3:
+        def issue_end(i: Issue) -> int:
+            return int(getattr(i, "original_end_line", i.line))
+
+        file_issues.sort(key=lambda i: (issue_start(i), issue_end(i)))
+
+        current_cluster = [file_issues[0]]
+        cluster_start = issue_start(file_issues[0])
+        cluster_end = issue_end(file_issues[0])
+
+        for issue in file_issues[1:]:
+            start = issue_start(issue)
+            end = issue_end(issue)
+
+            if start <= cluster_end + merge_gap:
                 current_cluster.append(issue)
+                cluster_end = max(cluster_end, end)
             else:
-                grouped_new_issues.append((file_path, clean_original, clean_proposed, current_cluster))
+                grouped_new_issues.append({
+                    "file_path": file_path,
+                    "issues": current_cluster,
+                    "start": cluster_start,
+                    "end": cluster_end,
+                })
                 current_cluster = [issue]
+                cluster_start = start
+                cluster_end = end
 
-        grouped_new_issues.append((file_path, clean_original, clean_proposed, current_cluster))
+        grouped_new_issues.append({
+            "file_path": file_path,
+            "issues": current_cluster,
+            "start": cluster_start,
+            "end": cluster_end,
+        })
 
     created_comments = 0
 
     #Publication of the comments
+    for grouped_issue in grouped_new_issues:
+        file_path = grouped_issue["file_path"]
+        issue_group = grouped_issue["issues"]
+        min_line = grouped_issue["start"]
+        max_line = grouped_issue["end"]
 
-    for file_path, clean_original, clean_proposed, issue_group in grouped_new_issues:
+        issue_group.sort(key=lambda x: int(getattr(x, "original_start_line", x.line)))
 
-        issue_group.sort(key=lambda x: x.line)
-        min_line = min(int(getattr(i, "original_start_line", i.line)) for i in issue_group)
-        max_line = max(int(getattr(i, "original_end_line", i.line)) for i in issue_group)
-        base_issue = issue_group[0]
+        base_issue = max(
+            issue_group,
+            key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
+        )
+
+        clean_original = clean_replacement_text(base_issue.original_code)
+        clean_proposed = clean_replacement_text(base_issue.proposed_code)
 
         if len(issue_group) == 1:
             created = await post_inline_comment(session, pr_id, project_key, base_issue, workspace)
