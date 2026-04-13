@@ -10,7 +10,6 @@ import time
 import re
 import base64
 import urllib.request
-import urllib.error
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
 from google.genai import (
     types,)  # Library to manage the configuration and types for the Gemini model API
@@ -422,8 +421,6 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     response_tokens.set(metric_response)
     total_tokens.set(metric_total_tokens)
 
-    logging.info("Sending metrics to Prometheus Pushgateway")
-
     # Send the metrics to Prometheus Pushgateway
     try:
         # To set a tag in grafana
@@ -558,11 +555,9 @@ async def post_inline_comment(session: ClientSession, pr_id: str, repo_slug: str
         clean_prop = clean_replacement_text(issue.proposed_code)
 
         if not is_valid_replacement(issue):
-            logger.info(f"Skipping issue {issue_key} because it does not produce a real code change.")
             return False
 
         if not validate_issue_against_file(issue):
-            logger.info(f"Skipping issue {issue_key} because file validation failed.")
             return False
 
         line_start = int(getattr(issue, "original_start_line", issue.line))
@@ -625,7 +620,6 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
         else:
             comments = []
 
-        logger.info(f"DEBUG: Bitbucket returned {len(comments)} comments in total for this PR.")
         active_inline_comments = {}
 
         for comment in comments:
@@ -642,7 +636,6 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
             issue_keys = extract_issue_key(raw_text)
 
             if not issue_keys:
-                logger.info(f"FILTERED: Comment {comment.get('id')} has NO CodeGuardian-IDs marker")
                 continue
 
             comment_id = int(comment.get("id"))
@@ -753,24 +746,13 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
     valid_issues = []
     for issue in issues:
         if not is_valid_replacement(issue):
-            logger.info("Skipping invalid replacement for issue %s", build_issue_key(issue))
             continue
         if not validate_issue_against_file(issue):
-            logger.info("Skipping file-invalid issue %s", build_issue_key(issue))
             continue
         valid_issues.append(issue)
 
-    detected_issue_keys = {build_issue_key(issue) for issue in issues}
     current_issues_by_key = {build_issue_key(issue): issue for issue in valid_issues}
     publishable_issue_keys = set(current_issues_by_key.keys())
-
-    logger.info(
-        "Sync snapshot: pr_id=%s tracked_open_comments=%s detected_issue_keys=%s publishable_issue_keys=%s",
-        pr_id,
-        len(active_inline_comments),
-        len(detected_issue_keys),
-        len(publishable_issue_keys),
-    )
 
     latest_comment_id_by_issue_key = {}
     for comment_id, comment_info in active_inline_comments.items():
@@ -801,10 +783,6 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
         is_outdated = bool(comment_info.get("outdated", False)) if comment_info else False
 
         if is_outdated:
-            logger.info(f"Resolving outdated comment_id={comment_id} "
-                        f"old_keys={list(comment_issue_keys)} "
-                        f"still_active={list(active_keys_for_comment)}")
-
             resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
             if resolved:
                 resolved_ids.add(comment_id)
@@ -820,10 +798,6 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
             if not comment_info or comment_info.get("resolved", False):
                 continue
 
-            logger.info(f"Resolving stale comment_id={comment_id} "
-                        f"old_keys={list(comment_issue_keys)} "
-                        f"active_keys=[]")
-
             resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
             if resolved:
                 resolved_ids.add(comment_id)
@@ -835,10 +809,6 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
             continue
 
         if active_keys_for_comment != comment_issue_keys:
-            logger.info(f"Refreshing mixed comment_id={comment_id} "
-                        f"old_keys={list(comment_issue_keys)} "
-                        f"still_active={list(active_keys_for_comment)}")
-
             if comment_info and not comment_info.get("resolved", False):
                 resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
                 if resolved:
@@ -933,9 +903,6 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
             continue
 
         if not clean_original or not clean_proposed or clean_original == clean_proposed:
-            logger.info(
-                f"Skipping grouped comment in {file_path} lines {min_line}-{max_line} because it does not produce a real code change."
-            )
             continue
 
         file_extension = file_path.split(".")[-1] if "." in file_path else "txt"
@@ -974,7 +941,6 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
                     },
                 },
             )
-            logger.info(f"Grouped inline comment covering lines {min_line}-{max_line} added successfully to PR {pr_id}")
             created_comments += 1
             await asyncio.sleep(0.2)
         except Exception as e:
@@ -998,14 +964,6 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
         "BITBUCKET_PASSWORD": bitbucket_password,
     })
 
-    logger.info(
-        "Bitbucket MCP env prepared: username_present=%s password_present=%s password_len=%s repo_slug=%s workspace=%s",
-        bool(bitbucket_username),
-        bool(bitbucket_password),
-        len(bitbucket_password),
-        repo_slug,
-        workspace,
-    )
     decline = decision.decline_pr
 
     if not pr_id or str(pr_id).lower() == "null":
