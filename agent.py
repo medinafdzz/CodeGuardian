@@ -663,10 +663,18 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
 
 
 # If an issue was solve it must be indicated by marking the comment as resolved in Bitbucket
-async def resolve_inline_comment(session: ClientSession, pr_id: str, repo_slug: str, comment_id: str,
-                                 workspace: str) -> bool:
+async def resolve_inline_comment(
+    session: ClientSession,
+    pr_id: str,
+    repo_slug: str,
+    comment_id: str,
+    workspace: str,
+) -> bool:
     try:
-        await session.call_tool(
+        logger.info("Trying to resolve comment: pr_id=%s repo_slug=%s workspace=%s comment_id=%s", pr_id, repo_slug,
+                    workspace, comment_id)
+
+        response = await session.call_tool(
             name="resolveComment",
             arguments={
                 "workspace": workspace,
@@ -675,10 +683,14 @@ async def resolve_inline_comment(session: ClientSession, pr_id: str, repo_slug: 
                 "comment_id": str(comment_id),
             },
         )
-        logger.info(f"Comment {comment_id} resolved successfully in pull request {pr_id}")
+
+        logger.info("resolveComment response for %s: %s", comment_id, response)
+        logger.info("Comment %s resolved successfully in pull request %s", comment_id, pr_id)
         return True
+
     except Exception as e:
-        logger.error(f"Failed to resolve comment {comment_id}: {e}")
+        logger.error("Failed to resolve comment %s in PR %s repo %s workspace %s: %s", comment_id, pr_id, repo_slug,
+                     workspace, e)
         return False
 
 
@@ -1011,7 +1023,7 @@ async def main() -> None:
             "CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
         )
 
-        await report_to_bitbucket(pr_id,repo_slug, workspace, auto_decision)
+        await report_to_bitbucket(pr_id, repo_slug, workspace, auto_decision)
         return
 
     logger.info(f"Relevant issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
@@ -1023,7 +1035,7 @@ async def main() -> None:
         "AI analysis completed, reporting the results to Bitbucket. You can also check the detailed metrics of the analysis in Prometheus or Grafana."
     )
 
-    await report_to_bitbucket(pr_id,repo_slug, workspace, decision)
+    await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
 
 
 if __name__ == "__main__":
