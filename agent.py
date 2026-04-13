@@ -531,6 +531,20 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
             if comment.get("parent"):
                 continue
 
+            # Add debug output in get_inline_comments() after line 531:
+            if comment.get("resolved", False):
+                logger.info(f"FILTERED: Comment {comment.get('id')} already resolved=true")
+                continue
+            if comment.get("parent"):
+                logger.info(f"FILTERED: Comment {comment.get('id')} is a reply (has parent)")
+                continue
+
+            raw_text = comment.get("content", {}).get("raw", "")
+            issue_keys = extract_issue_key(raw_text)
+            if not issue_keys:
+                logger.info(f"FILTERED: Comment {comment.get('id')} has NO CodeGuardian-IDs marker")
+                continue
+            
             raw_text = comment.get("content", {}).get("raw", "")
             issue_keys = extract_issue_key(raw_text)
 
