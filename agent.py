@@ -587,19 +587,28 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
         logger.error(f"Failed to retrieve inline comments: {e}")
         raise
 
+logger.info(
+    "Bitbucket MCP auth check: email_present=%s token_present=%s token_len=%s workspace=%s",
+    bool(os.getenv("BITBUCKET_EMAIL")),
+    bool(os.getenv("BITBUCKET_API_TOKEN")),
+    len(os.getenv("BITBUCKET_API_TOKEN", "")),
+    os.getenv("BITBUCKET_WORKSPACE", "medinafdzz"),
+)
+
 # If an issue was solve it must be indicated by marking the comment as resolved in Bitbucket
 async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key: str, comment_id: str,
                                  workspace: str) -> bool:
     try:
-        await session.call_tool(
+        response = await session.call_tool(
             name="resolveComment",
             arguments={
                 "workspace": workspace,
-                "pull_request_id": int(pr_id),
+                "pull_request_id": str(pr_id),
                 "repo_slug": project_key,
-                "comment_id": int(comment_id),
+                "comment_id": str(comment_id),
             },
         )
+        logger.info(f"resolveComment raw response for comment {comment_id}: {response}")
         logger.info(f"Comment {comment_id} resolved successfully in pull request {pr_id}")
         return True
     except Exception as e:
@@ -868,6 +877,13 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
         "BITBUCKET_PASSWORD": os.getenv("BITBUCKET_API_TOKEN"),
     })
 
+
+    logger.info(
+        "Bitbucket MCP env prepared: username_present=%s password_present=%s password_len=%s",
+        bool(bitbucket_env.get("BITBUCKET_USERNAME")),
+        bool(bitbucket_env.get("BITBUCKET_PASSWORD")),
+        len(bitbucket_env.get("BITBUCKET_PASSWORD", "")),
+    )
     workspace = os.getenv("BITBUCKET_WORKSPACE", "medinafdzz")
     decline = decision.decline_pr
 
