@@ -105,22 +105,28 @@ def build_hidden_ids(issue_keys: list[str]) -> str:
     return f"<!-- CodeGuardian-IDs:\n{ids_lines}\n-->"
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
-def load_webhook_data(filepath: str) -> tuple[str, str]:
+def load_webhook_data(filepath: str) -> tuple[str, str, str, str]:
     with open(filepath, "r") as file:
         data = json.load(file)
 
     project_key = data.get("project_key")
     pr_id = data.get("pr_id")
+    repo_slug = data.get("repo_slug")
+    workspace = data.get("workspace", "medinafdzz")
 
     if not project_key:
         logger.error("Project key not found in the JSON file.")
-        return "", ""
+        return "", "", "", ""
 
     if not pr_id:
         logger.error("Pull request ID not found in the JSON file.")
-        return "", ""
+        return "", "", "", ""
 
-    return project_key.replace(".git", "").split("/")[-1].lower(), str(pr_id)
+    if not repo_slug:
+        logger.error("Repository slug not found in the JSON file.")
+        return "", "", "", ""
+
+    return project_key, str(pr_id), str(repo_slug), str(workspace)
 
 # Add nearby lines around the issue so the AI can understand the problem with some real context.
 @lru_cache(maxsize=256)
@@ -130,7 +136,7 @@ def _read_file_lines(filepath: str) -> list[str]:
     with open(filepath, "r", encoding="utf-8") as file:
         return file.readlines()
 
-def get_code_context(filepath: str, line_number: int, context_window: int = 120) -> str:
+def get_code_context(filepath: str, line_number: int, context_window: int = 60) -> str:
     try:
         lines = _read_file_lines(filepath)
 
@@ -446,14 +452,14 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         sys.exit(1)  # If the AI fails, stop the build
 
 # Leave the general summary in the PR so the developer can see the main result quickly.
-async def post_comment(session: ClientSession, pr_id: str, project_key: str, comment: str, workspace: str) -> None:
+async def post_comment(session: ClientSession, pr_id: str, repo_slug: str, comment: str, workspace: str) -> None:
     try:
         await session.call_tool(
             name="addPullRequestComment",
             arguments={
                 "workspace": workspace,
                 "pull_request_id": int(pr_id),
-                "repo_slug": project_key,
+                "repo_slug": repo_slug,
                 "content": comment,
             },
         )
@@ -461,30 +467,84 @@ async def post_comment(session: ClientSession, pr_id: str, project_key: str, com
     except Exception as e:
         logger.error(f"Failed to add comment: {e}")
         raise
-
+    
 # If the AI does not provide a valid code replacement, it is better to skip the comment than to publish a broken code suggestion.
 def clean_replacement_text(value: str) -> str:
     return value.replace('\\n', '\n').strip('`').strip()
 
+# Check if the AI response contains a valid code replacement that produces a real change in the code
 def is_valid_replacement(issue: Issue) -> bool:
     clean_orig = clean_replacement_text(issue.original_code)
     clean_prop = clean_replacement_text(issue.proposed_code)
     return bool(clean_orig and clean_prop and clean_orig != clean_prop)
 
+# Remove extra spaces and blank lines from the code blocks 
+def normalize_code_block(text: str) -> str:
+    if not text:
+        return ""
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").strip().splitlines()).strip()
+
+# Before posting the comment, validate that the original code block provided by the AI matches exactly with the code in the file for the specified line range
+def validate_issue_against_file(issue: Issue) -> bool:
+    try:
+        lines = _read_file_lines(issue.file)
+
+        start = int(getattr(issue, "original_start_line", issue.line) or issue.line)
+        end = int(getattr(issue, "original_end_line", issue.line) or issue.line)
+
+        if start < 1 or end < start or end > len(lines):
+            logger.warning(
+                "Invalid issue range for file validation: file=%s start=%s end=%s total_lines=%s",
+                issue.file, start, end, len(lines)
+            )
+            return False
+
+        file_block = normalize_code_block("".join(lines[start - 1:end]))
+        original = normalize_code_block(clean_replacement_text(issue.original_code))
+        proposed = normalize_code_block(clean_replacement_text(issue.proposed_code))
+
+        if not original or not proposed or original == proposed:
+            return False
+
+        if original != file_block:
+            logger.warning(
+                "Original code block does not match exact file range: file=%s start=%s end=%s",
+                issue.file, start, end
+            )
+            return False
+
+        return True
+
+    except Exception as e:
+        logger.warning("Issue validation against file failed for %s: %s", issue.file, e)
+        return False
+
+# Check if two issues have the same fix to group them in the same comment
+def same_fix(a: Issue, b: Issue) -> bool:
+    return (
+        a.file == b.file
+        and normalize_code_block(clean_replacement_text(a.original_code))
+        == normalize_code_block(clean_replacement_text(b.original_code))
+        and normalize_code_block(clean_replacement_text(a.proposed_code))
+        == normalize_code_block(clean_replacement_text(b.proposed_code))
+    )
+
 # Add each comment to its exact line so the developer does not have to search for it by hand.
-async def post_inline_comment(session: ClientSession, pr_id: str, project_key: str, issue: Issue,
+async def post_inline_comment(session: ClientSession, pr_id: str, repo_slug: str, issue: Issue,
                               workspace: str) -> bool:
     try:
-        # Extract the file extension to color in bitbucket
         file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
         issue_key = build_issue_key(issue)
 
-        # Clean both blocks to avoid markdown issues
         clean_orig = clean_replacement_text(issue.original_code)
         clean_prop = clean_replacement_text(issue.proposed_code)
 
         if not is_valid_replacement(issue):
             logger.info(f"Skipping issue {issue_key} because it does not produce a real code change.")
+            return False
+
+        if not validate_issue_against_file(issue):
+            logger.info(f"Skipping issue {issue_key} because file validation failed.")
             return False
 
         line_start = int(getattr(issue, "original_start_line", issue.line))
@@ -510,7 +570,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
             arguments={
                 "workspace": workspace,
                 "pull_request_id": int(pr_id),
-                "repo_slug": project_key,
+                "repo_slug": repo_slug,
                 "content": content,
                 "inline": {
                     "path": issue.file,
@@ -525,15 +585,15 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
         raise
 
 # Request all comments from the pull request so can inspect previous feedback
-async def get_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str) -> dict[int, dict]:
+async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
     try:
         results = await session.call_tool(
             name="getPullRequestComments",
             arguments={
                 "workspace": workspace,
                 "pull_request_id": int(pr_id),
-                "repo_slug": project_key,
-                "all": True,  # Get all comments, including inline ones
+                "repo_slug": repo_slug,
+                "all": True,
             },
         )
 
@@ -547,10 +607,8 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
             comments = []
 
         logger.info(f"DEBUG: Bitbucket returned {len(comments)} comments in total for this PR.")
-        # Key by comment_id to avoid losing old comments that share the same issue_key
         active_inline_comments = {}
 
-        # Review every comment in the PR to find the ones created by the agent
         for comment in comments:
             if comment.get("deleted", False):
                 continue
@@ -587,17 +645,8 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
         logger.error(f"Failed to retrieve inline comments: {e}")
         raise
 
-logger.info(
-    "Bitbucket auth vars: email_present=%s username_present=%s api_token_present=%s app_token_present=%s workspace=%s",
-    bool(os.getenv("BITBUCKET_EMAIL")),
-    bool(os.getenv("BITBUCKET_USERNAME")),
-    bool(os.getenv("BITBUCKET_API_TOKEN")),
-    bool(os.getenv("BITBUCKET_APP_TOKEN")),
-    os.getenv("BITBUCKET_WORKSPACE", "medinafdzz"),
-)
-
 # If an issue was solve it must be indicated by marking the comment as resolved in Bitbucket
-async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key: str, comment_id: str,
+async def resolve_inline_comment(session: ClientSession, pr_id: str, repo_slug: str, comment_id: str,
                                  workspace: str) -> bool:
     try:
         response = await session.call_tool(
@@ -605,11 +654,10 @@ async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key
             arguments={
                 "workspace": workspace,
                 "pull_request_id": str(pr_id),
-                "repo_slug": project_key,
+                "repo_slug": repo_slug,
                 "comment_id": str(comment_id),
             },
         )
-        logger.info("resolveComment raw response for comment %s: %s", comment_id, response)
         logger.info(f"Comment {comment_id} resolved successfully in pull request {pr_id}")
         return True
     except Exception as e:
@@ -617,13 +665,23 @@ async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key
         return False
 
 # When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
-async def synchronize_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str,
+async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str,
                                       issues: list[Issue]) -> int:
-    active_inline_comments = await get_inline_comments(session, pr_id, project_key, workspace)
+    active_inline_comments = await get_inline_comments(session, pr_id, repo_slug, workspace)
 
-    current_issues_by_key = {build_issue_key(issue): issue for issue in issues}
+    valid_issues = []
+    for issue in issues:
+        if not is_valid_replacement(issue):
+            logger.info("Skipping invalid replacement for issue %s", build_issue_key(issue))
+            continue
+        if not validate_issue_against_file(issue):
+            logger.info("Skipping file-invalid issue %s", build_issue_key(issue))
+            continue
+        valid_issues.append(issue)
+
+    current_issues_by_key = {build_issue_key(issue): issue for issue in valid_issues}
     current_issue_keys = set(current_issues_by_key.keys())
-    
+
     logger.info(
         "Sync snapshot: pr_id=%s tracked_open_comments=%s current_issue_keys=%s",
         pr_id,
@@ -631,7 +689,6 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         len(current_issue_keys),
     )
 
-    # Determine the latest comment that owns each issue key
     latest_comment_id_by_issue_key = {}
     for comment_id, comment_info in active_inline_comments.items():
         for issue_key in comment_info.get("issue_keys", set()):
@@ -639,10 +696,8 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             if previous_id is None or comment_id > previous_id:
                 latest_comment_id_by_issue_key[issue_key] = comment_id
 
-    # Only keys owned by their latest comment are considered currently active in PR history
     active_issue_keys = set(latest_comment_id_by_issue_key.keys())
 
-    # Group by comment_id directly to avoid key-collision overwrites
     comment_to_issue_keys = {}
     resolved_ids = set()
     forced_republish_keys = set()
@@ -650,7 +705,6 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
     for comment_id, comment_info in active_inline_comments.items():
         comment_to_issue_keys[comment_id] = set(comment_info.get("issue_keys", set()))
 
-    # Resolve or refresh comments depending on how their tracked issue keys evolved
     for comment_id, comment_issue_keys in comment_to_issue_keys.items():
         if comment_id in resolved_ids:
             continue
@@ -662,8 +716,6 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             and latest_comment_id_by_issue_key.get(issue_key) == comment_id
         }
 
-        # Case 0: outdated comment -> resolve old comment first.
-        # If some keys are still active, republish them.
         comment_info = active_inline_comments.get(comment_id)
         is_outdated = bool(comment_info.get("outdated", False)) if comment_info else False
 
@@ -674,7 +726,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                 f"still_active={list(active_keys_for_comment)}"
             )
 
-            resolved = await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
+            resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
             if resolved:
                 resolved_ids.add(comment_id)
                 if active_keys_for_comment:
@@ -686,10 +738,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                 )
             continue
 
-        # Case 1: all keys disappeared -> resolve old comment
         if not active_keys_for_comment:
-            comment_info = active_inline_comments.get(comment_id)
-
             if not comment_info or comment_info.get("resolved", False):
                 continue
 
@@ -699,7 +748,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                 f"active_keys=[]"
             )
 
-            resolved = await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
+            resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
             if resolved:
                 resolved_ids.add(comment_id)
                 await asyncio.sleep(0.2)
@@ -709,10 +758,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                 )
             continue
 
-        # Case 2: mixed state (some keys resolved, some still active) -> resolve and republish active subset
         if active_keys_for_comment != comment_issue_keys:
-            comment_info = active_inline_comments.get(comment_id)
-
             logger.info(
                 f"Refreshing mixed comment_id={comment_id} "
                 f"old_keys={list(comment_issue_keys)} "
@@ -720,7 +766,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             )
 
             if comment_info and not comment_info.get("resolved", False):
-                resolved = await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
+                resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
                 if resolved:
                     resolved_ids.add(comment_id)
                     forced_republish_keys.update(active_keys_for_comment)
@@ -729,18 +775,14 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                     logger.warning(
                         f"Skipping republish for comment_id={comment_id} because Bitbucket rejected the resolve operation."
                     )
-
             continue
 
-    # Create comments for truly new issues plus active keys from mixed comments we just refreshed
     new_issue_keys = (current_issue_keys - active_issue_keys).union(forced_republish_keys)
     merge_gap = int(os.getenv("CODEGUARDIAN_MERGE_GAP_LINES", "5"))
     issues_by_file: dict[str, list[Issue]] = {}
 
     for issue_key in new_issue_keys:
         issue = current_issues_by_key[issue_key]
-        if not is_valid_replacement(issue):
-            continue
         issues_by_file.setdefault(issue.file, []).append(issue)
 
     grouped_new_issues = []
@@ -755,7 +797,14 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         def issue_end(i: Issue) -> int:
             return int(getattr(i, "original_end_line", i.line))
 
-        file_issues.sort(key=lambda i: (issue_start(i), issue_end(i)))
+        file_issues.sort(
+            key=lambda i: (
+                issue_start(i),
+                issue_end(i),
+                normalize_code_block(clean_replacement_text(i.original_code)),
+                normalize_code_block(clean_replacement_text(i.proposed_code)),
+            )
+        )
 
         current_cluster = [file_issues[0]]
         cluster_start = issue_start(file_issues[0])
@@ -765,7 +814,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             start = issue_start(issue)
             end = issue_end(issue)
 
-            if start <= cluster_end + merge_gap:
+            if start <= cluster_end + merge_gap and same_fix(current_cluster[-1], issue):
                 current_cluster.append(issue)
                 cluster_end = max(cluster_end, end)
             else:
@@ -788,7 +837,6 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
 
     created_comments = 0
 
-    #Publication of the comments
     for grouped_issue in grouped_new_issues:
         file_path = grouped_issue["file_path"]
         issue_group = grouped_issue["issues"]
@@ -806,7 +854,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
         clean_proposed = clean_replacement_text(base_issue.proposed_code)
 
         if len(issue_group) == 1:
-            created = await post_inline_comment(session, pr_id, project_key, base_issue, workspace)
+            created = await post_inline_comment(session, pr_id, repo_slug, base_issue, workspace)
             if created:
                 created_comments += 1
             await asyncio.sleep(0.2)
@@ -848,7 +896,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                 arguments={
                     "workspace": workspace,
                     "pull_request_id": int(pr_id),
-                    "repo_slug": project_key,
+                    "repo_slug": repo_slug,
                     "content": content,
                     "inline": {
                         "path": file_path,
@@ -868,8 +916,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
     return created_comments
 
 # Turn the final AI decision into visible comments in Bitbucket for a pull request.
-async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) -> None:
-    # Configure the Bitbucket tool parameters
+async def report_to_bitbucket(pr_id: str, project_key: str, repo_slug: str, workspace: str, decision: Decision) -> None:
     bitbucket_username = (
         os.getenv("BITBUCKET_EMAIL")
         or os.getenv("BITBUCKET_USERNAME")
@@ -885,18 +932,19 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
     bitbucket_env = os.environ.copy()
     bitbucket_env.update({
         "BITBUCKET_URL": os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0"),
-        "BITBUCKET_WORKSPACE": os.getenv("BITBUCKET_WORKSPACE", "medinafdzz"),
+        "BITBUCKET_WORKSPACE": workspace,
         "BITBUCKET_USERNAME": bitbucket_username,
         "BITBUCKET_PASSWORD": bitbucket_password,
     })
 
     logger.info(
-        "Bitbucket MCP env prepared: username_present=%s password_present=%s password_len=%s",
+        "Bitbucket MCP env prepared: username_present=%s password_present=%s password_len=%s repo_slug=%s workspace=%s",
         bool(bitbucket_username),
         bool(bitbucket_password),
         len(bitbucket_password),
+        repo_slug,
+        workspace,
     )
-    workspace = os.getenv("BITBUCKET_WORKSPACE", "medinafdzz")
     decline = decision.decline_pr
 
     if not pr_id or str(pr_id).lower() == "null":
@@ -904,7 +952,6 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
         sys.exit(1)
 
     try:
-        # Start the MCP client session for Bitbucket
         async with stdio_client(
                 StdioServerParameters(
                     command="bitbucket-mcp",
@@ -913,7 +960,7 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
                 )) as (read, write):
             async with ClientSession(read, write) as session_bb:
                 await session_bb.initialize()
-                # Publish the general summary comment in the PR activity
+
                 if decline:
                     summary_comment = (
                         f"**CodeGuardian Analysis Summary**\n\n"
@@ -933,17 +980,19 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
                         f"{decision.comment}\n\n"
                     )
 
-                await post_comment(session_bb, pr_id, project_key, summary_comment, workspace)
+                await post_comment(session_bb, pr_id, repo_slug, summary_comment, workspace)
 
-                #Synchronize the inline comments with the issues detected by the AI
-                created_inline_comments = await synchronize_inline_comments(session_bb, pr_id, project_key, workspace,
-                                                                            decision.issues)
+                created_inline_comments = await synchronize_inline_comments(
+                    session_bb, pr_id, repo_slug, workspace, decision.issues
+                )
 
                 issue_count = len(decision.issues)
 
-                logger.info(f"Analysis results posted to PR {pr_id}: "
-                            f"{issue_count} active issues in current analysis, "
-                            f"{created_inline_comments} new inline comments created.")
+                logger.info(
+                    f"Analysis results posted to PR {pr_id}: "
+                    f"{issue_count} active issues in current analysis, "
+                    f"{created_inline_comments} new inline comments created."
+                )
 
     except Exception as e:
         logger.error(f"Failed to report analysis results to Bitbucket: {e}")
@@ -951,18 +1000,15 @@ async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) 
 
 # Main function to orchestrate the flow of the agent: load the webhook data, fetch and clean SonarQube issues, analyze with Gemini, and report back to Bitbucket.
 async def main() -> None:
-    # Parse the command-line arguments to get the path to the JSON file
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", required=True, help="Path to the JSON file to analyze")
     args = parser.parse_args()
 
-    # First step: load the context
-    project_key, pr_id = load_webhook_data(args.file)
-    if not project_key or not pr_id:
-        logger.error("Project key or pull request ID not found in the JSON file. Please provide valid webhook data.")
+    project_key, pr_id, repo_slug, workspace = load_webhook_data(args.file)
+    if not project_key or not pr_id or not repo_slug:
+        logger.error("Project key, pull request ID or repo slug not found in the JSON file.")
         sys.exit(1)
 
-    # Extract and clean the SonarQube data
     issues = await fetch_sonar_issues(project_key)
 
     if not issues:
@@ -970,15 +1016,14 @@ async def main() -> None:
         auto_decision = Decision(
             decline_pr=False,
             issues=[],
-            comment=
-            "CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
+            comment="CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
         )
 
-        await report_to_bitbucket(pr_id, project_key, auto_decision)
+        await report_to_bitbucket(pr_id, project_key, repo_slug, workspace, auto_decision)
         return
 
     logger.info(f"Relevant issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
-    # Analyze the code with the AI
+
     decision = analyze_code_with_gemini(project_key, issues)
     decision.issues = deduplicate_issues(decision.issues)
 
@@ -986,8 +1031,7 @@ async def main() -> None:
         "AI analysis completed, reporting the results to Bitbucket. You can also check the detailed metrics of the analysis in Prometheus or Grafana."
     )
 
-    # Report and act in SOnarQube based on the AI decision
-    await report_to_bitbucket(pr_id, project_key, decision)
+    await report_to_bitbucket(pr_id, project_key, repo_slug, workspace, decision)
 
 if __name__ == "__main__":
     asyncio.run(main())
