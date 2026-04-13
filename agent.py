@@ -80,14 +80,29 @@ def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
 def extract_issue_key(comment_text: str) -> list[str]:
     keys = set()
 
-    blocks = re.findall(r"<!--\s*CodeGuardian-IDs:\s*([^>]+?)\s*-->", comment_text)
+    # 1) Search for ID format
+    blocks = re.findall(r"<!--\s*CodeGuardian-IDs?:\s*([\s\S]*?)-->", comment_text, flags=re.IGNORECASE)
+
+    # 2) Extract keys from the founded blocks of IDs
     for block in blocks:
-        for key in block.split(","):
-            key = key.strip()
-            if key:
-                keys.add(key)
+        for key in re.findall(r"\bID\s*:\s*([^\s<,]+)", block, flags=re.IGNORECASE):
+            keys.add(key.strip())
+
+        # 3) Separte the ids by comma
+        for legacy in re.split(r"[, \n\r\t]+", block):
+            legacy = legacy.strip()
+            if legacy and not legacy.upper().startswith("ID:"):
+                keys.add(legacy)
 
     return list(keys)
+
+# When the agent needs to update a comment, it can reuse the same issue keys to indicate that is the same issue and avoid confusion.
+def build_hidden_ids(issue_keys: list[str]) -> str:
+    unique_keys = list(dict.fromkeys(k.strip() for k in issue_keys if k and k.strip()))
+    if not unique_keys:
+        return ""
+    ids_lines = "\n".join(f"ID: {k}" for k in unique_keys)
+    return f"<!-- CodeGuardian-IDs:\n{ids_lines}\n-->"
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
 def load_webhook_data(filepath: str) -> tuple[str, str]:
@@ -486,7 +501,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
                 f"```{file_extension}\n"
                 f"{clean_prop}\n"
                 f"```\n\n"
-                f"<!-- CodeGuardian-IDs: {issue_key} -->")
+                f"{build_hidden_ids([issue_key])}")
 
         await session.call_tool(
             name="addPullRequestComment",
@@ -790,7 +805,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             [f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group]
         )
         group_issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issue_group))
-        hidden_ids = f"<!-- CodeGuardian-IDs: {','.join(group_issue_keys)} -->"
+        hidden_ids = build_hidden_ids(group_issue_keys)
 
         content = (f"### Block Refactor (Lines {min_line} - {max_line})\n\n"
                 f"**File:** {file_path}\n\n"
