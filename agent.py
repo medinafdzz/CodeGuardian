@@ -549,8 +549,6 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
                 "issue_keys": set(issue_keys),
             }
 
-            logger.info(f"RAW COMMENT JSON: {json.dumps(comment)}")
-
         return active_inline_comments
 
     except Exception as e:
