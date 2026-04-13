@@ -170,32 +170,26 @@ def get_code_context(filepath: str, line_number: int, context_window: int = 60) 
 
 # Trim the Sonar response before sending it to the LLM so the prompt stays smaller and cleaner.
 def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
-    try:
-        # Extract the content text from the raw results and parse it as JSON
-        content_text = raw_results.content[0].text
-        issues_data = json.loads(content_text)
+    content_text = raw_results.content[0].text
+    issues_data = json.loads(content_text)
 
-        # If issues_data is a dict with an "issues" key, take the value of that key, otherwise we assume it's already a list of issues
-        issues_list = issues_data.get("issues", []) if isinstance(issues_data, dict) else issues_data
+    issues_list = issues_data.get("issues", []) if isinstance(issues_data, dict) else issues_data
+    if not isinstance(issues_list, list):
+        raise ValueError("Unexpected SonarQube issues format")
 
-        cleaned = []
-        # Verify that the issues are pass as a list, if not, return an empty list
-        if isinstance(issues_list, list):
-            for issue in issues_list:
-                cleaned.append({
-                    "sonar_key": issue.get("key", "NO_KEY"),
-                    "severity": issue.get("severity"),
-                    "component": issue.get("component"),
-                    "message": issue.get("message"),
-                    "line": issue.get("textRange", {}).get("startLine",
-                                                           0),  # Default to 0 if line number is not available
-                    "project": issue.get("project"),
-                    "file": issue.get("component", "").split(":")[-1],
-                })
-        return cleaned
-    except Exception as e:
-        logger.error(f"Error cleaning SonarQube results: {e}")
-        return []
+    cleaned = []
+    for issue in issues_list:
+        cleaned.append({
+            "sonar_key": issue.get("key", "NO_KEY"),
+            "severity": issue.get("severity"),
+            "component": issue.get("component"),
+            "message": issue.get("message"),
+            "line": issue.get("textRange", {}).get("startLine", 0),
+            "project": issue.get("project"),
+            "file": issue.get("component", "").split(":")[-1],
+        })
+
+    return cleaned
 
 
 # Pull only the serious unresolved issues from new code so old debt does not mix into this run.
@@ -245,8 +239,14 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
     except Exception as e:
         logger.error(f"Failed to connect to SonarQube {e}")
         sys.exit(1)  # If SonarQube fails, stop the build to avoid false positives in the pull request analysis
+
     # Clean the SonarQube results to save tokens and optimize the prompt by the most critical issues
-    all_issues = clean_sonar_results(results)
+    try:
+        all_issues = clean_sonar_results(results)
+    except Exception as e:
+        logger.error(f"Failed to parse SonarQube results: {e}")
+        sys.exit(1)
+
     severity_order = {
         "BLOCKER": 0,
         "CRITICAL": 1,
@@ -534,6 +534,7 @@ def validate_issue_against_file(issue: Issue, line_tolerance: int = 6) -> bool:
     except Exception:
         return False
 
+
 # Check if two issues have the same fix to group them in the same comment
 def same_fix(a: Issue, b: Issue) -> bool:
     return (a.file == b.file and normalize_code_block(clean_replacement_text(a.original_code)) == normalize_code_block(
@@ -622,9 +623,6 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
             if comment.get("deleted", False):
                 continue
 
-            if comment.get("resolved", False):
-                continue
-
             if comment.get("parent"):
                 continue
 
@@ -692,6 +690,7 @@ async def resolve_inline_comment(
     )
     return False
 
+
 # Fallback REST resolution when MCP cannot resolve the comment.
 async def resolve_inline_comment_by_rest(
     pr_id: str,
@@ -707,8 +706,7 @@ async def resolve_inline_comment_by_rest(
 
     base_url = os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
     resolve_url = (
-        f"{base_url}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/comments/{comment_id}/resolve"
-    )
+        f"{base_url}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/comments/{comment_id}/resolve")
 
     auth_raw = f"{bitbucket_username}:{bitbucket_password}".encode("utf-8")
     auth_b64 = base64.b64encode(auth_raw).decode("ascii")
@@ -734,6 +732,88 @@ async def resolve_inline_comment_by_rest(
     except Exception:
         return False
 
+
+async def reopen_inline_comment(
+    session: ClientSession,
+    pr_id: str,
+    repo_slug: str,
+    comment_id: str,
+    workspace: str,
+) -> bool:
+    reopened = False
+
+    try:
+        await session.call_tool(
+            name="reopenComment",
+            arguments={
+                "workspace": str(workspace),
+                "pull_request_id": str(pr_id),
+                "repo_slug": str(repo_slug),
+                "comment_id": str(comment_id),
+            },
+        )
+        reopened = True
+    except Exception:
+        reopened = await reopen_inline_comment_by_rest(
+            pr_id,
+            repo_slug,
+            comment_id,
+            workspace,
+        )
+
+    if reopened:
+        logger.info("Comment ID: %s: Reopened", comment_id)
+        return True
+
+    logger.error(
+        "Comment ID: %s: Reopen failed (pr_id=%s repo_slug=%s workspace=%s)",
+        comment_id,
+        pr_id,
+        repo_slug,
+        workspace,
+    )
+    return False
+
+
+async def reopen_inline_comment_by_rest(
+    pr_id: str,
+    repo_slug: str,
+    comment_id: str,
+    workspace: str,
+) -> bool:
+    bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
+    bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "").strip()
+
+    if not bitbucket_username or not bitbucket_password:
+        return False
+
+    base_url = os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
+    reopen_url = (f"{base_url}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/comments/{comment_id}/resolve")
+
+    auth_raw = f"{bitbucket_username}:{bitbucket_password}".encode("utf-8")
+    auth_b64 = base64.b64encode(auth_raw).decode("ascii")
+
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Basic {auth_b64}",
+    }
+
+    def _delete_reopen() -> int:
+        req = urllib.request.Request(
+            url=reopen_url,
+            headers=headers,
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return int(resp.status)
+
+    try:
+        status = await asyncio.to_thread(_delete_reopen)
+        return 200 <= status < 300
+    except Exception:
+        return False
+
+
 # When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
 async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str,
                                       issues: list[Issue]) -> int:
@@ -753,6 +833,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
             continue
         valid_issues.append(issue)
 
+    detected_issue_keys = {build_issue_key(issue) for issue in issues}
     current_issues_by_key = {build_issue_key(issue): issue for issue in valid_issues}
     publishable_issue_keys = set(current_issues_by_key.keys())
 
@@ -765,8 +846,70 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
         len(active_inline_comments),
     )
 
+    reopened_issue_keys = set()
+    reopened_comment_ids = set()
+
+    resolved_comments_by_issue_key = {}
+    open_comments_by_issue_key = {}
+
+    for comment_id, comment_info in active_inline_comments.items():
+        for issue_key in comment_info.get("issue_keys", set()):
+            if comment_info.get("resolved", False):
+                if comment_info.get("outdated", False):
+                    continue
+                target = resolved_comments_by_issue_key
+            else:
+                target = open_comments_by_issue_key
+
+            previous_id = target.get(issue_key)
+            if previous_id is None or comment_id > previous_id:
+                target[issue_key] = comment_id
+
+    for issue_key in publishable_issue_keys:
+        if issue_key in open_comments_by_issue_key:
+            continue
+
+        resolved_comment_id = resolved_comments_by_issue_key.get(issue_key)
+        if resolved_comment_id is None:
+            continue
+
+        if resolved_comment_id in reopened_comment_ids:
+            continue
+
+        resolved_comment_info = active_inline_comments.get(resolved_comment_id, {})
+        resolved_comment_issue_keys = set(resolved_comment_info.get("issue_keys", set()))
+
+        if len(resolved_comment_issue_keys) > 1 and not resolved_comment_issue_keys.issubset(publishable_issue_keys):
+            continue
+
+        if resolved_comment_issue_keys & set(open_comments_by_issue_key.keys()):
+            continue
+
+        reopened = await reopen_inline_comment(
+            session,
+            pr_id,
+            repo_slug,
+            str(resolved_comment_id),
+            workspace,
+        )
+        if reopened:
+            reopened_comment_ids.add(resolved_comment_id)
+            reopened_issue_keys.update(resolved_comment_issue_keys or {issue_key})
+            await asyncio.sleep(0.2)
+
+    if reopened_comment_ids:
+        await asyncio.sleep(0.2)
+        active_inline_comments = await get_inline_comments(
+            session,
+            pr_id,
+            repo_slug,
+            workspace,
+        )
+
     latest_comment_id_by_issue_key = {}
     for comment_id, comment_info in active_inline_comments.items():
+        if comment_info.get("resolved", False):
+            continue
         for issue_key in comment_info.get("issue_keys", set()):
             previous_id = latest_comment_id_by_issue_key.get(issue_key)
             if previous_id is None or comment_id > previous_id:
@@ -785,12 +928,15 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
         if comment_id in resolved_ids:
             continue
 
+        comment_info = active_inline_comments.get(comment_id)
+        if comment_info and comment_info.get("resolved", False):
+            continue
+
         active_keys_for_comment = {
             issue_key for issue_key in comment_issue_keys
-            if issue_key in publishable_issue_keys and latest_comment_id_by_issue_key.get(issue_key) == comment_id
+            if issue_key in detected_issue_keys and latest_comment_id_by_issue_key.get(issue_key) == comment_id
         }
 
-        comment_info = active_inline_comments.get(comment_id)
         is_outdated = bool(comment_info.get("outdated", False)) if comment_info else False
 
         if is_outdated:
@@ -827,7 +973,9 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
                     logger.info("Comment %s could not be resolved", comment_id)
             continue
 
-    new_issue_keys = (publishable_issue_keys - active_issue_keys).union(forced_republish_keys & publishable_issue_keys)
+    new_issue_keys = (publishable_issue_keys - active_issue_keys - reopened_issue_keys).union(forced_republish_keys &
+                                                                                              publishable_issue_keys)
+
     merge_gap = int(os.getenv("CODEGUARDIAN_MERGE_GAP_LINES", "5"))
     issues_by_file: dict[str, list[Issue]] = {}
 
@@ -970,8 +1118,6 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
         "BITBUCKET_PASSWORD": bitbucket_password,
     })
 
-    decline = decision.decline_pr
-
     if not pr_id or str(pr_id).lower() == "null":
         logger.error("No valid pull request ID was provided.")
         sys.exit(1)
@@ -985,25 +1131,21 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
             async with ClientSession(read, write) as session_bb:
                 await session_bb.initialize()
 
-                if decline:
-                    summary_comment = (
-                        f"**CodeGuardian Analysis Summary**\n\n"
-                        f"Critical issues have been detected in this pull request and should be reviewed before merging.\n\n"
-                        f"{decision.comment}\n\n")
-                elif decision.issues:
-                    summary_comment = (
-                        f"**CodeGuardian Analysis Summary**\n\n"
-                        f"Issues have been detected in this pull request, but none of them require rejecting the PR.\n\n"
-                        f"{decision.comment}\n\n")
-                else:
+                created_inline_comments = await synchronize_inline_comments(
+                    session_bb,
+                    pr_id,
+                    repo_slug,
+                    workspace,
+                    decision.issues,
+                )
+
+                post_summary = os.getenv("CODEGUARDIAN_POST_SUMMARY", "false").lower() == "true"
+
+                if post_summary and not decision.issues:
                     summary_comment = (f"**CodeGuardian Analysis Summary**\n\n"
                                        f"No relevant issues have been detected in this pull request.\n\n"
                                        f"{decision.comment}\n\n")
-
-                await post_comment(session_bb, pr_id, repo_slug, summary_comment, workspace)
-
-                created_inline_comments = await synchronize_inline_comments(session_bb, pr_id, repo_slug, workspace,
-                                                                            decision.issues)
+                    await post_comment(session_bb, pr_id, repo_slug, summary_comment, workspace)
 
                 logger.info(
                     "Analysis results posted to PR %s: detected_issues=%s, new_inline_comments=%s",
@@ -1031,7 +1173,7 @@ async def main() -> None:
     issues = await fetch_sonar_issues(project_key)
 
     if not issues:
-        logger.info("No relevant issues found by SonarQube. Posting a clean analysis summary to the pull request.")
+        logger.info("No relevant issues found by SonarQube. Reporting clean analysis state to the pull request.")
         auto_decision = Decision(
             decline_pr=False,
             issues=[],
