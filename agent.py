@@ -43,6 +43,8 @@ class Issue(BaseModel):
     target_type: str
     target_name: str
     line: int
+    original_start_line: int | None = None
+    original_end_line: int | None = None
     problem: str
     severity: str
     solution: str
@@ -113,7 +115,7 @@ def _read_file_lines(filepath: str) -> list[str]:
     with open(filepath, "r", encoding="utf-8") as file:
         return file.readlines()
 
-def get_code_context(filepath: str, line_number: int, context_window: int = 25) -> str:
+def get_code_context(filepath: str, line_number: int, context_window: int = 120) -> str:
     try:
         lines = _read_file_lines(filepath)
 
@@ -234,7 +236,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
     top_issues = cleaned_issues[:max_issues]  # Limit the number of issues sent to the AI after sorting by severity
 
     for issue in top_issues:
-        issue["code_context"] = get_code_context(issue["file"], issue["line"], context_window=25)
+        issue["code_context"] = get_code_context(issue["file"], issue["line"])
 
     return top_issues
 
@@ -251,46 +253,49 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     ### GLOBAL OBJECTIVE
     For each finding, generate the safest and smallest valid code replacement that fixes the issue without breaking compilation, syntax, scope, control flow, or surrounding behavior.
 
-    ### RULES FOR 'proposed_code'
-    - Return ONLY the exact raw code snippet that replaces the problematic region.
-    - DO NOT wrap the code in markdown blocks.
-    - DO NOT include explanations inside the code.
-    - Preserve the original programming language, coding style, naming style, formatting style, and indentation style of the provided code context.
-    - Prefer the smallest safe change, but NEVER sacrifice correctness for brevity.
-    - The replacement must be syntactically valid in the original language.
-    - The replacement must remain semantically coherent with the surrounding code context.
-    - DO NOT invent APIs, variables, functions, classes, modules, imports, types, constants, macros, or symbols that are not already present or clearly required.
-    - Only add imports, includes, using statements, dependencies, declarations, or boilerplate when they are strictly necessary for correctness.
-    - NEVER return a partial fragment if a larger replacement region is required for correctness.
-    - Preserve variable lifetime, visibility, ownership, mutability, initialization order, and valid scope.
-    - Preserve resource lifecycle semantics, cleanup semantics, and error-handling semantics when relevant.
-    - Preserve control flow correctness: do not leave unresolved branches, missing returns, broken loops, orphaned conditions, unreachable code, or unbalanced delimiters.
-    - Do not introduce unresolved identifiers, dangling references, invalid state transitions, or invalid object/resource usage.
-    - Do not move declarations into a narrower scope if they are used later.
-    - Do not move statements outside the scope they depend on.
-    - Do not change behavior unrelated to the finding unless strictly necessary to produce a valid fix.
-    - When several nearby findings in the same file are solved by the exact same replacement region, generate the same replacement block for them.
-    - When a correct fix requires replacing a larger logical block, return that larger block instead of a smaller unsafe fragment.
-    - The final replacement must be production-ready.
-    - Assume the replacement will be directly applied over the original_code block, so it must compile, run, or parse correctly in that location.
-    - For interpreted languages, ensure the replacement is executable and structurally valid.
-    - For compiled languages, ensure the replacement is compilable in context.
-    - For memory/resource/concurrency issues, ensure the fix does not introduce leaks, deadlocks, race conditions, invalid ownership, double release, or scope misuse.
-    - Do not return placeholder text such as TODO, FIXME, pseudocode, ellipsis, or comments like "rest of code unchanged".
-    - MUST use physical line breaks for multiline code. DO NOT use literal '\\n' characters.
-
-    ### TASK
-    1. Analyze all provided findings.
-    2. For each finding, inspect the code_context carefully and provide:
-    - 'sonar_key': The exact sonar_key value provided in the SONARQUBE DATA. Do NOT invent it.
-    - 'file': The exact filename/path.
-    - 'line': The specific line number.
-    - 'target_type': The most accurate type of affected code element (for example: Variable, Function, Method, Class, Module, Statement, Block, Query, Resource, Loop, Condition, Thread, Object, Memory Buffer, File Handle).
-    - 'target_name': The exact name of the affected target when clearly identifiable from the code. Do NOT invent names. If no clear name exists, use the smallest precise existing identifier or construct name from the snippet.
-    - 'problem': A precise technical risk explanation in MAX 20 words.
-    - 'solution': A precise technical fix instruction in MAX 20 words.
-    - 'original_code': The COMPLETE code region that must be replaced so the fix is valid.
-    - 'proposed_code': The COMPLETE replacement for original_code.
+    RULES FOR 'proposed_code'
+    Return ONLY the exact raw code snippet that replaces the problematic region.
+    DO NOT wrap the code in markdown blocks.
+    DO NOT include explanations inside the code.
+    Preserve the original programming language, coding style, naming style, formatting style, and indentation style of the provided code context.
+    Prefer the smallest safe change, but NEVER sacrifice correctness for brevity.
+    The replacement must be syntactically valid in the original language.
+    The replacement must remain semantically coherent with the surrounding code context.
+    DO NOT invent APIs, variables, functions, classes, modules, imports, types, constants, macros, or symbols that are not already present or clearly required.
+    Only add imports, includes, using statements, dependencies, declarations, or boilerplate when they are strictly necessary for correctness.
+    NEVER return a partial fragment if a larger replacement region is required for correctness.
+    Preserve variable lifetime, visibility, ownership, mutability, initialization order, and valid scope.
+    Preserve resource lifecycle semantics, cleanup semantics, and error-handling semantics when relevant.
+    Preserve control flow correctness: do not leave unresolved branches, missing returns, broken loops, orphaned conditions, unreachable code, or unbalanced delimiters.
+    If the finding is inside a syntactic structure such as try, catch, finally, if, else, for, while, switch, class, method, lambda, or block, original_code must include the whole smallest syntactic unit that remains valid after replacement.
+    Do not introduce unresolved identifiers, dangling references, invalid state transitions, or invalid object/resource usage.
+    Do not move declarations into a narrower scope if they are used later.
+    Do not move statements outside the scope they depend on.
+    Do not change behavior unrelated to the finding unless strictly necessary to produce a valid fix.
+    When several nearby findings in the same file are solved by the exact same replacement region, generate the same replacement block for them.
+    When a correct fix requires replacing a larger logical block, return that larger block instead of a smaller unsafe fragment.
+    The final replacement must be production-ready.
+    Assume the replacement will be directly applied over the original_code block, so it must compile, run, or parse correctly in that location.
+    For interpreted languages, ensure the replacement is executable and structurally valid.
+    For compiled languages, ensure the replacement is compilable in context.
+    For memory/resource/concurrency issues, ensure the fix does not introduce leaks, deadlocks, race conditions, invalid ownership, double release, or scope misuse.
+    Do not return placeholder text such as TODO, FIXME, pseudocode, ellipsis, or comments like "rest of code unchanged".
+    MUST use physical line breaks for multiline code. DO NOT use literal '\n' characters.
+    
+    ### TASKS
+    Analyze all provided findings.
+    For each finding, inspect the code_context carefully and provide:
+    'sonar_key': The exact sonar_key value provided in the SONARQUBE DATA. Do NOT invent it.
+    'file': The exact filename/path.
+    'line': The first line of original_code, not the Sonar line if the fix starts earlier.
+    'target_type': The most accurate type of affected code element.
+    'target_name': The exact name of the affected target when clearly identifiable.
+    'problem': A precise technical risk explanation in MAX 20 words.
+    'solution': A precise technical fix instruction in MAX 20 words.
+    'original_start_line': The first line of original_code.
+    'original_end_line': The last line of original_code.
+    'original_code': The COMPLETE code region that must be replaced so the fix is valid.
+    'proposed_code': The COMPLETE replacement for original_code.
 
     ### STRICT REQUIREMENTS FOR 'original_code'
     - It must be the minimal FULL replacement region required for a correct fix.
@@ -440,6 +445,15 @@ async def post_comment(session: ClientSession, pr_id: str, project_key: str, com
         logger.error(f"Failed to add comment: {e}")
         raise
 
+# If the AI does not provide a valid code replacement, it is better to skip the comment than to publish a broken code suggestion.
+def clean_replacement_text(value: str) -> str:
+    return value.replace('\\n', '\n').strip('`').strip()
+
+def is_valid_replacement(issue: Issue) -> bool:
+    clean_orig = clean_replacement_text(issue.original_code)
+    clean_prop = clean_replacement_text(issue.proposed_code)
+    return bool(clean_orig and clean_prop and clean_orig != clean_prop)
+
 # Add each comment to its exact line so the developer does not have to search for it by hand.
 async def post_inline_comment(session: ClientSession, pr_id: str, project_key: str, issue: Issue,
                               workspace: str) -> bool:
@@ -449,16 +463,15 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
         issue_key = build_issue_key(issue)
 
        # Clean both blocks to avoid markdown issues
-        clean_orig = issue.original_code.replace('\\n', '\n').strip('`').strip()
-        clean_prop = issue.proposed_code.replace('\\n', '\n').strip('`').strip()
+        clean_orig = clean_replacement_text(issue.original_code)
+        clean_prop = clean_replacement_text(issue.proposed_code)
 
-        if not clean_orig or not clean_prop or clean_orig == clean_prop:
+        if not is_valid_replacement(issue):
             logger.info(f"Skipping issue {issue_key} because it does not produce a real code change.")
             return False
 
-        line_start = int(issue.line)
-        original_line_count = max(1, len(clean_orig.splitlines()))
-        line_end = line_start + original_line_count - 1
+        line_start = int(getattr(issue, "original_start_line", issue.line))
+        line_end = int(getattr(issue, "original_end_line", issue.line))
 
         content = (f"### Code Issue\n\n"
                 f"**File:** {issue.file}\n\n"
@@ -484,7 +497,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
                 "content": content,
                 "inline": {
                     "path": issue.file,
-                    "to": int(issue.line),
+                    "to": line_end,
                 },
             },
         )
@@ -699,8 +712,8 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
     for file_path, clean_original, clean_proposed, issue_group in grouped_new_issues:
 
         issue_group.sort(key=lambda x: x.line)
-        min_line = issue_group[0].line
-        max_line = issue_group[-1].line
+        min_line = min(int(getattr(i, "original_start_line", i.line)) for i in issue_group)
+        max_line = max(int(getattr(i, "original_end_line", i.line)) for i in issue_group)
         base_issue = issue_group[0]
 
         if len(issue_group) == 1:
@@ -750,7 +763,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                     "content": content,
                     "inline": {
                         "path": file_path,
-                        "to": int(min_line),
+                        "to": int(max_line),
                     },
                 },
             )
