@@ -860,12 +860,12 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
 # Turn the final AI decision into visible comments in Bitbucket for a pull request.
 async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) -> None:
     # Configure the Bitbucket tool parameters
-    bitbucket_env = os.environ.copy()  # Need this bc need to inherit the PATH
+    bitbucket_env = os.environ.copy()
     bitbucket_env.update({
         "BITBUCKET_URL": os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0"),
         "BITBUCKET_WORKSPACE": os.getenv("BITBUCKET_WORKSPACE", "medinafdzz"),
-        "BITBUCKET_USERNAME": os.getenv("BITBUCKET_USERNAME"),
-        "BITBUCKET_PASSWORD": os.getenv("BITBUCKET_APP_TOKEN"),
+        "BITBUCKET_USERNAME": os.getenv("BITBUCKET_EMAIL"),
+        "BITBUCKET_PASSWORD": os.getenv("BITBUCKET_API_TOKEN"),
     })
 
     workspace = os.getenv("BITBUCKET_WORKSPACE", "medinafdzz")
