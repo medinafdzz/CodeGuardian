@@ -553,12 +553,14 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
 
             comment_id = int(comment.get("id"))
             resolved = comment.get("resolved", False)
-            inline_data = comment.get("inline")
+            inline_data = comment.get("inline") or {}
+            outdated = bool(inline_data.get("outdated", False))
 
             active_inline_comments[comment_id] = {
                 "comment_id": comment_id,
                 "resolved": resolved,
                 "inline": inline_data,
+                "outdated": outdated,
                 "issue_keys": set(issue_keys),
             }
 
@@ -625,6 +627,30 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             if issue_key in current_issue_keys
             and latest_comment_id_by_issue_key.get(issue_key) == comment_id
         }
+        
+        # Case 0: outdated comment -> resolve old comment first.
+        # If some keys are still active, republish them.
+        comment_info = active_inline_comments.get(comment_id)
+        is_outdated = bool(comment_info.get("outdated", False)) if comment_info else False
+
+        if is_outdated:
+            logger.info(
+                f"Resolving outdated comment_id={comment_id} "
+                f"old_keys={list(comment_issue_keys)} "
+                f"still_active={list(active_keys_for_comment)}"
+            )
+
+            resolved = await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
+            if resolved:
+                resolved_ids.add(comment_id)
+                if active_keys_for_comment:
+                    forced_republish_keys.update(active_keys_for_comment)
+                await asyncio.sleep(0.2)
+            else:
+                logger.warning(
+                    f"Could not resolve outdated comment_id={comment_id}; skipping republish to avoid duplicates."
+                )
+            continue        
 
         # Case 1: all keys disappeared -> resolve old comment
         if not active_keys_for_comment:
