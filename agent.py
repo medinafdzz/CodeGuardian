@@ -673,16 +673,10 @@ async def resolve_inline_comment(
     comment_id: str,
     workspace: str,
 ) -> bool:
-    logger.info(
-        "Trying to resolve comment via MCP: pr_id=%s repo_slug=%s workspace=%s comment_id=%s",
-        pr_id,
-        repo_slug,
-        workspace,
-        comment_id,
-    )
+    resolved = False
 
     try:
-        response = await session.call_tool(
+        await session.call_tool(
             name="resolveComment",
             arguments={
                 "workspace": str(workspace),
@@ -691,22 +685,25 @@ async def resolve_inline_comment(
                 "comment_id": str(comment_id),
             },
         )
-        logger.info("MCP resolveComment response for %s: %s", comment_id, response)
-        logger.info("Comment %s resolved successfully in pull request %s (MCP)", comment_id, pr_id)
+        resolved = True
+    except Exception:
+        # Fallback silently to REST if MCP fails
+        resolved = await resolve_inline_comment_by_rest(pr_id, repo_slug, comment_id, workspace)
+
+    if resolved:
+        logger.info("Comment ID: %s: Resolved", comment_id)
         return True
 
-    except Exception as mcp_error:
-        logger.warning(
-            "MCP resolveComment failed; trying REST fallback. pr_id=%s repo_slug=%s workspace=%s comment_id=%s error=%s",
-            pr_id,
-            repo_slug,
-            workspace,
-            comment_id,
-            mcp_error,
-        )
-        return await resolve_inline_comment_by_rest(pr_id, repo_slug, comment_id, workspace)
+    logger.error(
+        "Comment ID: %s: Resolve failed (pr_id=%s repo_slug=%s workspace=%s)",
+        comment_id,
+        pr_id,
+        repo_slug,
+        workspace,
+    )
+    return False
 
-# In some cases, the MCP tool to resolve comments can fail due to transient issues in the connection or the tool itself
+# In some cases, the MCP tool to resolve comments can fail due to transient issues in the connection or the tool itself.
 async def resolve_inline_comment_by_rest(
     pr_id: str,
     repo_slug: str,
@@ -717,11 +714,6 @@ async def resolve_inline_comment_by_rest(
     bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "").strip()
 
     if not bitbucket_username or not bitbucket_password:
-        logger.error(
-            "REST fallback cannot run: missing credentials (username_present=%s, password_present=%s)",
-            bool(bitbucket_username),
-            bool(bitbucket_password),
-        )
         return False
 
     base_url = os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
@@ -737,7 +729,7 @@ async def resolve_inline_comment_by_rest(
         "Authorization": f"Basic {auth_b64}",
     }
 
-    def _post_resolve() -> tuple[int, str]:
+    def _post_resolve() -> int:
         req = urllib.request.Request(
             url=resolve_url,
             data=b"",
@@ -745,50 +737,12 @@ async def resolve_inline_comment_by_rest(
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            return int(resp.status), body
+            return int(resp.status)
 
     try:
-        status, body = await asyncio.to_thread(_post_resolve)
-        logger.info(
-            "REST fallback resolve status=%s pr_id=%s repo_slug=%s workspace=%s comment_id=%s",
-            status,
-            pr_id,
-            repo_slug,
-            workspace,
-            comment_id,
-        )
-        if 200 <= status < 300:
-            return True
-
-        logger.error(
-            "REST fallback resolve failed with non-2xx status=%s body=%s",
-            status,
-            body,
-        )
-        return False
-
-    except urllib.error.HTTPError as http_error:
-        error_body = http_error.read().decode("utf-8", errors="replace")
-        logger.error(
-            "REST fallback resolve HTTPError status=%s pr_id=%s repo_slug=%s workspace=%s comment_id=%s body=%s",
-            getattr(http_error, "code", "unknown"),
-            pr_id,
-            repo_slug,
-            workspace,
-            comment_id,
-            error_body,
-        )
-        return False
-    except Exception as error:
-        logger.error(
-            "REST fallback resolve exception pr_id=%s repo_slug=%s workspace=%s comment_id=%s error=%s",
-            pr_id,
-            repo_slug,
-            workspace,
-            comment_id,
-            error,
-        )
+        status = await asyncio.to_thread(_post_resolve)
+        return 200 <= status < 300
+    except Exception:
         return False
 
 # When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
