@@ -632,6 +632,10 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
             if resolved:
                 resolved_ids.add(comment_id)
                 await asyncio.sleep(0.2)
+            else:
+                logger.warning(
+                    f"Skipping stale comment republish for comment_id={comment_id} because Bitbucket rejected the resolve operation."
+                )
             continue
 
         # Case 2: mixed state (some keys resolved, some still active) -> resolve and republish active subset
@@ -648,9 +652,14 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
                 resolved = await resolve_inline_comment(session, pr_id, project_key, comment_id, workspace)
                 if resolved:
                     resolved_ids.add(comment_id)
+                    forced_republish_keys.update(active_keys_for_comment)
                     await asyncio.sleep(0.2)
+                else:
+                    logger.warning(
+                        f"Skipping republish for comment_id={comment_id} because Bitbucket rejected the resolve operation."
+                    )
 
-            forced_republish_keys.update(active_keys_for_comment)
+            continue
 
     # Create comments for truly new issues plus active keys from mixed comments we just refreshed
     new_issue_keys = (current_issue_keys - active_issue_keys).union(forced_republish_keys)
