@@ -51,16 +51,19 @@ class Issue(BaseModel):
     original_code: str
     proposed_code: str
 
+
 class Decision(BaseModel):
     decline_pr: bool
     issues: list[Issue]
     comment: str
+
 
 # Generate a key for each issue
 def build_issue_key(issue: Issue) -> str:
     if issue.sonar_key and issue.sonar_key != "NO_KEY":
         return issue.sonar_key
     return f"{issue.file}:{issue.line}:{issue.target_name}:{issue.severity}"
+
 
 # In case the AI returns duplicated issues, we can filter them by their SonarQube key to avoid duplicated comments in Bitbucket.
 def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
@@ -75,6 +78,7 @@ def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
         unique_issues.append(issue)
 
     return unique_issues
+
 
 # Read the key of the issues that just have been commented
 def extract_issue_key(comment_text: str) -> list[str]:
@@ -96,6 +100,7 @@ def extract_issue_key(comment_text: str) -> list[str]:
 
     return list(keys)
 
+
 # When the agent needs to update a comment, it can reuse the same issue keys to indicate that is the same issue and avoid confusion.
 def build_hidden_ids(issue_keys: list[str]) -> str:
     unique_keys = list(dict.fromkeys(k.strip() for k in issue_keys if k and k.strip()))
@@ -103,6 +108,7 @@ def build_hidden_ids(issue_keys: list[str]) -> str:
         return ""
     ids_lines = "\n".join(f"ID: {k}" for k in unique_keys)
     return f"<!-- CodeGuardian-IDs:\n{ids_lines}\n-->"
+
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
 def load_webhook_data(filepath: str) -> tuple[str, str, str, str]:
@@ -128,6 +134,7 @@ def load_webhook_data(filepath: str) -> tuple[str, str, str, str]:
 
     return project_key, str(pr_id), str(repo_slug), str(workspace)
 
+
 # Add nearby lines around the issue so the AI can understand the problem with some real context.
 @lru_cache(maxsize=256)
 def _read_file_lines(filepath: str) -> list[str]:
@@ -135,6 +142,7 @@ def _read_file_lines(filepath: str) -> list[str]:
         raise FileNotFoundError("File not found.")
     with open(filepath, "r", encoding="utf-8") as file:
         return file.readlines()
+
 
 def get_code_context(filepath: str, line_number: int, context_window: int = 60) -> str:
     try:
@@ -153,6 +161,7 @@ def get_code_context(filepath: str, line_number: int, context_window: int = 60) 
         return "\n".join(snippet)
     except Exception as e:
         return f"Error reading code context: {e}"
+
 
 # Trim the Sonar response before sending it to the LLM so the prompt stays smaller and cleaner.
 def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
@@ -183,6 +192,7 @@ def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
         logger.error(f"Error cleaning SonarQube results: {e}")
         return []
 
+
 # Pull only the serious unresolved issues from new code so old debt does not mix into this run.
 async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
@@ -209,7 +219,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
     # Start the SonarQube client session using mcp tools
     results = None
-    
+
     try:
         async with stdio_client(sonar_parameters) as (read, write):
             async with ClientSession(read, write) as session:
@@ -220,7 +230,8 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
                     arguments={
                         "project_key": project_key,
                         "resolved": "false",  # Only analyze unresolved issues to avoid noise in the analysis
-                        "inNewCodePeriod": "true",  # Necessary bc it analyzes only the code changed in the pull request, no added issues from the other branch
+                        "inNewCodePeriod":
+                            "true",  # Necessary bc it analyzes only the code changed in the pull request, no added issues from the other branch
                     },
                 )
                 if results:
@@ -242,18 +253,13 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
         "INFO": 4,
     }
 
-    cleaned_issues = [
-        issue for issue in all_issues
-        if issue.get("severity") in severity_order
-    ]
+    cleaned_issues = [issue for issue in all_issues if issue.get("severity") in severity_order]
 
-    cleaned_issues.sort(
-        key=lambda issue: (
-            severity_order.get(issue.get("severity"), 99),
-            issue.get("file", ""),
-            issue.get("line", 0),
-        )
-    )
+    cleaned_issues.sort(key=lambda issue: (
+        severity_order.get(issue.get("severity"), 99),
+        issue.get("file", ""),
+        issue.get("line", 0),
+    ))
 
     max_issues = int(os.getenv("CODEGUARDIAN_MAX_ISSUES", "20"))
     top_issues = cleaned_issues[:max_issues]  # Limit the number of issues sent to the AI after sorting by severity
@@ -262,6 +268,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
         issue["code_context"] = get_code_context(issue["file"], issue["line"])
 
     return top_issues
+
 
 # Ask Gemini for the final verdict once the most relevant Sonar findings have already been filtered.
 def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
@@ -357,8 +364,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             response_mime_type="application/json",
             response_schema=Decision,
             temperature=0,  # Adjust the temperature to cold trying to get the same response
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
-        ),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)),
     )
 
     # Calculate duration of the response
@@ -451,6 +457,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         logger.error(f"The response from the model was: {response.text}")
         sys.exit(1)  # If the AI fails, stop the build
 
+
 # Leave the general summary in the PR so the developer can see the main result quickly.
 async def post_comment(session: ClientSession, pr_id: str, repo_slug: str, comment: str, workspace: str) -> None:
     try:
@@ -467,10 +474,12 @@ async def post_comment(session: ClientSession, pr_id: str, repo_slug: str, comme
     except Exception as e:
         logger.error(f"Failed to add comment: {e}")
         raise
-    
+
+
 # If the AI does not provide a valid code replacement, it is better to skip the comment than to publish a broken code suggestion.
 def clean_replacement_text(value: str) -> str:
     return value.replace('\\n', '\n').strip('`').strip()
+
 
 # Check if the AI response contains a valid code replacement that produces a real change in the code
 def is_valid_replacement(issue: Issue) -> bool:
@@ -478,14 +487,16 @@ def is_valid_replacement(issue: Issue) -> bool:
     clean_prop = clean_replacement_text(issue.proposed_code)
     return bool(clean_orig and clean_prop and clean_orig != clean_prop)
 
-# Remove extra spaces and blank lines from the code blocks 
+
+# Remove extra spaces and blank lines from the code blocks
 def normalize_code_block(text: str) -> str:
     if not text:
         return ""
     return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").strip().splitlines()).strip()
 
+
 # Before posting the comment, validate that the original code block provided by the AI matches exactly with the code in the file for the specified line range
-def validate_issue_against_file(issue: Issue) -> bool:
+def validate_issue_against_file(issue: Issue, line_tolerance: int = 6) -> bool:
     try:
         lines = _read_file_lines(issue.file)
 
@@ -493,45 +504,49 @@ def validate_issue_against_file(issue: Issue) -> bool:
         end = int(getattr(issue, "original_end_line", issue.line) or issue.line)
 
         if start < 1 or end < start or end > len(lines):
-            logger.warning(
-                "Invalid issue range for file validation: file=%s start=%s end=%s total_lines=%s",
-                issue.file, start, end, len(lines)
-            )
+            logger.warning("Invalid issue range for file validation: file=%s start=%s end=%s total_lines=%s",
+                           issue.file, start, end, len(lines))
             return False
 
-        file_block = normalize_code_block("".join(lines[start - 1:end]))
         original = normalize_code_block(clean_replacement_text(issue.original_code))
         proposed = normalize_code_block(clean_replacement_text(issue.proposed_code))
 
         if not original or not proposed or original == proposed:
             return False
 
-        if original != file_block:
-            logger.warning(
-                "Original code block does not match exact file range: file=%s start=%s end=%s",
-                issue.file, start, end
-            )
-            return False
+        exact_block = normalize_code_block("".join(lines[start - 1:end]))
+        if original == exact_block or original in exact_block:
+            return True
 
-        return True
+        window_start = max(1, start - line_tolerance)
+        window_end = min(len(lines), end + line_tolerance)
+        nearby_block = normalize_code_block("".join(lines[window_start - 1:window_end]))
+
+        if original == nearby_block or original in nearby_block:
+            logger.info(
+                "Original code block matched nearby window instead of exact range: file=%s start=%s end=%s window=%s-%s",
+                issue.file, start, end, window_start, window_end)
+            return True
+
+        logger.warning("Original code block does not match exact file range: file=%s start=%s end=%s", issue.file,
+                       start, end)
+        return False
 
     except Exception as e:
         logger.warning("Issue validation against file failed for %s: %s", issue.file, e)
         return False
 
+
 # Check if two issues have the same fix to group them in the same comment
 def same_fix(a: Issue, b: Issue) -> bool:
-    return (
-        a.file == b.file
-        and normalize_code_block(clean_replacement_text(a.original_code))
-        == normalize_code_block(clean_replacement_text(b.original_code))
-        and normalize_code_block(clean_replacement_text(a.proposed_code))
-        == normalize_code_block(clean_replacement_text(b.proposed_code))
-    )
+    return (a.file == b.file and normalize_code_block(clean_replacement_text(a.original_code)) == normalize_code_block(
+        clean_replacement_text(b.original_code)) and
+            normalize_code_block(clean_replacement_text(a.proposed_code)) == normalize_code_block(
+                clean_replacement_text(b.proposed_code)))
+
 
 # Add each comment to its exact line so the developer does not have to search for it by hand.
-async def post_inline_comment(session: ClientSession, pr_id: str, repo_slug: str, issue: Issue,
-                              workspace: str) -> bool:
+async def post_inline_comment(session: ClientSession, pr_id: str, repo_slug: str, issue: Issue, workspace: str) -> bool:
     try:
         file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
         issue_key = build_issue_key(issue)
@@ -551,19 +566,19 @@ async def post_inline_comment(session: ClientSession, pr_id: str, repo_slug: str
         line_end = int(getattr(issue, "original_end_line", issue.line))
 
         content = (f"### Code Issue\n\n"
-                f"**File:** {issue.file}\n\n"
-                f"**Lines:** {line_start}-{line_end}\n\n"
-                f"**Problem ({issue.severity}):** {issue.problem}\n\n"
-                f"**Solution:** {issue.solution}\n\n"
-                f"**Block to substitute:**\n"
-                f"```{file_extension}\n"
-                f"{clean_orig}\n"
-                f"```\n\n"
-                f"**Refactored Code:**\n"
-                f"```{file_extension}\n"
-                f"{clean_prop}\n"
-                f"```\n\n"
-                f"{build_hidden_ids([issue_key])}")
+                   f"**File:** {issue.file}\n\n"
+                   f"**Lines:** {line_start}-{line_end}\n\n"
+                   f"**Problem ({issue.severity}):** {issue.problem}\n\n"
+                   f"**Solution:** {issue.solution}\n\n"
+                   f"**Block to substitute:**\n"
+                   f"```{file_extension}\n"
+                   f"{clean_orig}\n"
+                   f"```\n\n"
+                   f"**Refactored Code:**\n"
+                   f"```{file_extension}\n"
+                   f"{clean_prop}\n"
+                   f"```\n\n"
+                   f"{build_hidden_ids([issue_key])}")
 
         await session.call_tool(
             name="addPullRequestComment",
@@ -583,6 +598,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, repo_slug: str
     except Exception as e:
         logger.error(f"Failed to add inline comment: {e}")
         raise
+
 
 # Request all comments from the pull request so can inspect previous feedback
 async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
@@ -645,11 +661,12 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
         logger.error(f"Failed to retrieve inline comments: {e}")
         raise
 
+
 # If an issue was solve it must be indicated by marking the comment as resolved in Bitbucket
 async def resolve_inline_comment(session: ClientSession, pr_id: str, repo_slug: str, comment_id: str,
                                  workspace: str) -> bool:
     try:
-        response = await session.call_tool(
+        await session.call_tool(
             name="resolveComment",
             arguments={
                 "workspace": workspace,
@@ -663,6 +680,7 @@ async def resolve_inline_comment(session: ClientSession, pr_id: str, repo_slug: 
     except Exception as e:
         logger.error(f"Failed to resolve comment {comment_id}: {e}")
         return False
+
 
 # When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
 async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str,
@@ -679,14 +697,16 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
             continue
         valid_issues.append(issue)
 
+    detected_issue_keys = {build_issue_key(issue) for issue in issues}
     current_issues_by_key = {build_issue_key(issue): issue for issue in valid_issues}
-    current_issue_keys = set(current_issues_by_key.keys())
+    publishable_issue_keys = set(current_issues_by_key.keys())
 
     logger.info(
-        "Sync snapshot: pr_id=%s tracked_open_comments=%s current_issue_keys=%s",
+        "Sync snapshot: pr_id=%s tracked_open_comments=%s detected_issue_keys=%s publishable_issue_keys=%s",
         pr_id,
         len(active_inline_comments),
-        len(current_issue_keys),
+        len(detected_issue_keys),
+        len(publishable_issue_keys),
     )
 
     latest_comment_id_by_issue_key = {}
@@ -710,21 +730,17 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
             continue
 
         active_keys_for_comment = {
-            issue_key
-            for issue_key in comment_issue_keys
-            if issue_key in current_issue_keys
-            and latest_comment_id_by_issue_key.get(issue_key) == comment_id
+            issue_key for issue_key in comment_issue_keys
+            if issue_key in detected_issue_keys and latest_comment_id_by_issue_key.get(issue_key) == comment_id
         }
 
         comment_info = active_inline_comments.get(comment_id)
         is_outdated = bool(comment_info.get("outdated", False)) if comment_info else False
 
         if is_outdated:
-            logger.info(
-                f"Resolving outdated comment_id={comment_id} "
-                f"old_keys={list(comment_issue_keys)} "
-                f"still_active={list(active_keys_for_comment)}"
-            )
+            logger.info(f"Resolving outdated comment_id={comment_id} "
+                        f"old_keys={list(comment_issue_keys)} "
+                        f"still_active={list(active_keys_for_comment)}")
 
             resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
             if resolved:
@@ -734,19 +750,16 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
                 await asyncio.sleep(0.2)
             else:
                 logger.warning(
-                    f"Could not resolve outdated comment_id={comment_id}; skipping republish to avoid duplicates."
-                )
+                    f"Could not resolve outdated comment_id={comment_id}; skipping republish to avoid duplicates.")
             continue
 
         if not active_keys_for_comment:
             if not comment_info or comment_info.get("resolved", False):
                 continue
 
-            logger.info(
-                f"Resolving stale comment_id={comment_id} "
-                f"old_keys={list(comment_issue_keys)} "
-                f"active_keys=[]"
-            )
+            logger.info(f"Resolving stale comment_id={comment_id} "
+                        f"old_keys={list(comment_issue_keys)} "
+                        f"active_keys=[]")
 
             resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
             if resolved:
@@ -759,11 +772,9 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
             continue
 
         if active_keys_for_comment != comment_issue_keys:
-            logger.info(
-                f"Refreshing mixed comment_id={comment_id} "
-                f"old_keys={list(comment_issue_keys)} "
-                f"still_active={list(active_keys_for_comment)}"
-            )
+            logger.info(f"Refreshing mixed comment_id={comment_id} "
+                        f"old_keys={list(comment_issue_keys)} "
+                        f"still_active={list(active_keys_for_comment)}")
 
             if comment_info and not comment_info.get("resolved", False):
                 resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
@@ -777,7 +788,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
                     )
             continue
 
-    new_issue_keys = (current_issue_keys - active_issue_keys).union(forced_republish_keys)
+    new_issue_keys = (publishable_issue_keys - active_issue_keys).union(forced_republish_keys & publishable_issue_keys)
     merge_gap = int(os.getenv("CODEGUARDIAN_MERGE_GAP_LINES", "5"))
     issues_by_file: dict[str, list[Issue]] = {}
 
@@ -797,14 +808,12 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
         def issue_end(i: Issue) -> int:
             return int(getattr(i, "original_end_line", i.line))
 
-        file_issues.sort(
-            key=lambda i: (
-                issue_start(i),
-                issue_end(i),
-                normalize_code_block(clean_replacement_text(i.original_code)),
-                normalize_code_block(clean_replacement_text(i.proposed_code)),
-            )
-        )
+        file_issues.sort(key=lambda i: (
+            issue_start(i),
+            issue_end(i),
+            normalize_code_block(clean_replacement_text(i.original_code)),
+            normalize_code_block(clean_replacement_text(i.proposed_code)),
+        ))
 
         current_cluster = [file_issues[0]]
         cluster_start = issue_start(file_issues[0])
@@ -868,27 +877,25 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
 
         file_extension = file_path.split(".")[-1] if "." in file_path else "txt"
 
-        combined_problems = "\n".join(
-            [f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group]
-        )
+        combined_problems = "\n".join([f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group])
         group_issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issue_group))
         hidden_ids = build_hidden_ids(group_issue_keys)
 
         content = (f"### Block Refactor (Lines {min_line} - {max_line})\n\n"
-                f"**File:** {file_path}\n\n"
-                f"**Lines:** {min_line}-{max_line}\n\n"
-                f"**Issues Detected in this block:**\n\n"
-                f"{combined_problems}\n\n"
-                f"**Solution:** {base_issue.solution}\n\n"
-                f"**Block to substitute:**\n"
-                f"```{file_extension}\n"
-                f"{clean_original}\n"
-                f"```\n\n"
-                f"**Refactored Code:**\n"
-                f"```{file_extension}\n"
-                f"{clean_proposed}\n"
-                f"```\n\n"
-                f"{hidden_ids}")
+                   f"**File:** {file_path}\n\n"
+                   f"**Lines:** {min_line}-{max_line}\n\n"
+                   f"**Issues Detected in this block:**\n\n"
+                   f"{combined_problems}\n\n"
+                   f"**Solution:** {base_issue.solution}\n\n"
+                   f"**Block to substitute:**\n"
+                   f"```{file_extension}\n"
+                   f"{clean_original}\n"
+                   f"```\n\n"
+                   f"**Refactored Code:**\n"
+                   f"```{file_extension}\n"
+                   f"{clean_proposed}\n"
+                   f"```\n\n"
+                   f"{hidden_ids}")
 
         try:
             await session.call_tool(
@@ -904,9 +911,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
                     },
                 },
             )
-            logger.info(
-                f"Grouped inline comment covering lines {min_line}-{max_line} added successfully to PR {pr_id}"
-            )
+            logger.info(f"Grouped inline comment covering lines {min_line}-{max_line} added successfully to PR {pr_id}")
             created_comments += 1
             await asyncio.sleep(0.2)
         except Exception as e:
@@ -915,19 +920,12 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
 
     return created_comments
 
-# Turn the final AI decision into visible comments in Bitbucket for a pull request.
-async def report_to_bitbucket(pr_id: str, project_key: str, repo_slug: str, workspace: str, decision: Decision) -> None:
-    bitbucket_username = (
-        os.getenv("BITBUCKET_EMAIL")
-        or os.getenv("BITBUCKET_USERNAME")
-        or ""
-    )
 
-    bitbucket_password = (
-        os.getenv("BITBUCKET_API_TOKEN")
-        or os.getenv("BITBUCKET_APP_TOKEN")
-        or ""
-    )
+# Turn the final AI decision into visible comments in Bitbucket for a pull request.
+async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decision: Decision) -> None:
+    bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "")
+
+    bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "")
 
     bitbucket_env = os.environ.copy()
     bitbucket_env.update({
@@ -952,12 +950,11 @@ async def report_to_bitbucket(pr_id: str, project_key: str, repo_slug: str, work
         sys.exit(1)
 
     try:
-        async with stdio_client(
-                StdioServerParameters(
-                    command="bitbucket-mcp",
-                    args=[],
-                    env=bitbucket_env,
-                )) as (read, write):
+        async with stdio_client(StdioServerParameters(
+                command="bitbucket-mcp",
+                args=[],
+                env=bitbucket_env,
+        )) as (read, write):
             async with ClientSession(read, write) as session_bb:
                 await session_bb.initialize()
 
@@ -965,38 +962,32 @@ async def report_to_bitbucket(pr_id: str, project_key: str, repo_slug: str, work
                     summary_comment = (
                         f"**CodeGuardian Analysis Summary**\n\n"
                         f"Critical issues have been detected in this pull request and should be reviewed before merging.\n\n"
-                        f"{decision.comment}\n\n"
-                    )
+                        f"{decision.comment}\n\n")
                 elif decision.issues:
                     summary_comment = (
                         f"**CodeGuardian Analysis Summary**\n\n"
                         f"Issues have been detected in this pull request, but none of them require rejecting the PR.\n\n"
-                        f"{decision.comment}\n\n"
-                    )
+                        f"{decision.comment}\n\n")
                 else:
-                    summary_comment = (
-                        f"**CodeGuardian Analysis Summary**\n\n"
-                        f"No relevant issues have been detected in this pull request.\n\n"
-                        f"{decision.comment}\n\n"
-                    )
+                    summary_comment = (f"**CodeGuardian Analysis Summary**\n\n"
+                                       f"No relevant issues have been detected in this pull request.\n\n"
+                                       f"{decision.comment}\n\n")
 
                 await post_comment(session_bb, pr_id, repo_slug, summary_comment, workspace)
 
-                created_inline_comments = await synchronize_inline_comments(
-                    session_bb, pr_id, repo_slug, workspace, decision.issues
-                )
+                created_inline_comments = await synchronize_inline_comments(session_bb, pr_id, repo_slug, workspace,
+                                                                            decision.issues)
 
                 issue_count = len(decision.issues)
 
-                logger.info(
-                    f"Analysis results posted to PR {pr_id}: "
-                    f"{issue_count} active issues in current analysis, "
-                    f"{created_inline_comments} new inline comments created."
-                )
+                logger.info(f"Analysis results posted to PR {pr_id}: "
+                            f"{issue_count} active issues in current analysis, "
+                            f"{created_inline_comments} new inline comments created.")
 
     except Exception as e:
         logger.error(f"Failed to report analysis results to Bitbucket: {e}")
         sys.exit(1)
+
 
 # Main function to orchestrate the flow of the agent: load the webhook data, fetch and clean SonarQube issues, analyze with Gemini, and report back to Bitbucket.
 async def main() -> None:
@@ -1016,10 +1007,11 @@ async def main() -> None:
         auto_decision = Decision(
             decline_pr=False,
             issues=[],
-            comment="CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
+            comment=
+            "CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
         )
 
-        await report_to_bitbucket(pr_id, project_key, repo_slug, workspace, auto_decision)
+        await report_to_bitbucket(pr_id,repo_slug, workspace, auto_decision)
         return
 
     logger.info(f"Relevant issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
@@ -1031,7 +1023,8 @@ async def main() -> None:
         "AI analysis completed, reporting the results to Bitbucket. You can also check the detailed metrics of the analysis in Prometheus or Grafana."
     )
 
-    await report_to_bitbucket(pr_id, project_key, repo_slug, workspace, decision)
+    await report_to_bitbucket(pr_id,repo_slug, workspace, decision)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
