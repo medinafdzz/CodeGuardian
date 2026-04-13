@@ -8,6 +8,9 @@ import google.genai as genai
 import logging
 import time
 import re
+import base64
+import urllib.request
+import urllib.error
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
 from google.genai import (
     types,)  # Library to manage the configuration and types for the Gemini model API
@@ -670,29 +673,123 @@ async def resolve_inline_comment(
     comment_id: str,
     workspace: str,
 ) -> bool:
-    try:
-        logger.info("Trying to resolve comment: pr_id=%s repo_slug=%s workspace=%s comment_id=%s", pr_id, repo_slug,
-                    workspace, comment_id)
+    logger.info(
+        "Trying to resolve comment via MCP: pr_id=%s repo_slug=%s workspace=%s comment_id=%s",
+        pr_id,
+        repo_slug,
+        workspace,
+        comment_id,
+    )
 
+    try:
         response = await session.call_tool(
             name="resolveComment",
             arguments={
-                "workspace": workspace,
+                "workspace": str(workspace),
                 "pull_request_id": str(pr_id),
-                "repo_slug": repo_slug,
+                "repo_slug": str(repo_slug),
                 "comment_id": str(comment_id),
             },
         )
-
-        logger.info("resolveComment response for %s: %s", comment_id, response)
-        logger.info("Comment %s resolved successfully in pull request %s", comment_id, pr_id)
+        logger.info("MCP resolveComment response for %s: %s", comment_id, response)
+        logger.info("Comment %s resolved successfully in pull request %s (MCP)", comment_id, pr_id)
         return True
 
-    except Exception as e:
-        logger.error("Failed to resolve comment %s in PR %s repo %s workspace %s: %s", comment_id, pr_id, repo_slug,
-                     workspace, e)
+    except Exception as mcp_error:
+        logger.warning(
+            "MCP resolveComment failed; trying REST fallback. pr_id=%s repo_slug=%s workspace=%s comment_id=%s error=%s",
+            pr_id,
+            repo_slug,
+            workspace,
+            comment_id,
+            mcp_error,
+        )
+        return await resolve_inline_comment_by_rest(pr_id, repo_slug, comment_id, workspace)
+
+# In some cases, the MCP tool to resolve comments can fail due to transient issues in the connection or the tool itself
+async def resolve_inline_comment_by_rest(
+    pr_id: str,
+    repo_slug: str,
+    comment_id: str,
+    workspace: str,
+) -> bool:
+    bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
+    bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "").strip()
+
+    if not bitbucket_username or not bitbucket_password:
+        logger.error(
+            "REST fallback cannot run: missing credentials (username_present=%s, password_present=%s)",
+            bool(bitbucket_username),
+            bool(bitbucket_password),
+        )
         return False
 
+    base_url = os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
+    resolve_url = (
+        f"{base_url}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/comments/{comment_id}/resolve"
+    )
+
+    auth_raw = f"{bitbucket_username}:{bitbucket_password}".encode("utf-8")
+    auth_b64 = base64.b64encode(auth_raw).decode("ascii")
+
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Basic {auth_b64}",
+    }
+
+    def _post_resolve() -> tuple[int, str]:
+        req = urllib.request.Request(
+            url=resolve_url,
+            data=b"",
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            return int(resp.status), body
+
+    try:
+        status, body = await asyncio.to_thread(_post_resolve)
+        logger.info(
+            "REST fallback resolve status=%s pr_id=%s repo_slug=%s workspace=%s comment_id=%s",
+            status,
+            pr_id,
+            repo_slug,
+            workspace,
+            comment_id,
+        )
+        if 200 <= status < 300:
+            return True
+
+        logger.error(
+            "REST fallback resolve failed with non-2xx status=%s body=%s",
+            status,
+            body,
+        )
+        return False
+
+    except urllib.error.HTTPError as http_error:
+        error_body = http_error.read().decode("utf-8", errors="replace")
+        logger.error(
+            "REST fallback resolve HTTPError status=%s pr_id=%s repo_slug=%s workspace=%s comment_id=%s body=%s",
+            getattr(http_error, "code", "unknown"),
+            pr_id,
+            repo_slug,
+            workspace,
+            comment_id,
+            error_body,
+        )
+        return False
+    except Exception as error:
+        logger.error(
+            "REST fallback resolve exception pr_id=%s repo_slug=%s workspace=%s comment_id=%s error=%s",
+            pr_id,
+            repo_slug,
+            workspace,
+            comment_id,
+            error,
+        )
+        return False
 
 # When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
 async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str,
