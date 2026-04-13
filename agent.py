@@ -178,7 +178,7 @@ def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
         return []
 
 # Pull only the serious unresolved issues from new code so old debt does not mix into this run.
-async def fetch_sonar_issues(project_key: str, pr_id: str) -> list[dict]:
+async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
     # Configure the SonarQube parameters
     sonar_parameters = StdioServerParameters(
@@ -203,12 +203,7 @@ async def fetch_sonar_issues(project_key: str, pr_id: str) -> list[dict]:
 
     # Start the SonarQube client session using mcp tools
     results = None
-
-    logger.info(
-        "Sonar query params: project_key=%s, pullRequestId=%s, resolved=false, inNewCodePeriod=true",
-        project_key,
-        pr_id,
-    )
+    
     try:
         async with stdio_client(sonar_parameters) as (read, write):
             async with ClientSession(read, write) as session:
@@ -218,29 +213,13 @@ async def fetch_sonar_issues(project_key: str, pr_id: str) -> list[dict]:
                     name="search_sonar_issues_in_projects",
                     arguments={
                         "project_key": project_key,
-                        "pullRequestId": pr_id,
                         "resolved": "false",  # Only analyze unresolved issues to avoid noise in the analysis
                         "inNewCodePeriod": "true",  # Necessary bc it analyzes only the code changed in the pull request, no added issues from the other branch
                     },
                 )
                 if results:
                     logger.info(f"SonarQube analysis completed successfully for project {project_key}.")
-                try:
-                    sonar_payload = json.loads(results.content[0].text) if results and results.content else {}
-                    if isinstance(sonar_payload, dict):
-                        sonar_count = len(sonar_payload.get("issues", []))
-                    elif isinstance(sonar_payload, list):
-                        sonar_count = len(sonar_payload)
-                    else:
-                        sonar_count = 0
-                    logger.info(
-                        "Sonar returned %s issues for project=%s pullRequestId=%s",
-                        sonar_count,
-                        project_key,
-                        pr_id,
-                    )
-                except Exception as parse_error:
-                    logger.warning("Could not parse Sonar raw payload for debug: %s", parse_error)
+
     except Exception as e:
         logger.error(f"Failed to connect to SonarQube {e}")
         sys.exit(1)  # If SonarQube fails, stop the build to avoid false positives in the pull request analysis
@@ -956,7 +935,7 @@ async def main() -> None:
         sys.exit(1)
 
     # Extract and clean the SonarQube data
-    issues = await fetch_sonar_issues(project_key, pr_id)
+    issues = await fetch_sonar_issues(project_key)
 
     if not issues:
         logger.info("No relevant issues found by SonarQube. Posting a clean analysis summary to the pull request.")
