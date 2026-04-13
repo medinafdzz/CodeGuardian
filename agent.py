@@ -731,7 +731,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
 
         active_keys_for_comment = {
             issue_key for issue_key in comment_issue_keys
-            if issue_key in detected_issue_keys and latest_comment_id_by_issue_key.get(issue_key) == comment_id
+            if issue_key in publishable_issue_keys and latest_comment_id_by_issue_key.get(issue_key) == comment_id
         }
 
         comment_info = active_inline_comments.get(comment_id)
