@@ -495,7 +495,7 @@ async def post_inline_comment(session: ClientSession, pr_id: str, project_key: s
         raise
 
 # Request all comments from the pull request so can inspect previous feedback
-async def get_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str) -> dict[str, dict]:
+async def get_inline_comments(session: ClientSession, pr_id: str, project_key: str, workspace: str) -> dict[int, dict]:
     try:
         results = await session.call_tool(
             name="getPullRequestComments",
@@ -517,52 +517,40 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
             comments = []
 
         logger.info(f"DEBUG: Bitbucket returned {len(comments)} comments in total for this PR.")
+        # Key by comment_id to avoid losing old comments that share the same issue_key
         active_inline_comments = {}
 
         # Review every comment in the PR to find the ones created by the agent
         for comment in comments:
-
             if comment.get("deleted", False):
                 continue
 
             if comment.get("resolved", False):
                 continue
-            
-            if comment.get("parent"):
-                continue
 
-            # Add debug output in get_inline_comments() after line 531:
-            if comment.get("resolved", False):
-                logger.info(f"FILTERED: Comment {comment.get('id')} already resolved=true")
-                continue
             if comment.get("parent"):
-                logger.info(f"FILTERED: Comment {comment.get('id')} is a reply (has parent)")
                 continue
 
             raw_text = comment.get("content", {}).get("raw", "")
             issue_keys = extract_issue_key(raw_text)
+
             if not issue_keys:
                 logger.info(f"FILTERED: Comment {comment.get('id')} has NO CodeGuardian-IDs marker")
                 continue
-            
-            raw_text = comment.get("content", {}).get("raw", "")
-            issue_keys = extract_issue_key(raw_text)
 
-            if issue_keys:
-                # Extract the main metadata
-                comment_id = int(comment.get("id"))
-                resolved = comment.get("resolved", False)
-                inline_data = comment.get("inline")
+            comment_id = int(comment.get("id"))
+            resolved = comment.get("resolved", False)
+            inline_data = comment.get("inline")
 
-                # Track all agent comments with IDs
-                for issue_key in issue_keys:
-                    active_inline_comments[issue_key] = {
-                        "comment_id": comment_id,
-                        "resolved": resolved,
-                        "inline": inline_data,
-                    }
+            active_inline_comments[comment_id] = {
+                "comment_id": comment_id,
+                "resolved": resolved,
+                "inline": inline_data,
+                "issue_keys": set(issue_keys),
+            }
 
             logger.info(f"RAW COMMENT JSON: {json.dumps(comment)}")
+
         return active_inline_comments
 
     except Exception as e:
@@ -571,7 +559,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
 
 # If an issue was solve it must be indicated by marking the comment as resolved in Bitbucket
 async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key: str, comment_id: str,
-                                 workspace: str) -> None:
+                                 workspace: str) -> bool:
     try:
         await session.call_tool(
             name="resolveComment",
@@ -595,30 +583,41 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
 
     current_issues_by_key = {build_issue_key(issue): issue for issue in issues}
     current_issue_keys = set(current_issues_by_key.keys())
-    active_issue_keys = set(active_inline_comments.keys())
 
-    # Group the tracked issue keys by comment_id to avoid resolving a grouped comment too early
+     # Determine the latest comment that owns each issue key
+    latest_comment_id_by_issue_key = {}
+    for comment_id, comment_info in active_inline_comments.items():
+        for issue_key in comment_info.get("issue_keys", set()):
+            previous_id = latest_comment_id_by_issue_key.get(issue_key)
+            if previous_id is None or comment_id > previous_id:
+                latest_comment_id_by_issue_key[issue_key] = comment_id
+
+    # Only keys owned by their latest comment are considered currently active in PR history
+    active_issue_keys = set(latest_comment_id_by_issue_key.keys())
+
+    # Group by comment_id directly to avoid key-collision overwrites
     comment_to_issue_keys = {}
     resolved_ids = set()
     forced_republish_keys = set()
 
-    for issue_key, comment_info in active_inline_comments.items():
-        comment_id = comment_info["comment_id"]
-        if comment_id not in comment_to_issue_keys:
-            comment_to_issue_keys[comment_id] = set()
-        comment_to_issue_keys[comment_id].add(issue_key)
-
+    for comment_id, comment_info in active_inline_comments.items():
+        comment_to_issue_keys[comment_id] = set(comment_info.get("issue_keys", set()))
+        
     # Resolve or refresh comments depending on how their tracked issue keys evolved
     for comment_id, comment_issue_keys in comment_to_issue_keys.items():
         if comment_id in resolved_ids:
             continue
 
-        active_keys_for_comment = comment_issue_keys.intersection(current_issue_keys)
+        active_keys_for_comment = {
+            issue_key
+            for issue_key in comment_issue_keys
+            if issue_key in current_issue_keys
+            and latest_comment_id_by_issue_key.get(issue_key) == comment_id
+        }
 
         # Case 1: all keys disappeared -> resolve old comment
         if not active_keys_for_comment:
-            sample_issue_key = next(iter(comment_issue_keys))
-            comment_info = active_inline_comments.get(sample_issue_key)
+            comment_info = active_inline_comments.get(comment_id)
 
             if not comment_info or comment_info.get("resolved", False):
                 continue
@@ -637,8 +636,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
 
         # Case 2: mixed state (some keys resolved, some still active) -> resolve and republish active subset
         if active_keys_for_comment != comment_issue_keys:
-            sample_issue_key = next(iter(comment_issue_keys))
-            comment_info = active_inline_comments.get(sample_issue_key)
+            comment_info = active_inline_comments.get(comment_id)
 
             logger.info(
                 f"Refreshing mixed comment_id={comment_id} "
