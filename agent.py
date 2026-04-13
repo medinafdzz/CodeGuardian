@@ -28,14 +28,17 @@ from prometheus_client import (
 
 # Keep Jenkins logs readable without hiding useful info when something breaks.
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    stream=sys.stdout,  # added because avoid the 2> dev/null in Jenkins to show the logs
+    stream=sys.stdout,
 )
-# Set the logging level to WARNING to reduce noise in the logs
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger("codeguardian")
+logger.setLevel(logging.INFO)
+
 logging.getLogger("google").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
 # These models are the data the agent moves around between Sonar, Gemini and Bitbucket.class
@@ -442,7 +445,10 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             registry=registry,
         )
         logger.info(
-            f"Metrics pushed to Prometheus Pushgateway: event_type={event_type}, build_number={build_id}, latency={duration:.2f}s, prompt_tokens={metric_prompt}, response_tokens={metric_response}, total_tokens={metric_total_tokens}"
+            "Metrics pushed: build=%s latency=%.2fs total_tokens=%s",
+            build_id,
+            duration,
+            metric_total_tokens,
         )
     except Exception as metric_error:
         logger.error(f"Failed to push metrics to Prometheus Pushgateway: {metric_error}")
@@ -470,7 +476,7 @@ async def post_comment(session: ClientSession, pr_id: str, repo_slug: str, comme
                 "content": comment,
             },
         )
-        logger.info(f"Comment added successfully to the pull request {pr_id}")
+        logger.info("PR summary comment published")
     except Exception as e:
         logger.error(f"Failed to add comment: {e}")
         raise
@@ -504,8 +510,6 @@ def validate_issue_against_file(issue: Issue, line_tolerance: int = 6) -> bool:
         end = int(getattr(issue, "original_end_line", issue.line) or issue.line)
 
         if start < 1 or end < start or end > len(lines):
-            logger.warning("Invalid issue range for file validation: file=%s start=%s end=%s total_lines=%s",
-                           issue.file, start, end, len(lines))
             return False
 
         original = normalize_code_block(clean_replacement_text(issue.original_code))
@@ -523,19 +527,12 @@ def validate_issue_against_file(issue: Issue, line_tolerance: int = 6) -> bool:
         nearby_block = normalize_code_block("".join(lines[window_start - 1:window_end]))
 
         if original == nearby_block or original in nearby_block:
-            logger.info(
-                "Original code block matched nearby window instead of exact range: file=%s start=%s end=%s window=%s-%s",
-                issue.file, start, end, window_start, window_end)
             return True
 
-        logger.warning("Original code block does not match exact file range: file=%s start=%s end=%s", issue.file,
-                       start, end)
         return False
 
-    except Exception as e:
-        logger.warning("Issue validation against file failed for %s: %s", issue.file, e)
+    except Exception:
         return False
-
 
 # Check if two issues have the same fix to group them in the same comment
 def same_fix(a: Issue, b: Issue) -> bool:
@@ -591,7 +588,6 @@ async def post_inline_comment(session: ClientSession, pr_id: str, repo_slug: str
                 },
             },
         )
-        logger.info(f"Inline comment added successfully to the pull request {pr_id}")
         return True
     except Exception as e:
         logger.error(f"Failed to add inline comment: {e}")
@@ -696,7 +692,7 @@ async def resolve_inline_comment(
     )
     return False
 
-# In some cases, the MCP tool to resolve comments can fail due to transient issues in the connection or the tool itself.
+# Fallback REST resolution when MCP cannot resolve the comment.
 async def resolve_inline_comment_by_rest(
     pr_id: str,
     repo_slug: str,
@@ -743,16 +739,31 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
                                       issues: list[Issue]) -> int:
     active_inline_comments = await get_inline_comments(session, pr_id, repo_slug, workspace)
 
+    total_detected = len(issues)
+    invalid_replacements = 0
+    invalid_file_matches = 0
     valid_issues = []
+
     for issue in issues:
         if not is_valid_replacement(issue):
+            invalid_replacements += 1
             continue
         if not validate_issue_against_file(issue):
+            invalid_file_matches += 1
             continue
         valid_issues.append(issue)
 
     current_issues_by_key = {build_issue_key(issue): issue for issue in valid_issues}
     publishable_issue_keys = set(current_issues_by_key.keys())
+
+    logger.info(
+        "Issues detected=%s, publishable=%s, skipped_invalid_replacement=%s, skipped_file_mismatch=%s, tracked_comments=%s",
+        total_detected,
+        len(publishable_issue_keys),
+        invalid_replacements,
+        invalid_file_matches,
+        len(active_inline_comments),
+    )
 
     latest_comment_id_by_issue_key = {}
     for comment_id, comment_info in active_inline_comments.items():
@@ -790,8 +801,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
                     forced_republish_keys.update(active_keys_for_comment)
                 await asyncio.sleep(0.2)
             else:
-                logger.warning(
-                    f"Could not resolve outdated comment_id={comment_id}; skipping republish to avoid duplicates.")
+                logger.info("Comment %s could not be resolved", comment_id)
             continue
 
         if not active_keys_for_comment:
@@ -803,9 +813,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
                 resolved_ids.add(comment_id)
                 await asyncio.sleep(0.2)
             else:
-                logger.warning(
-                    f"Skipping stale comment republish for comment_id={comment_id} because Bitbucket rejected the resolve operation."
-                )
+                logger.info("Comment %s could not be resolved", comment_id)
             continue
 
         if active_keys_for_comment != comment_issue_keys:
@@ -816,9 +824,7 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
                     forced_republish_keys.update(active_keys_for_comment)
                     await asyncio.sleep(0.2)
                 else:
-                    logger.warning(
-                        f"Skipping republish for comment_id={comment_id} because Bitbucket rejected the resolve operation."
-                    )
+                    logger.info("Comment %s could not be resolved", comment_id)
             continue
 
     new_issue_keys = (publishable_issue_keys - active_issue_keys).union(forced_republish_keys & publishable_issue_keys)
@@ -999,11 +1005,12 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
                 created_inline_comments = await synchronize_inline_comments(session_bb, pr_id, repo_slug, workspace,
                                                                             decision.issues)
 
-                issue_count = len(decision.issues)
-
-                logger.info(f"Analysis results posted to PR {pr_id}: "
-                            f"{issue_count} active issues in current analysis, "
-                            f"{created_inline_comments} new inline comments created.")
+                logger.info(
+                    "Analysis results posted to PR %s: detected_issues=%s, new_inline_comments=%s",
+                    pr_id,
+                    len(decision.issues),
+                    created_inline_comments,
+                )
 
     except Exception as e:
         logger.error(f"Failed to report analysis results to Bitbucket: {e}")
