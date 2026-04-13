@@ -588,10 +588,11 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
         raise
 
 logger.info(
-    "Bitbucket MCP auth check: email_present=%s token_present=%s token_len=%s workspace=%s",
+    "Bitbucket auth vars: email_present=%s username_present=%s api_token_present=%s app_token_present=%s workspace=%s",
     bool(os.getenv("BITBUCKET_EMAIL")),
+    bool(os.getenv("BITBUCKET_USERNAME")),
     bool(os.getenv("BITBUCKET_API_TOKEN")),
-    len(os.getenv("BITBUCKET_API_TOKEN", "")),
+    bool(os.getenv("BITBUCKET_APP_TOKEN")),
     os.getenv("BITBUCKET_WORKSPACE", "medinafdzz"),
 )
 
@@ -608,7 +609,7 @@ async def resolve_inline_comment(session: ClientSession, pr_id: str, project_key
                 "comment_id": str(comment_id),
             },
         )
-        logger.info(f"resolveComment raw response for comment {comment_id}: {response}")
+        logger.info("resolveComment raw response for comment %s: %s", comment_id, response)
         logger.info(f"Comment {comment_id} resolved successfully in pull request {pr_id}")
         return True
     except Exception as e:
@@ -869,20 +870,31 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, projec
 # Turn the final AI decision into visible comments in Bitbucket for a pull request.
 async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) -> None:
     # Configure the Bitbucket tool parameters
+    bitbucket_username = (
+        os.getenv("BITBUCKET_EMAIL")
+        or os.getenv("BITBUCKET_USERNAME")
+        or ""
+    )
+
+    bitbucket_password = (
+        os.getenv("BITBUCKET_API_TOKEN")
+        or os.getenv("BITBUCKET_APP_TOKEN")
+        or ""
+    )
+
     bitbucket_env = os.environ.copy()
     bitbucket_env.update({
         "BITBUCKET_URL": os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0"),
         "BITBUCKET_WORKSPACE": os.getenv("BITBUCKET_WORKSPACE", "medinafdzz"),
-        "BITBUCKET_USERNAME": os.getenv("BITBUCKET_EMAIL"),
-        "BITBUCKET_PASSWORD": os.getenv("BITBUCKET_API_TOKEN"),
+        "BITBUCKET_USERNAME": bitbucket_username,
+        "BITBUCKET_PASSWORD": bitbucket_password,
     })
-
 
     logger.info(
         "Bitbucket MCP env prepared: username_present=%s password_present=%s password_len=%s",
-        bool(bitbucket_env.get("BITBUCKET_USERNAME")),
-        bool(bitbucket_env.get("BITBUCKET_PASSWORD")),
-        len(bitbucket_env.get("BITBUCKET_PASSWORD", "")),
+        bool(bitbucket_username),
+        bool(bitbucket_password),
+        len(bitbucket_password),
     )
     workspace = os.getenv("BITBUCKET_WORKSPACE", "medinafdzz")
     decline = decision.decline_pr
