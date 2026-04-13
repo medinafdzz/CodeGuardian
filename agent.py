@@ -538,16 +538,15 @@ async def get_inline_comments(session: ClientSession, pr_id: str, project_key: s
                 # Extract the main metadata
                 comment_id = int(comment.get("id"))
                 resolved = comment.get("resolved", False)
-                inline_data = comment.get("inline", {})
+                inline_data = comment.get("inline")
 
-                # Keep only inline comments that belong to the agent
-                if inline_data and comment_id:
-                    for issue_key in issue_keys:
-                        active_inline_comments[issue_key] = {
-                            "comment_id": comment_id,
-                            "resolved": resolved,
-                            "inline": inline_data,
-                        }
+                # Track all agent comments with IDs
+                for issue_key in issue_keys:
+                    active_inline_comments[issue_key] = {
+                        "comment_id": comment_id,
+                        "resolved": resolved,
+                        "inline": inline_data,
+                    }
 
             logger.info(f"RAW COMMENT JSON: {json.dumps(comment)}")
         return active_inline_comments
