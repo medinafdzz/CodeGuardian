@@ -86,7 +86,7 @@ def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
     return unique_issues
 
 
-# Read the key of the issues that just have been commented
+# Extract the hidden issue identifiers previously stored in agent comments.
 def extract_issue_key(comment_text: str) -> list[str]:
     keys = set()
 
@@ -107,7 +107,8 @@ def extract_issue_key(comment_text: str) -> list[str]:
     return list(keys)
 
 
-# When the agent needs to update a comment, it can reuse the same issue keys to indicate that is the same issue and avoid confusion.
+# Attach stable hidden identifiers to each agent comment so the next analysis
+# can map current issues to existing PR comments.
 def build_hidden_ids(issue_keys: list[str]) -> str:
     unique_keys = list(dict.fromkeys(k.strip() for k in issue_keys if k and k.strip()))
     if not unique_keys:
@@ -544,7 +545,7 @@ def same_fix(a: Issue, b: Issue) -> bool:
                 clean_replacement_text(b.proposed_code)))
 
 
-# Add each comment to its exact line so the developer does not have to search for it by hand.
+# Publish one inline comment per current issue on its target line.
 async def post_inline_comment(session: ClientSession, pr_id: str, repo_slug: str, issue: Issue, workspace: str) -> bool:
     try:
         file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
@@ -716,146 +717,9 @@ async def delete_inline_comment_by_rest(
     except Exception:
         return False
 
-# If an issue was solve it must be indicated by marking the comment as resolved in Bitbucket
-async def resolve_inline_comment(
-    session: ClientSession,
-    pr_id: str,
-    repo_slug: str,
-    comment_id: str,
-    workspace: str,
-) -> bool:
-    resolved = False
-
-    try:
-        await session.call_tool(
-            name="resolveComment",
-            arguments={
-                "workspace": str(workspace),
-                "pull_request_id": str(pr_id),
-                "repo_slug": str(repo_slug),
-                "comment_id": str(comment_id),
-            },
-        )
-        resolved = True
-    except Exception:
-        # Fallback silently to REST if MCP fails
-        resolved = await resolve_inline_comment_by_rest(pr_id, repo_slug, comment_id, workspace)
-
-    if resolved:
-        logger.info("Comment ID: %s: Resolved", comment_id)
-        return True
-
-    logger.error(
-        "Comment ID: %s: Resolve failed (pr_id=%s repo_slug=%s workspace=%s)",
-        comment_id,
-        pr_id,
-        repo_slug,
-        workspace,
-    )
-    return False
-
-
-# Fallback REST resolution when MCP cannot resolve the comment.
-async def resolve_inline_comment_by_rest(
-    pr_id: str,
-    repo_slug: str,
-    comment_id: str,
-    workspace: str,
-) -> bool:
-    headers = _get_bitbucket_basic_auth_headers()
-    if not headers:
-        return False
-
-    resolve_url = f"{_build_pullrequest_comment_url(pr_id, repo_slug, comment_id, workspace)}/resolve"
-
-    def _post_resolve() -> int:
-        req = urllib.request.Request(
-            url=resolve_url,
-            data=b"",
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return int(resp.status)
-
-    try:
-        status = await asyncio.to_thread(_post_resolve)
-        return 200 <= status < 300
-    except Exception:
-        return False
-
-
-async def reopen_inline_comment(
-    session: ClientSession,
-    pr_id: str,
-    repo_slug: str,
-    comment_id: str,
-    workspace: str,
-) -> bool:
-    reopened = False
-
-    try:
-        await session.call_tool(
-            name="reopenComment",
-            arguments={
-                "workspace": str(workspace),
-                "pull_request_id": str(pr_id),
-                "repo_slug": str(repo_slug),
-                "comment_id": str(comment_id),
-            },
-        )
-        reopened = True
-    except Exception:
-        reopened = await reopen_inline_comment_by_rest(
-            pr_id,
-            repo_slug,
-            comment_id,
-            workspace,
-        )
-
-    if reopened:
-        logger.info("Comment ID: %s: Reopened", comment_id)
-        return True
-
-    logger.error(
-        "Comment ID: %s: Reopen failed (pr_id=%s repo_slug=%s workspace=%s)",
-        comment_id,
-        pr_id,
-        repo_slug,
-        workspace,
-    )
-    return False
-
-
-async def reopen_inline_comment_by_rest(
-    pr_id: str,
-    repo_slug: str,
-    comment_id: str,
-    workspace: str,
-) -> bool:
-    headers = _get_bitbucket_basic_auth_headers()
-    if not headers:
-        return False
-
-    reopen_url = f"{_build_pullrequest_comment_url(pr_id, repo_slug, comment_id, workspace)}/resolve"
-
-    def _delete_reopen() -> int:
-        req = urllib.request.Request(
-            url=reopen_url,
-            headers=headers,
-            method="DELETE",
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return int(resp.status)
-
-    try:
-        status = await asyncio.to_thread(_delete_reopen)
-        return 200 <= status < 300
-    except Exception:
-        return False
-
-
-# When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
+# Synchronize PR inline comments with the current analysis state:
+# obsolete agent comments are deleted, missing comments are created,
+# and no agent comments remain when no issues are detected.
 async def synchronize_inline_comments(
     session: ClientSession,
     pr_id: str,
@@ -1012,7 +876,7 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
                     await post_comment(session_bb, pr_id, repo_slug, summary_comment, workspace)
 
                 logger.info(
-                    "Analysis results posted to PR %s: detected_issues=%s, new_inline_comments=%s",
+                    "Analysis state synchronized for PR %s: detected_issues=%s, created_inline_comments=%s",
                     pr_id,
                     len(decision.issues),
                     created_inline_comments,
