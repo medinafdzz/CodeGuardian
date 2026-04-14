@@ -10,6 +10,7 @@ import time
 import re
 import base64
 import urllib.request
+import urllib.error
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
 from google.genai import (
     types,)  # Library to manage the configuration and types for the Gemini model API
@@ -651,6 +652,69 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
         logger.error(f"Failed to retrieve inline comments: {e}")
         raise
 
+def _get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
+    bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
+    bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "").strip()
+
+    if not bitbucket_username or not bitbucket_password:
+        return None
+
+    auth_raw = f"{bitbucket_username}:{bitbucket_password}".encode("utf-8")
+    auth_b64 = base64.b64encode(auth_raw).decode("ascii")
+
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Basic {auth_b64}",
+    }
+
+
+def _get_bitbucket_api_base_url() -> str:
+    return os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
+
+
+def _build_pullrequest_comment_url(
+    pr_id: str,
+    repo_slug: str,
+    comment_id: str,
+    workspace: str,
+) -> str:
+    base_url = _get_bitbucket_api_base_url()
+    return (
+        f"{base_url}/repositories/{workspace}/{repo_slug}"
+        f"/pullrequests/{pr_id}/comments/{comment_id}"
+    )
+
+
+async def delete_inline_comment_by_rest(
+    pr_id: str,
+    repo_slug: str,
+    comment_id: str,
+    workspace: str,
+) -> bool:
+    headers = _get_bitbucket_basic_auth_headers()
+    if not headers:
+        return False
+
+    delete_url = _build_pullrequest_comment_url(pr_id, repo_slug, comment_id, workspace)
+
+    def _delete_comment() -> int:
+        req = urllib.request.Request(
+            url=delete_url,
+            headers=headers,
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return int(resp.status)
+
+    try:
+        status = await asyncio.to_thread(_delete_comment)
+        return status in (200, 204)
+    except urllib.error.HTTPError as e:
+        if e.code in (200, 204):
+            return True
+        return False
+    except Exception:
+        return False
 
 # If an issue was solve it must be indicated by marking the comment as resolved in Bitbucket
 async def resolve_inline_comment(
@@ -698,23 +762,11 @@ async def resolve_inline_comment_by_rest(
     comment_id: str,
     workspace: str,
 ) -> bool:
-    bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
-    bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "").strip()
-
-    if not bitbucket_username or not bitbucket_password:
+    headers = _get_bitbucket_basic_auth_headers()
+    if not headers:
         return False
 
-    base_url = os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
-    resolve_url = (
-        f"{base_url}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/comments/{comment_id}/resolve")
-
-    auth_raw = f"{bitbucket_username}:{bitbucket_password}".encode("utf-8")
-    auth_b64 = base64.b64encode(auth_raw).decode("ascii")
-
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Basic {auth_b64}",
-    }
+    resolve_url = f"{_build_pullrequest_comment_url(pr_id, repo_slug, comment_id, workspace)}/resolve"
 
     def _post_resolve() -> int:
         req = urllib.request.Request(
@@ -781,22 +833,11 @@ async def reopen_inline_comment_by_rest(
     comment_id: str,
     workspace: str,
 ) -> bool:
-    bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
-    bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "").strip()
-
-    if not bitbucket_username or not bitbucket_password:
+    headers = _get_bitbucket_basic_auth_headers()
+    if not headers:
         return False
 
-    base_url = os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
-    reopen_url = (f"{base_url}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/comments/{comment_id}/resolve")
-
-    auth_raw = f"{bitbucket_username}:{bitbucket_password}".encode("utf-8")
-    auth_b64 = base64.b64encode(auth_raw).decode("ascii")
-
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Basic {auth_b64}",
-    }
+    reopen_url = f"{_build_pullrequest_comment_url(pr_id, repo_slug, comment_id, workspace)}/resolve"
 
     def _delete_reopen() -> int:
         req = urllib.request.Request(
