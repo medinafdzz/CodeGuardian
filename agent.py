@@ -537,14 +537,6 @@ def validate_issue_against_file(issue: Issue, line_tolerance: int = 6) -> bool:
         return False
 
 
-# Check if two issues have the same fix to group them in the same comment
-def same_fix(a: Issue, b: Issue) -> bool:
-    return (a.file == b.file and normalize_code_block(clean_replacement_text(a.original_code)) == normalize_code_block(
-        clean_replacement_text(b.original_code)) and
-            normalize_code_block(clean_replacement_text(a.proposed_code)) == normalize_code_block(
-                clean_replacement_text(b.proposed_code)))
-
-
 def build_inline_comment_content(issue: Issue) -> str:
     file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
     issue_key = build_issue_key(issue)
@@ -608,7 +600,7 @@ async def post_inline_comment(
         logger.error(f"Failed to add inline comment: {e}")
         raise
 
-# Request all comments from the pull request so can inspect previous feedback
+# Read all existing agent comments from the pull request to reconcile current analysis state.
 async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
     try:
         results = await session.call_tool(
@@ -730,6 +722,33 @@ async def delete_inline_comment_by_rest(
     except Exception:
         return False
 
+
+async def delete_comment_ids(
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+    comment_ids: set[int],
+) -> tuple[set[int], set[int]]:
+    deleted_comment_ids: set[int] = set()
+    failed_comment_ids: set[int] = set()
+
+    for comment_id in sorted(comment_ids):
+        deleted = await delete_inline_comment_by_rest(
+            pr_id,
+            repo_slug,
+            str(comment_id),
+            workspace,
+        )
+        if deleted:
+            deleted_comment_ids.add(comment_id)
+            await asyncio.sleep(0.2)
+        else:
+            failed_comment_ids.add(comment_id)
+            logger.info("Comment %s could not be deleted", comment_id)
+
+    return deleted_comment_ids, failed_comment_ids
+
+
 # Synchronize PR inline comments with the current analysis state:
 # obsolete agent comments are deleted, missing comments are created,
 # and no agent comments remain when no issues are detected.
@@ -771,7 +790,7 @@ async def synchronize_inline_comments(
     existing_comments_by_issue_key: dict[str, dict] = {}
 
     # Keep only one comment per issue_key.
-    # If there are duplicates, grouped comments, outdated or resolved comments, delete them.
+    # Duplicates, grouped comments or legacy comments are deleted.
     for comment_id in sorted(active_inline_comments.keys(), reverse=True):
         comment_info = active_inline_comments[comment_id]
         issue_keys = set(comment_info.get("issue_keys", set()))
@@ -788,13 +807,35 @@ async def synchronize_inline_comments(
 
         existing_comments_by_issue_key[issue_key] = comment_info
 
+    # First, delete clearly obsolete duplicate/grouped comments.
+    deleted_comment_ids, failed_comment_ids = await delete_comment_ids(
+        pr_id,
+        repo_slug,
+        workspace,
+        comments_to_delete,
+    )
+
+    if deleted_comment_ids:
+        logger.info(
+            "Deleted %s duplicate/grouped legacy comments from PR %s",
+            len(deleted_comment_ids),
+            pr_id,
+        )
+
     # Delete comments that no longer represent the current desired state
     keys_blocked_by_failed_delete: set[str] = set()
 
     for issue_key, comment_info in existing_comments_by_issue_key.items():
         comment_id = int(comment_info["comment_id"])
-        inline_data = comment_info.get("inline") or {}
 
+        if comment_id in deleted_comment_ids:
+            continue
+
+        if comment_id in failed_comment_ids:
+            keys_blocked_by_failed_delete.add(issue_key)
+            continue
+
+        inline_data = comment_info.get("inline") or {}
         desired_issue = desired_issues_by_key.get(issue_key)
 
         should_delete = False
@@ -819,9 +860,14 @@ async def synchronize_inline_comments(
                 should_delete = True
 
         if should_delete:
-            deleted = await delete_inline_comment_by_rest(pr_id, repo_slug, str(comment_id), workspace)
+            deleted = await delete_inline_comment_by_rest(
+                pr_id,
+                repo_slug,
+                str(comment_id),
+                workspace,
+            )
             if deleted:
-                comments_to_delete.add(comment_id)
+                deleted_comment_ids.add(comment_id)
                 await asyncio.sleep(0.2)
             else:
                 logger.info("Comment %s could not be deleted", comment_id)
@@ -830,7 +876,7 @@ async def synchronize_inline_comments(
     existing_issue_keys_after_cleanup = {
         issue_key
         for issue_key, comment_info in existing_comments_by_issue_key.items()
-        if int(comment_info["comment_id"]) not in comments_to_delete
+        if int(comment_info["comment_id"]) not in deleted_comment_ids
     }
 
     created_comments = 0
@@ -847,7 +893,16 @@ async def synchronize_inline_comments(
             created_comments += 1
         await asyncio.sleep(0.2)
 
+    logger.info(
+        "Comment sync result for PR %s: deleted_comments=%s, blocked_issue_keys=%s, created_comments=%s",
+        pr_id,
+        len(deleted_comment_ids),
+        len(keys_blocked_by_failed_delete),
+        created_comments,
+    )
+
     return created_comments
+
 
 # Turn the final AI decision into visible comments in Bitbucket for a pull request.
 async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decision: Decision) -> None:
