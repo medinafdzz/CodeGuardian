@@ -545,38 +545,50 @@ def same_fix(a: Issue, b: Issue) -> bool:
                 clean_replacement_text(b.proposed_code)))
 
 
+def build_inline_comment_content(issue: Issue) -> str:
+    file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
+    issue_key = build_issue_key(issue)
+
+    clean_orig = clean_replacement_text(issue.original_code)
+    clean_prop = clean_replacement_text(issue.proposed_code)
+
+    line_start = int(getattr(issue, "original_start_line", issue.line))
+    line_end = int(getattr(issue, "original_end_line", issue.line))
+
+    return (
+        f"### Code Issue\n\n"
+        f"**File:** {issue.file}\n\n"
+        f"**Lines:** {line_start}-{line_end}\n\n"
+        f"**Problem ({issue.severity}):** {issue.problem}\n\n"
+        f"**Solution:** {issue.solution}\n\n"
+        f"**Block to substitute:**\n"
+        f"```{file_extension}\n"
+        f"{clean_orig}\n"
+        f"```\n\n"
+        f"**Refactored Code:**\n"
+        f"```{file_extension}\n"
+        f"{clean_prop}\n"
+        f"```\n\n"
+        f"{build_hidden_ids([issue_key])}"
+    )
+
 # Publish one inline comment per current issue on its target line.
-async def post_inline_comment(session: ClientSession, pr_id: str, repo_slug: str, issue: Issue, workspace: str) -> bool:
+async def post_inline_comment(
+    session: ClientSession,
+    pr_id: str,
+    repo_slug: str,
+    issue: Issue,
+    workspace: str,
+) -> bool:
     try:
-        file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
-        issue_key = build_issue_key(issue)
-
-        clean_orig = clean_replacement_text(issue.original_code)
-        clean_prop = clean_replacement_text(issue.proposed_code)
-
         if not is_valid_replacement(issue):
             return False
 
         if not validate_issue_against_file(issue):
             return False
 
-        line_start = int(getattr(issue, "original_start_line", issue.line))
         line_end = int(getattr(issue, "original_end_line", issue.line))
-
-        content = (f"### Code Issue\n\n"
-                   f"**File:** {issue.file}\n\n"
-                   f"**Lines:** {line_start}-{line_end}\n\n"
-                   f"**Problem ({issue.severity}):** {issue.problem}\n\n"
-                   f"**Solution:** {issue.solution}\n\n"
-                   f"**Block to substitute:**\n"
-                   f"```{file_extension}\n"
-                   f"{clean_orig}\n"
-                   f"```\n\n"
-                   f"**Refactored Code:**\n"
-                   f"```{file_extension}\n"
-                   f"{clean_prop}\n"
-                   f"```\n\n"
-                   f"{build_hidden_ids([issue_key])}")
+        content = build_inline_comment_content(issue)
 
         await session.call_tool(
             name="addPullRequestComment",
@@ -595,7 +607,6 @@ async def post_inline_comment(session: ClientSession, pr_id: str, repo_slug: str
     except Exception as e:
         logger.error(f"Failed to add inline comment: {e}")
         raise
-
 
 # Request all comments from the pull request so can inspect previous feedback
 async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
@@ -645,6 +656,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
                 "inline": inline_data,
                 "outdated": outdated,
                 "issue_keys": set(issue_keys),
+                "raw_text": raw_text,
             }
 
         return active_inline_comments
@@ -652,6 +664,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
     except Exception as e:
         logger.error(f"Failed to retrieve inline comments: {e}")
         raise
+
 
 def _get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
     bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
@@ -797,8 +810,12 @@ async def synchronize_inline_comments(
             expected_line = int(getattr(desired_issue, "original_end_line", desired_issue.line))
             current_path = inline_data.get("path")
             current_line = inline_data.get("to")
+            current_raw_text = (comment_info.get("raw_text") or "").strip()
+            expected_raw_text = build_inline_comment_content(desired_issue).strip()
 
             if current_path != expected_path or current_line != expected_line:
+                should_delete = True
+            elif current_raw_text != expected_raw_text:
                 should_delete = True
 
         if should_delete:
