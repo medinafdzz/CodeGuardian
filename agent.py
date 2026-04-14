@@ -67,6 +67,7 @@ class AgentExecutionError(Exception):
     """Raised when the agent cannot complete a required execution step."""
 
 CODEGUARDIAN_SUMMARY_TITLE = "**CodeGuardian Analysis Summary**"
+CODEGUARDIAN_AGENT_MARKER = "<!-- CodeGuardian-Agent -->"
 
 # Generate a key for each issue
 def build_issue_key(issue: Issue) -> str:
@@ -120,6 +121,13 @@ def build_hidden_ids(issue_keys: list[str]) -> str:
     ids_lines = "\n".join(f"ID: {k}" for k in unique_keys)
     return f"<!-- CodeGuardian-IDs:\n{ids_lines}\n-->"
 
+
+def wrap_agent_comment(body: str) -> str:
+    return f"{CODEGUARDIAN_AGENT_MARKER}\n{body}"
+
+
+def is_agent_comment(comment_text: str) -> bool:
+    return CODEGUARDIAN_AGENT_MARKER in (comment_text or "")
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
 def load_webhook_data(filepath: str) -> tuple[str, str, str, str]:
@@ -512,10 +520,17 @@ def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
             continue
 
         raw_text = (comment.get("content", {}) or {}).get("raw", "") or ""
-        if raw_text.strip().startswith(CODEGUARDIAN_SUMMARY_TITLE):
-            comment_id = comment.get("id")
-            if comment_id is not None:
-                summary_comment_ids.add(int(comment_id))
+        normalized_text = raw_text.replace(CODEGUARDIAN_AGENT_MARKER, "", 1).strip()
+
+        if (
+            is_agent_comment(raw_text)
+            or normalized_text.startswith(CODEGUARDIAN_SUMMARY_TITLE)
+            or raw_text.strip().startswith(CODEGUARDIAN_SUMMARY_TITLE)
+        ):
+            if normalized_text.startswith(CODEGUARDIAN_SUMMARY_TITLE) or raw_text.strip().startswith(CODEGUARDIAN_SUMMARY_TITLE):
+                comment_id = comment.get("id")
+                if comment_id is not None:
+                    summary_comment_ids.add(int(comment_id))
 
     return summary_comment_ids
 
@@ -582,7 +597,7 @@ def build_inline_comment_content(issue: Issue) -> str:
     line_start = int(getattr(issue, "original_start_line", issue.line))
     line_end = int(getattr(issue, "original_end_line", issue.line))
 
-    return (
+    body = (
         f"### Code Issue\n\n"
         f"**File:** {issue.file}\n\n"
         f"**Lines:** {line_start}-{line_end}\n\n"
@@ -598,6 +613,8 @@ def build_inline_comment_content(issue: Issue) -> str:
         f"```\n\n"
         f"{build_hidden_ids([issue_key])}"
     )
+
+    return wrap_agent_comment(body)
 
 # Publish one inline comment per current issue on its target line.
 async def post_inline_comment(
@@ -667,6 +684,10 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
                 continue
 
             raw_text = comment.get("content", {}).get("raw", "")
+
+            if not is_agent_comment(raw_text):
+                continue
+
             issue_keys = extract_issue_key(raw_text)
 
             if not issue_keys:
