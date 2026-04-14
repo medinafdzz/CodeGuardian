@@ -856,8 +856,13 @@ async def reopen_inline_comment_by_rest(
 
 
 # When the agent mark the resolved issue, should desapear from the PR, and when a new issue appears in the analysis, should be added as a new comment.
-async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str,
-                                      issues: list[Issue]) -> int:
+async def synchronize_inline_comments(
+    session: ClientSession,
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+    issues: list[Issue],
+) -> int:
     active_inline_comments = await get_inline_comments(session, pr_id, repo_slug, workspace)
 
     total_detected = len(issues)
@@ -874,276 +879,94 @@ async def synchronize_inline_comments(session: ClientSession, pr_id: str, repo_s
             continue
         valid_issues.append(issue)
 
-    detected_issue_keys = {build_issue_key(issue) for issue in issues}
-    current_issues_by_key = {build_issue_key(issue): issue for issue in valid_issues}
-    publishable_issue_keys = set(current_issues_by_key.keys())
+    desired_issues_by_key = {build_issue_key(issue): issue for issue in valid_issues}
 
     logger.info(
         "Issues detected=%s, publishable=%s, skipped_invalid_replacement=%s, skipped_file_mismatch=%s, tracked_comments=%s",
         total_detected,
-        len(publishable_issue_keys),
+        len(desired_issues_by_key),
         invalid_replacements,
         invalid_file_matches,
         len(active_inline_comments),
     )
 
-    reopened_issue_keys = set()
-    reopened_comment_ids = set()
+    comments_to_delete: set[int] = set()
+    existing_comments_by_issue_key: dict[str, dict] = {}
 
-    resolved_comments_by_issue_key = {}
-    open_comments_by_issue_key = {}
+    # Keep only one comment per issue_key.
+    # If there are duplicates, grouped comments, outdated or resolved comments, delete them.
+    for comment_id in sorted(active_inline_comments.keys(), reverse=True):
+        comment_info = active_inline_comments[comment_id]
+        issue_keys = set(comment_info.get("issue_keys", set()))
 
-    for comment_id, comment_info in active_inline_comments.items():
-        for issue_key in comment_info.get("issue_keys", set()):
-            if comment_info.get("resolved", False):
-                if comment_info.get("outdated", False):
-                    continue
-                target = resolved_comments_by_issue_key
-            else:
-                target = open_comments_by_issue_key
-
-            previous_id = target.get(issue_key)
-            if previous_id is None or comment_id > previous_id:
-                target[issue_key] = comment_id
-
-    for issue_key in publishable_issue_keys:
-        if issue_key in open_comments_by_issue_key:
+        if len(issue_keys) != 1:
+            comments_to_delete.add(comment_id)
             continue
 
-        resolved_comment_id = resolved_comments_by_issue_key.get(issue_key)
-        if resolved_comment_id is None:
+        issue_key = next(iter(issue_keys))
+
+        if issue_key in existing_comments_by_issue_key:
+            comments_to_delete.add(comment_id)
             continue
 
-        if resolved_comment_id in reopened_comment_ids:
-            continue
+        existing_comments_by_issue_key[issue_key] = comment_info
 
-        resolved_comment_info = active_inline_comments.get(resolved_comment_id, {})
-        resolved_comment_issue_keys = set(resolved_comment_info.get("issue_keys", set()))
+    # Delete comments that no longer represent the current desired state
+    keys_blocked_by_failed_delete: set[str] = set()
 
-        if len(resolved_comment_issue_keys) > 1 and not resolved_comment_issue_keys.issubset(publishable_issue_keys):
-            continue
+    for issue_key, comment_info in existing_comments_by_issue_key.items():
+        comment_id = int(comment_info["comment_id"])
+        inline_data = comment_info.get("inline") or {}
 
-        if resolved_comment_issue_keys & set(open_comments_by_issue_key.keys()):
-            continue
+        desired_issue = desired_issues_by_key.get(issue_key)
 
-        reopened = await reopen_inline_comment(
-            session,
-            pr_id,
-            repo_slug,
-            str(resolved_comment_id),
-            workspace,
-        )
-        if reopened:
-            reopened_comment_ids.add(resolved_comment_id)
-            reopened_issue_keys.update(resolved_comment_issue_keys or {issue_key})
-            await asyncio.sleep(0.2)
+        should_delete = False
 
-    if reopened_comment_ids:
-        await asyncio.sleep(0.2)
-        active_inline_comments = await get_inline_comments(
-            session,
-            pr_id,
-            repo_slug,
-            workspace,
-        )
+        if desired_issue is None:
+            should_delete = True
+        elif comment_info.get("resolved", False):
+            should_delete = True
+        elif comment_info.get("outdated", False):
+            should_delete = True
+        else:
+            expected_path = desired_issue.file
+            expected_line = int(getattr(desired_issue, "original_end_line", desired_issue.line))
+            current_path = inline_data.get("path")
+            current_line = inline_data.get("to")
 
-    latest_comment_id_by_issue_key = {}
-    for comment_id, comment_info in active_inline_comments.items():
-        if comment_info.get("resolved", False):
-            continue
-        for issue_key in comment_info.get("issue_keys", set()):
-            previous_id = latest_comment_id_by_issue_key.get(issue_key)
-            if previous_id is None or comment_id > previous_id:
-                latest_comment_id_by_issue_key[issue_key] = comment_id
+            if current_path != expected_path or current_line != expected_line:
+                should_delete = True
 
-    active_issue_keys = set(latest_comment_id_by_issue_key.keys())
-
-    comment_to_issue_keys = {}
-    resolved_ids = set()
-    forced_republish_keys = set()
-
-    for comment_id, comment_info in active_inline_comments.items():
-        comment_to_issue_keys[comment_id] = set(comment_info.get("issue_keys", set()))
-
-    for comment_id, comment_issue_keys in comment_to_issue_keys.items():
-        if comment_id in resolved_ids:
-            continue
-
-        comment_info = active_inline_comments.get(comment_id)
-        if comment_info and comment_info.get("resolved", False):
-            continue
-
-        active_keys_for_comment = {
-            issue_key for issue_key in comment_issue_keys
-            if issue_key in detected_issue_keys and latest_comment_id_by_issue_key.get(issue_key) == comment_id
-        }
-
-        is_outdated = bool(comment_info.get("outdated", False)) if comment_info else False
-
-        if is_outdated:
-            resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
-            if resolved:
-                resolved_ids.add(comment_id)
-                if active_keys_for_comment:
-                    forced_republish_keys.update(active_keys_for_comment)
+        if should_delete:
+            deleted = await delete_inline_comment_by_rest(pr_id, repo_slug, str(comment_id), workspace)
+            if deleted:
+                comments_to_delete.add(comment_id)
                 await asyncio.sleep(0.2)
             else:
-                logger.info("Comment %s could not be resolved", comment_id)
-            continue
+                logger.info("Comment %s could not be deleted", comment_id)
+                keys_blocked_by_failed_delete.add(issue_key)
 
-        if not active_keys_for_comment:
-            if not comment_info or comment_info.get("resolved", False):
-                continue
-
-            resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
-            if resolved:
-                resolved_ids.add(comment_id)
-                await asyncio.sleep(0.2)
-            else:
-                logger.info("Comment %s could not be resolved", comment_id)
-            continue
-
-        if active_keys_for_comment != comment_issue_keys:
-            if comment_info and not comment_info.get("resolved", False):
-                resolved = await resolve_inline_comment(session, pr_id, repo_slug, comment_id, workspace)
-                if resolved:
-                    resolved_ids.add(comment_id)
-                    forced_republish_keys.update(active_keys_for_comment)
-                    await asyncio.sleep(0.2)
-                else:
-                    logger.info("Comment %s could not be resolved", comment_id)
-            continue
-
-    new_issue_keys = (publishable_issue_keys - active_issue_keys - reopened_issue_keys).union(forced_republish_keys &
-                                                                                              publishable_issue_keys)
-
-    merge_gap = int(os.getenv("CODEGUARDIAN_MERGE_GAP_LINES", "5"))
-    issues_by_file: dict[str, list[Issue]] = {}
-
-    for issue_key in new_issue_keys:
-        issue = current_issues_by_key[issue_key]
-        issues_by_file.setdefault(issue.file, []).append(issue)
-
-    grouped_new_issues = []
-
-    for file_path, file_issues in issues_by_file.items():
-        if not file_issues:
-            continue
-
-        def issue_start(i: Issue) -> int:
-            return int(getattr(i, "original_start_line", i.line))
-
-        def issue_end(i: Issue) -> int:
-            return int(getattr(i, "original_end_line", i.line))
-
-        file_issues.sort(key=lambda i: (
-            issue_start(i),
-            issue_end(i),
-            normalize_code_block(clean_replacement_text(i.original_code)),
-            normalize_code_block(clean_replacement_text(i.proposed_code)),
-        ))
-
-        current_cluster = [file_issues[0]]
-        cluster_start = issue_start(file_issues[0])
-        cluster_end = issue_end(file_issues[0])
-
-        for issue in file_issues[1:]:
-            start = issue_start(issue)
-            end = issue_end(issue)
-
-            if start <= cluster_end + merge_gap and same_fix(current_cluster[-1], issue):
-                current_cluster.append(issue)
-                cluster_end = max(cluster_end, end)
-            else:
-                grouped_new_issues.append({
-                    "file_path": file_path,
-                    "issues": current_cluster,
-                    "start": cluster_start,
-                    "end": cluster_end,
-                })
-                current_cluster = [issue]
-                cluster_start = start
-                cluster_end = end
-
-        grouped_new_issues.append({
-            "file_path": file_path,
-            "issues": current_cluster,
-            "start": cluster_start,
-            "end": cluster_end,
-        })
+    existing_issue_keys_after_cleanup = {
+        issue_key
+        for issue_key, comment_info in existing_comments_by_issue_key.items()
+        if int(comment_info["comment_id"]) not in comments_to_delete
+    }
 
     created_comments = 0
 
-    for grouped_issue in grouped_new_issues:
-        file_path = grouped_issue["file_path"]
-        issue_group = grouped_issue["issues"]
-        min_line = grouped_issue["start"]
-        max_line = grouped_issue["end"]
-
-        issue_group.sort(key=lambda x: int(getattr(x, "original_start_line", x.line)))
-
-        base_issue = max(
-            issue_group,
-            key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
-        )
-
-        clean_original = clean_replacement_text(base_issue.original_code)
-        clean_proposed = clean_replacement_text(base_issue.proposed_code)
-
-        if len(issue_group) == 1:
-            created = await post_inline_comment(session, pr_id, repo_slug, base_issue, workspace)
-            if created:
-                created_comments += 1
-            await asyncio.sleep(0.2)
+    for issue_key, issue in desired_issues_by_key.items():
+        if issue_key in existing_issue_keys_after_cleanup:
             continue
 
-        if not clean_original or not clean_proposed or clean_original == clean_proposed:
+        if issue_key in keys_blocked_by_failed_delete:
             continue
 
-        file_extension = file_path.split(".")[-1] if "." in file_path else "txt"
-
-        combined_problems = "\n".join([f"- Line {i.line} ({i.severity}): {i.problem}" for i in issue_group])
-        group_issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issue_group))
-        hidden_ids = build_hidden_ids(group_issue_keys)
-
-        content = (f"### Block Refactor (Lines {min_line} - {max_line})\n\n"
-                   f"**File:** {file_path}\n\n"
-                   f"**Lines:** {min_line}-{max_line}\n\n"
-                   f"**Issues Detected in this block:**\n\n"
-                   f"{combined_problems}\n\n"
-                   f"**Solution:** {base_issue.solution}\n\n"
-                   f"**Block to substitute:**\n"
-                   f"```{file_extension}\n"
-                   f"{clean_original}\n"
-                   f"```\n\n"
-                   f"**Refactored Code:**\n"
-                   f"```{file_extension}\n"
-                   f"{clean_proposed}\n"
-                   f"```\n\n"
-                   f"{hidden_ids}")
-
-        try:
-            await session.call_tool(
-                name="addPullRequestComment",
-                arguments={
-                    "workspace": workspace,
-                    "pull_request_id": int(pr_id),
-                    "repo_slug": repo_slug,
-                    "content": content,
-                    "inline": {
-                        "path": file_path,
-                        "to": int(max_line),
-                    },
-                },
-            )
+        created = await post_inline_comment(session, pr_id, repo_slug, issue, workspace)
+        if created:
             created_comments += 1
-            await asyncio.sleep(0.2)
-        except Exception as e:
-            logger.error(f"Failed to add grouped inline comment: {e}")
-            raise
+        await asyncio.sleep(0.2)
 
     return created_comments
-
 
 # Turn the final AI decision into visible comments in Bitbucket for a pull request.
 async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decision: Decision) -> None:
