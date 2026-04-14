@@ -91,6 +91,49 @@ def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
     return unique_issues
 
 
+
+def sanitize_issue(issue: Issue) -> Issue:
+    issue.file = (issue.file or "").strip()
+    issue.target_type = (issue.target_type or "").strip()
+    issue.target_name = (issue.target_name or "").strip()
+    issue.problem = (issue.problem or "").strip()
+    issue.severity = (issue.severity or "").strip().upper()
+    issue.solution = (issue.solution or "").strip()
+    issue.original_code = clean_replacement_text(issue.original_code or "")
+    issue.proposed_code = clean_replacement_text(issue.proposed_code or "")
+
+    if issue.line < 1:
+        issue.line = 1
+
+    if issue.original_start_line is not None and issue.original_start_line < 1:
+        issue.original_start_line = 1
+
+    if issue.original_end_line is not None and issue.original_end_line < 1:
+        issue.original_end_line = 1
+
+    if issue.original_start_line and issue.original_end_line:
+        if issue.original_end_line < issue.original_start_line:
+            issue.original_start_line, issue.original_end_line = issue.original_end_line, issue.original_start_line
+
+    return issue
+
+
+def is_structurally_valid_issue(issue: Issue) -> bool:
+    if not issue.file:
+        return False
+    if not issue.problem:
+        return False
+    if not issue.solution:
+        return False
+    if not issue.severity:
+        return False
+    if not issue.original_code:
+        return False
+    if not issue.proposed_code:
+        return False
+    return True
+
+
 # Extract the hidden issue identifiers previously stored in agent comments.
 def extract_issue_key(comment_text: str) -> list[str]:
     keys = set()
@@ -862,7 +905,7 @@ async def synchronize_inline_comments(
     desired_issues_by_key = {build_issue_key(issue): issue for issue in valid_issues}
 
     logger.info(
-        "Issues detected=%s, publishable=%s, skipped_invalid_replacement=%s, skipped_file_mismatch=%s, tracked_comments=%s",
+        "Issues detected=%s, publishable=%s, skipped_invalid_replacement=%s, skipped_file_mismatch=%s, tracked_agent_comments=%s",
         total_detected,
         len(desired_issues_by_key),
         invalid_replacements,
@@ -1070,7 +1113,21 @@ async def main() -> None:
     logger.info(f"Relevant issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
 
     decision = analyze_code_with_gemini(project_key, issues)
-    decision.issues = deduplicate_issues(decision.issues)
+
+    sanitized_issues = []
+    dropped_invalid_issues = 0
+
+    for issue in decision.issues:
+        sanitized_issue = sanitize_issue(issue)
+        if not is_structurally_valid_issue(sanitized_issue):
+            dropped_invalid_issues += 1
+            continue
+        sanitized_issues.append(sanitized_issue)
+
+    decision.issues = deduplicate_issues(sanitized_issues)
+
+    if dropped_invalid_issues:
+        logger.info("Dropped %s structurally invalid issues returned by Gemini", dropped_invalid_issues)
 
     logger.info(
         "AI analysis completed, reporting the results to Bitbucket. You can also check the detailed metrics of the analysis in Prometheus or Grafana."
