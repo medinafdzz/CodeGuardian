@@ -66,6 +66,8 @@ class Decision(BaseModel):
 class AgentExecutionError(Exception):
     """Raised when the agent cannot complete a required execution step."""
 
+CODEGUARDIAN_SUMMARY_TITLE = "**CodeGuardian Analysis Summary**"
+
 # Generate a key for each issue
 def build_issue_key(issue: Issue) -> str:
     if issue.sonar_key and issue.sonar_key != "NO_KEY":
@@ -468,23 +470,54 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         raise AgentExecutionError("Gemini response parsing failed") from e
 
 
-# Leave the general summary in the PR so the developer can see the main result quickly.
-async def post_comment(session: ClientSession, pr_id: str, repo_slug: str, comment: str, workspace: str) -> None:
+async def get_pull_request_comments(
+    session: ClientSession,
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+) -> list[dict]:
     try:
-        await session.call_tool(
-            name="addPullRequestComment",
+        results = await session.call_tool(
+            name="getPullRequestComments",
             arguments={
                 "workspace": workspace,
                 "pull_request_id": int(pr_id),
                 "repo_slug": repo_slug,
-                "content": comment,
+                "all": True,
             },
         )
-        logger.info("PR summary comment published")
+
+        comments_data = json.loads(results.content[0].text)
+
+        if isinstance(comments_data, dict):
+            return comments_data.get("values", [])
+        if isinstance(comments_data, list):
+            return comments_data
+
+        return []
     except Exception as e:
-        logger.error(f"Failed to add comment: {e}")
+        logger.error(f"Failed to retrieve pull request comments: {e}")
         raise
 
+
+
+def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
+    summary_comment_ids: set[int] = set()
+
+    for comment in comments:
+        if comment.get("deleted", False):
+            continue
+
+        if comment.get("parent"):
+            continue
+
+        raw_text = (comment.get("content", {}) or {}).get("raw", "") or ""
+        if raw_text.strip().startswith(CODEGUARDIAN_SUMMARY_TITLE):
+            comment_id = comment.get("id")
+            if comment_id is not None:
+                summary_comment_ids.add(int(comment_id))
+
+    return summary_comment_ids
 
 # If the AI does not provide a valid code replacement, it is better to skip the comment than to publish a broken code suggestion.
 def clean_replacement_text(value: str) -> str:
@@ -751,6 +784,34 @@ async def delete_comment_ids(
     return deleted_comment_ids, failed_comment_ids
 
 
+async def delete_agent_summary_comments(
+    session: ClientSession,
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+) -> int:
+    comments = await get_pull_request_comments(session, pr_id, repo_slug, workspace)
+    summary_comment_ids = get_agent_summary_comment_ids(comments)
+
+    if not summary_comment_ids:
+        return 0
+
+    deleted_comment_ids, _failed_comment_ids = await delete_comment_ids(
+        pr_id,
+        repo_slug,
+        workspace,
+        summary_comment_ids,
+    )
+
+    if deleted_comment_ids:
+        logger.info(
+            "Deleted %s legacy summary comments from PR %s",
+            len(deleted_comment_ids),
+            pr_id,
+        )
+
+    return len(deleted_comment_ids)
+
 # Synchronize PR inline comments with the current analysis state:
 # obsolete agent comments are deleted, missing comments are created,
 # and no agent comments remain when no issues are detected.
@@ -933,6 +994,13 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
             async with ClientSession(read, write) as session_bb:
                 await session_bb.initialize()
 
+                deleted_summary_comments = await delete_agent_summary_comments(
+                    session_bb,
+                    pr_id,
+                    repo_slug,
+                    workspace,
+                )
+                
                 created_inline_comments = await synchronize_inline_comments(
                     session_bb,
                     pr_id,
@@ -941,19 +1009,12 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
                     decision.issues,
                 )
 
-                post_summary = os.getenv("CODEGUARDIAN_POST_SUMMARY", "false").lower() == "true"
-
-                if post_summary and not decision.issues:
-                    summary_comment = (f"**CodeGuardian Analysis Summary**\n\n"
-                                       f"No relevant issues have been detected in this pull request.\n\n"
-                                       f"{decision.comment}\n\n")
-                    await post_comment(session_bb, pr_id, repo_slug, summary_comment, workspace)
-
                 logger.info(
-                    "Analysis state synchronized for PR %s: detected_issues=%s, created_inline_comments=%s",
+                    "Analysis state synchronized for PR %s: detected_issues=%s, created_inline_comments=%s, deleted_summary_comments=%s",
                     pr_id,
                     len(decision.issues),
                     created_inline_comments,
+                    deleted_summary_comments,
                 )
 
     except Exception as e:
