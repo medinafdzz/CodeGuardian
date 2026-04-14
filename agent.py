@@ -63,6 +63,8 @@ class Decision(BaseModel):
     issues: list[Issue]
     comment: str
 
+class AgentExecutionError(Exception):
+    """Raised when the agent cannot complete a required execution step."""
 
 # Generate a key for each issue
 def build_issue_key(issue: Issue) -> str:
@@ -239,15 +241,15 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
                     logger.info(f"SonarQube analysis completed successfully for project {project_key}.")
 
     except Exception as e:
-        logger.error(f"Failed to connect to SonarQube {e}")
-        sys.exit(1)  # If SonarQube fails, stop the build to avoid false positives in the pull request analysis
+        logger.error(f"Failed to connect to SonarQube: {e}")
+        raise AgentExecutionError("SonarQube connection failed") from e
 
     # Clean the SonarQube results to save tokens and optimize the prompt by the most critical issues
     try:
         all_issues = clean_sonar_results(results)
     except Exception as e:
         logger.error(f"Failed to parse SonarQube results: {e}")
-        sys.exit(1)
+        raise AgentExecutionError("Failed to parse SonarQube results") from e
 
     severity_order = {
         "BLOCKER": 0,
@@ -463,7 +465,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     except Exception as e:
         logger.error(f"Critical error of Pydantic to parse the JSON: {e}")
         logger.error(f"The response from the model was: {response.text}")
-        sys.exit(1)  # If the AI fails, stop the build
+        raise AgentExecutionError("Gemini response parsing failed") from e
 
 
 # Leave the general summary in the PR so the developer can see the main result quickly.
@@ -920,7 +922,7 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
 
     if not pr_id or str(pr_id).lower() == "null":
         logger.error("No valid pull request ID was provided.")
-        sys.exit(1)
+        raise AgentExecutionError("Missing pull request ID")
 
     try:
         async with stdio_client(StdioServerParameters(
@@ -956,7 +958,7 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
 
     except Exception as e:
         logger.error(f"Failed to report analysis results to Bitbucket: {e}")
-        sys.exit(1)
+        raise AgentExecutionError("Bitbucket reporting failed") from e
 
 
 # Main function to orchestrate the flow of the agent: load the webhook data, fetch and clean SonarQube issues, analyze with Gemini, and report back to Bitbucket.
@@ -968,7 +970,7 @@ async def main() -> None:
     project_key, pr_id, repo_slug, workspace = load_webhook_data(args.file)
     if not project_key or not pr_id or not repo_slug:
         logger.error("Project key, pull request ID or repo slug not found in the JSON file.")
-        sys.exit(1)
+        raise AgentExecutionError("Webhook payload is missing required fields")
 
     issues = await fetch_sonar_issues(project_key)
 
@@ -977,8 +979,7 @@ async def main() -> None:
         auto_decision = Decision(
             decline_pr=False,
             issues=[],
-            comment=
-            "CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
+            comment="CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
         )
 
         await report_to_bitbucket(pr_id, repo_slug, workspace, auto_decision)
@@ -995,6 +996,12 @@ async def main() -> None:
 
     await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except AgentExecutionError as e:
+        logger.error(f"Agent execution failed: {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.exception(f"Unexpected unhandled error: {e}")
+        sys.exit(1)
