@@ -284,9 +284,9 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
         issue.file = (issue.file or "").strip()
         issue.target_type = (issue.target_type or "").strip()
         issue.target_name = (issue.target_name or "").strip()
-        issue.problem = (issue.problem or "").strip()
+        issue.problem = re.sub(r"\s*-\s+", "\n- ", (issue.problem or "").strip()).lstrip("\n")
         issue.severity = (issue.severity or "").strip().upper()
-        issue.solution = (issue.solution or "").strip()
+        issue.solution = re.sub(r"\s*-\s+", "\n- ", (issue.solution or "").strip()).lstrip("\n")
         issue.original_code = clean_replacement_text(issue.original_code or "")
         issue.proposed_code = clean_replacement_text(issue.proposed_code or "")
 
