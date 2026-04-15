@@ -79,20 +79,37 @@ def build_issue_key(issue: Issue) -> str:
     return f"{issue.file}:{issue.line}:{issue.target_name}:{issue.severity}"
 
 
+def build_semantic_issue_key(issue: Issue) -> tuple[str, int, str, str, str, str]:
+    return (
+        (issue.file or "").strip(),
+        int(getattr(issue, "line", 0) or 0),
+        (issue.problem or "").strip().lower(),
+        (issue.severity or "").strip().upper(),
+        normalize_code_block(clean_replacement_text(issue.original_code or "")),
+        normalize_code_block(clean_replacement_text(issue.proposed_code or "")),
+    )
+
 # In case the AI returns duplicated issues, we can filter them by their SonarQube key to avoid duplicated comments in Bitbucket.
 def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
-    seen = set()
+    seen_sonar_keys = set()
+    seen_semantic_keys = set()
     unique_issues = []
 
     for issue in issues:
-        issue_key = build_issue_key(issue)
-        if issue_key in seen:
+        sonar_issue_key = build_issue_key(issue)
+        semantic_issue_key = build_semantic_issue_key(issue)
+
+        if sonar_issue_key in seen_sonar_keys:
             continue
-        seen.add(issue_key)
+
+        if semantic_issue_key in seen_semantic_keys:
+            continue
+
+        seen_sonar_keys.add(sonar_issue_key)
+        seen_semantic_keys.add(semantic_issue_key)
         unique_issues.append(issue)
 
     return unique_issues
-
 
 def sanitize_issue(issue: Issue) -> Issue:
     issue.file = (issue.file or "").strip()
@@ -746,10 +763,20 @@ def build_grouped_inline_comment_content(issues: list[Issue]) -> str:
     min_line = min(int(getattr(i, "original_start_line", i.line)) for i in issues)
     max_line = max(int(getattr(i, "original_end_line", i.line)) for i in issues)
 
-    combined_problems = "\n".join(
-        f"- Line {i.line} ({i.severity}): {i.problem}"
-        for i in issues
-    )
+    seen_problem_lines = set()
+    problem_lines = []
+
+    for i in issues:
+        problem_line = f"- Line {i.line} ({i.severity}): {i.problem}"
+        normalized_problem_line = problem_line.strip().lower()
+
+        if normalized_problem_line in seen_problem_lines:
+            continue
+
+        seen_problem_lines.add(normalized_problem_line)
+        problem_lines.append(problem_line)
+
+    combined_problems = "\n".join(problem_lines)
 
     issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issues))
 
