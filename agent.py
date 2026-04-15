@@ -135,14 +135,12 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
 
 
 # Group issues that share the same structure block
-def build_group_key(issue: Issue) -> tuple[str, str, str, str]:
+def build_group_key(issue: Issue) -> tuple[str, str, str]:
     return (
         issue.file,
-        normalize_code_block((issue.solution or "").strip().lower()),
         normalize_code_block(clean_replacement_text(issue.original_code or "")),
         normalize_code_block(clean_replacement_text(issue.proposed_code or "")),
     )
-
 
 # Build the final comment body for one issue or a grouped set of issues
 def build_comment_content(issues: list[Issue]) -> str:
