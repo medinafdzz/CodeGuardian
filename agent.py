@@ -290,6 +290,17 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
         issue.original_code = clean_replacement_text(issue.original_code or "")
         issue.proposed_code = clean_replacement_text(issue.proposed_code or "")
 
+        normalized_original_code = normalize_code_block(issue.original_code)
+        normalized_proposed_code = normalize_code_block(issue.proposed_code)
+
+        if (
+            not normalized_original_code
+            or not normalized_proposed_code
+            or normalized_original_code == normalized_proposed_code
+        ):
+            dropped_invalid_issues += 1
+            continue
+
         if issue.original_start_line is None:
             issue.original_start_line = issue.line
 
@@ -323,7 +334,6 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
         prepared_issues.append(issue)
 
     return prepared_issues, dropped_invalid_issues
-
 
 # Group issues that share the same structure block
 def build_group_key(issue: Issue) -> tuple[str, str, str]:
@@ -747,10 +757,11 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             All findings in this batch belong to the same {batch_scope_kind}: '{batch_scope_name}'.
             This scope starts at line {batch_scope_start} and ends at line {batch_scope_end}.
 
-            Return exactly one issue object for this whole scope.
-            Consolidate all findings in the batch into one single refactor proposal.
+            If a real code change is needed, return exactly one issue object for this whole scope.
+            Consolidate all findings in the batch into one single refactor proposal when applicable.
             Use one original_code block and one proposed_code block covering the full scope when needed.
             Do not return multiple issue objects for the same function or method.
+            If no real fix is needed, return an empty issues list.
             """
         else:
             scope_instruction = """
@@ -773,15 +784,20 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             - Keep formatting and indentation consistent with the code context.
             - original_code must be the full replaceable block if a larger block is needed.
             - Use real multiline code, not literal '\\n'.
+            - If the code is already correct, already handled, already uses the proper construct, or no code change is required, return no issue for that finding.
+            - Never return an issue when original_code and proposed_code would be identical.
+            - Do not emit issues for false positives, already-fixed code, or findings that only justify an explanation without a code change.
+            - Only return issues that require a real code modification.
 
             For function or method batches:
-            - return exactly one combined issue object
+            - return exactly one combined issue object only if a real code change is needed
             - summarize all covered findings inside "problem" as bullet points
             - summarize all applied changes inside "solution" as bullet points
             - set original_start_line and original_end_line to cover the full scope
             - set original_code to the full scope before changes
             - set proposed_code to the full scope after applying all fixes
             - use the sonar_key of the first covered finding in the batch
+            - if no real fix is needed, return an empty issues list
 
             Return ONLY valid JSON with this shape:
             {{"issues": [ ... ]}}
@@ -1300,6 +1316,8 @@ async def main() -> None:
 
     decision.issues, dropped_invalid_issues = normalize_and_deduplicate_issues(decision.issues)
 
+    decision.decline_pr = any(issue.severity in {"BLOCKER", "CRITICAL"} for issue in decision.issues)
+    
     if dropped_invalid_issues:
         logger.info("Dropped %s invalid issues", dropped_invalid_issues)
 
