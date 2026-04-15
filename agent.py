@@ -966,7 +966,7 @@ async def synchronize_inline_comments(
 
     created_comments = 0
 
-    for issue_group in grouped_issues:
+    for issue_group in reversed(grouped_issues):
         created = await post_issue_group_comment(session, pr_id, repo_slug, issue_group, workspace)
         if created:
             created_comments += 1
