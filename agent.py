@@ -99,6 +99,12 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
         issue.original_code = clean_replacement_text(issue.original_code or "")
         issue.proposed_code = clean_replacement_text(issue.proposed_code or "")
 
+        if issue.original_start_line is None:
+            issue.original_start_line = issue.line
+
+        if issue.original_end_line is None:
+            issue.original_end_line = issue.line
+    
         if issue.line < 1:
             issue.line = 1
 
@@ -146,8 +152,8 @@ def build_comment_content(issues: list[Issue]) -> str:
     issues = sorted(
         issues,
         key=lambda i: (
-            int(getattr(i, "original_start_line", i.line)),
-            int(getattr(i, "original_end_line", i.line)),
+            int(getattr(i, "original_start_line", i.line) or i.line),
+            int(getattr(i, "original_end_line", i.line) or i.line),
             i.severity,
             i.problem,
         ),
@@ -155,15 +161,17 @@ def build_comment_content(issues: list[Issue]) -> str:
 
     base_issue = max(
         issues,
-        key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
+        key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line)
+        - int(getattr(i, "original_start_line", i.line) or i.line),
     )
+
+    min_line = min(int(getattr(i, "original_start_line", i.line) or i.line) for i in issues)
+    max_line = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
 
     file_extension = base_issue.file.split(".")[-1] if "." in base_issue.file else "txt"
     clean_orig = clean_replacement_text(base_issue.original_code)
     clean_prop = clean_replacement_text(base_issue.proposed_code)
 
-    min_line = min(int(getattr(i, "original_start_line", i.line)) for i in issues)
-    max_line = max(int(getattr(i, "original_end_line", i.line)) for i in issues)
     issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issues))
 
     if len(issues) == 1:
@@ -248,10 +256,11 @@ async def post_issue_group_comment(
 
         base_issue = max(
             issues,
-            key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
+            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line)
+            - int(getattr(i, "original_start_line", i.line) or i.line),
         )
 
-        line_end = max(int(getattr(i, "original_end_line", i.line)) for i in issues)
+        line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
         content = build_comment_content(issues)
 
         await session.call_tool(
@@ -940,16 +949,6 @@ async def synchronize_inline_comments(
 
     for issue in valid_issues:
         issue_start = int(getattr(issue, "original_start_line", issue.line) or issue.line)
-        issue_end = int(getattr(issue, "original_end_line", issue.line) or issue.line)
-
-        if not current_group:
-            current_group = [issue]
-            continue
-
-        last_issue = current_group[-1]
-        last_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in current_group)
-
-        same_group = (build_group_key(issue) == build_group_key(last_issue) and issue_start <= last_end + merge_gap)
 
         if same_group:
             current_group.append(issue)
