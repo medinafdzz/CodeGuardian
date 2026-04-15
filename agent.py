@@ -63,6 +63,8 @@ class Decision(BaseModel):
     issues: list[Issue]
     comment: str
 
+class IssueBatchDecision(BaseModel):
+    issues: list[Issue]
 
 class AgentExecutionError(Exception):
     """Raised when the agent cannot complete a required execution step."""
@@ -124,20 +126,23 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
             normalize_code_block(issue.proposed_code),
         )
 
-        if sonar_issue_key in seen_sonar_keys:
+        if issue.sonar_key and issue.sonar_key != "NO_KEY":
+            if sonar_issue_key in seen_sonar_keys:
+                continue
+            seen_sonar_keys.add(sonar_issue_key)
+            prepared_issues.append(issue)
             continue
 
         if semantic_issue_key in seen_semantic_keys:
             continue
 
-        seen_sonar_keys.add(sonar_issue_key)
         seen_semantic_keys.add(semantic_issue_key)
         prepared_issues.append(issue)
 
     return prepared_issues, dropped_invalid_issues
 
 
-# Group issues that share the same replacement block
+# Group issues that share the same replacement and solution block
 def build_group_key(issue: Issue) -> tuple[str, str, str, str]:
     return (
         issue.file,
@@ -367,7 +372,7 @@ def read_file_lines(filepath: str) -> list[str]:
 
 
 # Return a code window around the reported line for model context
-def get_code_context(filepath: str, line_number: int, context_window: int = 60) -> str:
+def get_code_context(filepath: str, line_number: int, context_window: int = 20) -> str:
     try:
         lines = read_file_lines(filepath)
 
@@ -400,10 +405,8 @@ def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
         cleaned.append({
             "sonar_key": issue.get("key", "NO_KEY"),
             "severity": issue.get("severity"),
-            "component": issue.get("component"),
             "message": issue.get("message"),
             "line": issue.get("textRange", {}).get("startLine", 0),
-            "project": issue.get("project"),
             "file": issue.get("component", "").split(":")[-1],
         })
 
@@ -495,132 +498,145 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
 # Ask the model for fixes and collect execution metrics
 def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
-    # Configure the Gemini model parameters
     client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
-    # Prompt for the model to analyze the SonarQube issues
-    prompt = f"""
-    Act as a Principal Software Architect, Static Analysis Expert, and Secure Code Reviewer.
 
-    Analyze the following SonarQube technical findings for the project: '{project_key}'.
-
-    ### GLOBAL OBJECTIVE
-    For each finding, generate the safest and smallest valid code replacement that fixes the issue without breaking compilation, syntax, scope, control flow, or surrounding behavior.
-
-    RULES FOR 'proposed_code'
-    Return ONLY the exact raw code snippet that replaces the problematic region.
-    DO NOT wrap the code in markdown blocks.
-    DO NOT include explanations inside the code.
-    Preserve the original programming language, coding style, naming style, formatting style, and indentation style of the provided code context.
-    Prefer the smallest safe change, but NEVER sacrifice correctness for brevity.
-    The replacement must be syntactically valid in the original language.
-    The replacement must remain semantically coherent with the surrounding code context.
-    DO NOT invent APIs, variables, functions, classes, modules, imports, types, constants, macros, or symbols that are not already present or clearly required.
-    Only add imports, includes, using statements, dependencies, declarations, or boilerplate when they are strictly necessary for correctness.
-    NEVER return a partial fragment if a larger replacement region is required for correctness.
-    Preserve variable lifetime, visibility, ownership, mutability, initialization order, and valid scope.
-    Preserve resource lifecycle semantics, cleanup semantics, and error-handling semantics when relevant.
-    Preserve control flow correctness: do not leave unresolved branches, missing returns, broken loops, orphaned conditions, unreachable code, or unbalanced delimiters.
-    If the finding is inside a syntactic structure such as try, catch, finally, if, else, for, while, switch, class, method, lambda, or block, original_code must include the whole smallest syntactic unit that remains valid after replacement.
-    Do not introduce unresolved identifiers, dangling references, invalid state transitions, or invalid object/resource usage.
-    Do not move declarations into a narrower scope if they are used later.
-    Do not move statements outside the scope they depend on.
-    Do not change behavior unrelated to the finding unless strictly necessary to produce a valid fix.
-    When several nearby findings in the same file are solved by the exact same replacement region, generate the same replacement block for them.
-    When a correct fix requires replacing a larger logical block, return that larger block instead of a smaller unsafe fragment.
-    The final replacement must be production-ready.
-    Assume the replacement will be directly applied over the original_code block, so it must compile, run, or parse correctly in that location.
-    For interpreted languages, ensure the replacement is executable and structurally valid.
-    For compiled languages, ensure the replacement is compilable in context.
-    For memory/resource/concurrency issues, ensure the fix does not introduce leaks, deadlocks, race conditions, invalid ownership, double release, or scope misuse.
-    Do not return placeholder text such as TODO, FIXME, pseudocode, ellipsis, or comments like "rest of code unchanged".
-    MUST use physical line breaks for multiline code. DO NOT use literal '\n' characters.
-    
-    ### TASKS
-    Analyze all provided findings.
-    For each finding, inspect the code_context carefully and provide:
-    'sonar_key': The exact sonar_key value provided in the SONARQUBE DATA. Do NOT invent it.
-    'file': The exact filename/path.
-    'line': The first line of original_code, not the Sonar line if the fix starts earlier.
-    'target_type': The most accurate type of affected code element.
-    'target_name': The exact name of the affected target when clearly identifiable.
-    'problem': A precise technical risk explanation in MAX 20 words.
-    'solution': A precise technical fix instruction in MAX 20 words.
-    'original_start_line': The first line of original_code.
-    'original_end_line': The last line of original_code.
-    'original_code': The COMPLETE code region that must be replaced so the fix is valid.
-    'proposed_code': The COMPLETE replacement for original_code.
-
-    ### STRICT REQUIREMENTS FOR 'original_code'
-    - It must be the minimal FULL replacement region required for a correct fix.
-    - It must include all dependent statements that belong to the same logical block when necessary.
-    - It must not be so small that applying proposed_code would break syntax, scope, lifecycle, or behavior.
-    - It must not be unnecessarily large if a smaller correct region is sufficient.
-
-    ### STRICT REQUIREMENTS FOR 'proposed_code'
-    - It must be a direct replacement for original_code.
-    - It must be complete and self-consistent.
-    - It must preserve the surrounding contract of the code.
-    - It must not rely on omitted hidden lines to remain valid.
-    - It must not require additional unstated edits elsewhere unless absolutely unavoidable and clearly implied by the returned replacement itself.
-
-    ### DECISION
-    3. 'comment': Write a high-level executive summary in MAX 20 words.
-    4. 'decline_pr': Set to true ONLY if there are findings with BLOCKER or CRITICAL severity.
-
-    ### OUTPUT FORMAT
-    Return ONLY one strictly valid JSON object matching the provided schema.
-    Do not include markdown wrappers.
-    Do not include extra text before or after the JSON.
-
-    ### SONARQUBE DATA
-    {json.dumps(issues)}
-    """
-
-    # Start of intrumentation to measure latency and token usage of the Gemini model
+    all_model_issues: list[Issue] = []
+    total_prompt_tokens = 0
+    total_response_tokens = 0
+    total_tokens = 0
     start_time = time.time()
 
-    # Generate the answer using the Gemini model
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=Decision,
-            temperature=0,  # Adjust the temperature to cold trying to get the same response
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)),
+    decline_pr = any(
+        str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"}
+        for issue in issues
     )
 
-    # Calculate duration of the response
-    duration = time.time() - start_time
+    batch_size = int(os.getenv("CODEGUARDIAN_BATCH_SIZE", "3"))
+    line_gap = int(os.getenv("CODEGUARDIAN_BATCH_LINE_GAP", "25"))
 
-    # Execution time to order in Grafana the different executions of the agent
+    sorted_issues = sorted(
+        issues,
+        key=lambda issue: (
+            issue.get("file", ""),
+            int(issue.get("line", 0) or 0),
+        ),
+    )
+
+    batches: list[list[dict]] = []
+    current_batch: list[dict] = []
+
+    for sonar_issue in sorted_issues:
+        if not current_batch:
+            current_batch.append(sonar_issue)
+            continue
+
+        previous_issue = current_batch[-1]
+        same_file = sonar_issue.get("file", "") == previous_issue.get("file", "")
+        close_lines = abs(int(sonar_issue.get("line", 0) or 0) - int(previous_issue.get("line", 0) or 0)) <= line_gap
+
+        if same_file and close_lines and len(current_batch) < batch_size:
+            current_batch.append(sonar_issue)
+        else:
+            batches.append(current_batch)
+            current_batch = [sonar_issue]
+
+    if current_batch:
+        batches.append(current_batch)
+
+    logger.info("Gemini batching plan: %s batches for %s Sonar findings", len(batches), len(issues))
+
+    for batch in batches:
+        prompt = f"""
+        You are reviewing a small batch of SonarQube findings from project '{project_key}'.
+
+        Analyze only the findings below.
+        Return one issue object per input finding when a safe fix is possible.
+        Do not merge multiple findings into one issue object.
+        If several findings share the same fix, keep them as separate issue objects and reuse the same original_code, proposed_code, and solution.
+        If no safe valid fix is possible for a finding, omit it.
+
+        Rules:
+        - Keep the exact sonar_key from the input.
+        - proposed_code must directly replace original_code.
+        - Use the smallest valid replacement that compiles or parses in place.
+        - Do not invent APIs, symbols, imports, or variables unless strictly required.
+        - Keep formatting and indentation consistent with the code context.
+        - original_code must be the full replaceable block if a larger block is needed.
+        - Use real multiline code, not literal '\\n'.
+
+        Return ONLY valid JSON with this shape:
+        {{"issues": [ ... ]}}
+
+        SONARQUBE DATA:
+        {json.dumps(batch)}
+        """
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=IssueBatchDecision,
+                temperature=0,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            ),
+        )
+
+        try:
+            total_prompt_tokens += int(response.usage_metadata.prompt_token_count)
+            total_response_tokens += int(response.usage_metadata.candidates_token_count)
+            total_tokens += int(response.usage_metadata.total_token_count)
+        except Exception:
+            pass
+
+        try:
+            partial_decision = IssueBatchDecision.model_validate_json(response.text)
+        except Exception as e:
+            logger.error(
+                "Failed to parse Gemini batch response for sonar keys %s: %s",
+                [issue.get("sonar_key", "NO_KEY") for issue in batch],
+                e,
+            )
+            logger.error("The response from the model was: %s", response.text)
+            continue
+
+        expected_sonar_keys = {
+            issue.get("sonar_key", "NO_KEY")
+            for issue in batch
+            if issue.get("sonar_key", "NO_KEY") != "NO_KEY"
+        }
+
+        kept_batch_issues: dict[str, Issue] = {}
+
+        for issue in partial_decision.issues:
+            if not issue.sonar_key or issue.sonar_key == "NO_KEY":
+                continue
+            if issue.sonar_key not in expected_sonar_keys:
+                continue
+            if issue.sonar_key in kept_batch_issues:
+                continue
+            kept_batch_issues[issue.sonar_key] = issue
+
+        all_model_issues.extend(kept_batch_issues.values())
+
+        missing_batch_keys = sorted(expected_sonar_keys - set(kept_batch_issues.keys()))
+        if missing_batch_keys:
+            logger.info("Gemini returned no actionable issue for sonar keys: %s", missing_batch_keys)
+
+    duration = time.time() - start_time
     current_timestamp = time.time()
 
-    # Extract the token usage
-    try:
-        metric_prompt = int(response.usage_metadata.prompt_token_count)
-        metric_response = int(response.usage_metadata.candidates_token_count)
-        metric_total_tokens = int(response.usage_metadata.total_token_count)
-    except Exception as e:
-        metric_prompt, metric_response, metric_total_tokens = 0, 0, 0
-        logger.warning(f"Could not retrieve token usage: {e}")
-
-    # Registry and metrics for Prometheus
     registry = CollectorRegistry()
     latency = Gauge(
         "codeguardian_analysis_latency_seconds",
         "Response time of Gemini model (s)",
         registry=registry,
     )
-
-    #
     execution_time = Gauge(
         "codeguardian_last_execution_timestamp",
         "Timestamp of the last agent execution",
         registry=registry,
     )
-    execution_time.set(current_timestamp)
-
     prompt_tokens = Gauge(
         "codeguardian_analysis_prompt_tokens",
         "Tokens used in the prompt sent to Gemini model",
@@ -631,22 +647,20 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         "Tokens used in the response received",
         registry=registry,
     )
-    total_tokens = Gauge(
+    total_tokens_metric = Gauge(
         "codeguardian_analysis_total_tokens",
         "Total tokens used in the Gemini model response",
         registry=registry,
     )
 
     latency.set(duration)
-    prompt_tokens.set(metric_prompt)
-    response_tokens.set(metric_response)
-    total_tokens.set(metric_total_tokens)
+    execution_time.set(current_timestamp)
+    prompt_tokens.set(total_prompt_tokens)
+    response_tokens.set(total_response_tokens)
+    total_tokens_metric.set(total_tokens)
 
-    # Send the metrics to Prometheus Pushgateway
     try:
-        # To set a tag in grafana
         build_id = os.getenv("BUILD_NUMBER", "local_build")
-
         event_type = "pull_request"
         display_label = f"{project_key}-PR-{build_id}"
 
@@ -666,21 +680,22 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             "Metrics pushed: build=%s latency=%.2fs total_tokens=%s",
             build_id,
             duration,
-            metric_total_tokens,
+            total_tokens,
         )
     except Exception as metric_error:
         logger.error(f"Failed to push metrics to Prometheus Pushgateway: {metric_error}")
 
-    try:
-        # Parse the model's response as JSON and validate it against the Decision model
-        decision = Decision.model_validate_json(response.text)
-        return decision
+    logger.info(
+        "Gemini returned actionable fixes for %s of %s Sonar findings",
+        len(all_model_issues),
+        len(issues),
+    )
 
-    except Exception as e:
-        logger.error(f"Critical error of Pydantic to parse the JSON: {e}")
-        logger.error(f"The response from the model was: {response.text}")
-        raise AgentExecutionError("Gemini response parsing failed") from e
-
+    return Decision(
+        decline_pr=decline_pr,
+        issues=all_model_issues,
+        comment=f"Generated fixes for {len(all_model_issues)} Sonar findings.",
+    )
 
 # Load all pull request comments so they can be inspected
 async def get_pull_request_comments(
@@ -1022,7 +1037,11 @@ async def synchronize_inline_comments(
     repo_slug: str,
     workspace: str,
     issues: list[Issue],
+    preserved_issue_keys: set[str] | None = None,
 ) -> int:
+    
+    preserved_issue_keys = preserved_issue_keys or set()
+    
     active_inline_comments = await get_inline_comments(session, pr_id, repo_slug, workspace)
 
     total_detected = len(issues)
@@ -1060,6 +1079,15 @@ async def synchronize_inline_comments(
     for comment_id in sorted(active_inline_comments.keys(), reverse=True):
         comment_info = active_inline_comments[comment_id]
         issue_keys = set(comment_info.get("issue_keys", set()))
+
+        if (
+            issue_keys
+            and issue_keys.issubset(preserved_issue_keys)
+            and not comment_info.get("resolved", False)
+            and not comment_info.get("outdated", False)
+        ):
+            continue
+
         matching_issues = [desired_issues_by_key[k] for k in issue_keys if k in desired_issues_by_key]
 
         if not matching_issues:
@@ -1178,7 +1206,13 @@ async def synchronize_inline_comments(
 
 
 # Open the Bitbucket session and publish the final analysis state
-async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decision: Decision) -> None:
+async def report_to_bitbucket(
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+    decision: Decision,
+    preserved_issue_keys: set[str] | None = None,
+) -> None:
     bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "")
 
     bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "")
@@ -1217,6 +1251,7 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
                     repo_slug,
                     workspace,
                     decision.issues,
+                    preserved_issue_keys,
                 )
 
                 logger.info(
@@ -1259,7 +1294,95 @@ async def main() -> None:
 
     logger.info(f"Relevant issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
 
-    decision = analyze_code_with_gemini(project_key, issues)
+    current_sonar_keys = {
+        issue.get("sonar_key", "NO_KEY")
+        for issue in issues
+        if issue.get("sonar_key", "NO_KEY") != "NO_KEY"
+    }
+
+    bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "")
+    bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "")
+
+    bitbucket_env = os.environ.copy()
+    bitbucket_env.update({
+        "BITBUCKET_URL": os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0"),
+        "BITBUCKET_WORKSPACE": workspace,
+        "BITBUCKET_USERNAME": bitbucket_username,
+        "BITBUCKET_PASSWORD": bitbucket_password,
+    })
+
+    preserved_issue_keys: set[str] = set()
+
+    try:
+        async with stdio_client(StdioServerParameters(
+                command="bitbucket-mcp",
+                args=[],
+                env=bitbucket_env,
+        )) as (read, write):
+            async with ClientSession(read, write) as session_bb:
+                await session_bb.initialize()
+                active_inline_comments = await get_inline_comments(session_bb, pr_id, repo_slug, workspace)
+
+                for comment_info in active_inline_comments.values():
+                    if comment_info.get("resolved", False):
+                        continue
+                    if comment_info.get("outdated", False):
+                        continue
+
+                    for issue_key in comment_info.get("issue_keys", set()):
+                        if issue_key in current_sonar_keys:
+                            preserved_issue_keys.add(issue_key)
+
+    except Exception as e:
+        logger.warning("Could not preload existing agent comments: %s", e)
+
+    issues_to_analyze = [
+        issue
+        for issue in issues
+        if issue.get("sonar_key", "NO_KEY") not in preserved_issue_keys
+    ]
+
+    logger.info(
+        "Skipping Gemini for %s Sonar findings already covered by active agent comments",
+        len(preserved_issue_keys),
+    )
+    logger.info(
+        "Sending %s Sonar findings to Gemini",
+        len(issues_to_analyze),
+    )
+
+    if issues_to_analyze:
+        decision = analyze_code_with_gemini(project_key, issues_to_analyze)
+    else:
+        decision = Decision(
+            decline_pr=any(
+                str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"}
+                for issue in issues
+            ),
+            issues=[],
+            comment="No new Sonar findings needed fresh AI analysis.",
+        )
+
+    input_sonar_keys = {
+        issue.get("sonar_key", "NO_KEY")
+        for issue in issues_to_analyze
+        if issue.get("sonar_key", "NO_KEY") != "NO_KEY"
+    }
+    returned_sonar_keys = {
+        issue.sonar_key
+        for issue in decision.issues
+        if issue.sonar_key and issue.sonar_key != "NO_KEY"
+    }
+    missing_sonar_keys = sorted(input_sonar_keys - returned_sonar_keys)
+
+    logger.info(
+        "Coverage after Gemini: returned=%s of %s Sonar findings",
+        len(returned_sonar_keys),
+        len(input_sonar_keys),
+    )
+
+    if missing_sonar_keys:
+        logger.info("Missing Sonar issue keys after Gemini: %s", missing_sonar_keys)
 
     decision.issues, dropped_invalid_issues = normalize_and_deduplicate_issues(decision.issues)
 
@@ -1270,7 +1393,7 @@ async def main() -> None:
         "AI analysis completed, reporting the results to Bitbucket. You can also check the detailed metrics of the analysis in Prometheus or Grafana."
     )
 
-    await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
+    await report_to_bitbucket(pr_id, repo_slug, workspace, decision, preserved_issue_keys)
 
 
 if __name__ == "__main__":
