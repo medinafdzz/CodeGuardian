@@ -697,6 +697,68 @@ def build_inline_comment_content(issue: Issue) -> str:
     return wrap_agent_comment(body)
 
 
+def build_grouping_key(issue: Issue) -> tuple[str, str, str]:
+    return (
+        issue.file,
+        normalize_code_block(clean_replacement_text(issue.original_code)),
+        normalize_code_block(clean_replacement_text(issue.proposed_code)),
+    )
+
+
+def build_grouped_inline_comment_content(issues: list[Issue]) -> str:
+    if not issues:
+        return ""
+
+    issues = sorted(
+        issues,
+        key=lambda i: (
+            int(getattr(i, "original_start_line", i.line)),
+            int(getattr(i, "original_end_line", i.line)),
+            i.severity,
+            i.problem,
+        ),
+    )
+
+    base_issue = max(
+        issues,
+        key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
+    )
+
+    file_extension = base_issue.file.split(".")[-1] if "." in base_issue.file else "txt"
+    clean_orig = clean_replacement_text(base_issue.original_code)
+    clean_prop = clean_replacement_text(base_issue.proposed_code)
+
+    min_line = min(int(getattr(i, "original_start_line", i.line)) for i in issues)
+    max_line = max(int(getattr(i, "original_end_line", i.line)) for i in issues)
+
+    combined_problems = "\n".join(
+        f"- Line {i.line} ({i.severity}): {i.problem}"
+        for i in issues
+    )
+
+    issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issues))
+
+    body = (
+        f"### Code Issues\n\n"
+        f"**File:** {base_issue.file}\n\n"
+        f"**Lines:** {min_line}-{max_line}\n\n"
+        f"**Detected problems:**\n\n"
+        f"{combined_problems}\n\n"
+        f"**Suggested solution:** {base_issue.solution}\n\n"
+        f"**Block to substitute:**\n"
+        f"```{file_extension}\n"
+        f"{clean_orig}\n"
+        f"```\n\n"
+        f"**Refactored Code:**\n"
+        f"```{file_extension}\n"
+        f"{clean_prop}\n"
+        f"```\n\n"
+        f"{build_hidden_ids(issue_keys)}"
+    )
+
+    return wrap_agent_comment(body)
+
+
 # Publish one inline comment per current issue on its target line.
 async def post_inline_comment(
     session: ClientSession,
@@ -733,6 +795,49 @@ async def post_inline_comment(
         logger.error(f"Failed to add inline comment: {e}")
         raise
 
+
+async def post_grouped_inline_comment(
+    session: ClientSession,
+    pr_id: str,
+    repo_slug: str,
+    issues: list[Issue],
+    workspace: str,
+) -> bool:
+    try:
+        if not issues:
+            return False
+
+        base_issue = max(
+            issues,
+            key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
+        )
+
+        if not is_valid_replacement(base_issue):
+            return False
+
+        if not validate_issue_against_file(base_issue):
+            return False
+
+        line_end = max(int(getattr(i, "original_end_line", i.line)) for i in issues)
+        content = build_grouped_inline_comment_content(issues)
+
+        await session.call_tool(
+            name="addPullRequestComment",
+            arguments={
+                "workspace": workspace,
+                "pull_request_id": int(pr_id),
+                "repo_slug": repo_slug,
+                "content": content,
+                "inline": {
+                    "path": base_issue.file,
+                    "to": line_end,
+                },
+            },
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to add grouped inline comment: {e}")
+        raise
 
 # Read all existing agent comments from the pull request to reconcile current analysis state.
 async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
@@ -1043,7 +1148,7 @@ async def synchronize_inline_comments(
         if int(comment_info["comment_id"]) not in deleted_comment_ids
     }
 
-    created_comments = 0
+    issues_to_create = []
 
     for issue_key, issue in desired_issues_by_key.items():
         if issue_key in existing_issue_keys_after_cleanup:
@@ -1052,9 +1157,25 @@ async def synchronize_inline_comments(
         if issue_key in keys_blocked_by_failed_delete:
             continue
 
-        created = await post_inline_comment(session, pr_id, repo_slug, issue, workspace)
+        issues_to_create.append(issue)
+
+    grouped_issues: dict[tuple[str, str, str], list[Issue]] = {}
+
+    for issue in issues_to_create:
+        grouping_key = build_grouping_key(issue)
+        grouped_issues.setdefault(grouping_key, []).append(issue)
+
+    created_comments = 0
+
+    for issue_group in grouped_issues.values():
+        if len(issue_group) == 1:
+            created = await post_inline_comment(session, pr_id, repo_slug, issue_group[0], workspace)
+        else:
+            created = await post_grouped_inline_comment(session, pr_id, repo_slug, issue_group, workspace)
+
         if created:
             created_comments += 1
+
         await asyncio.sleep(0.2)
 
     logger.info(
