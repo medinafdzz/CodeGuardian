@@ -79,25 +79,50 @@ def build_issue_key(issue: Issue) -> str:
     return f"{issue.file}:{issue.line}:{issue.target_name}:{issue.severity}"
 
 
-def build_semantic_issue_key(issue: Issue) -> tuple[str, int, str, str, str, str]:
-    return (
-        (issue.file or "").strip(),
-        int(getattr(issue, "line", 0) or 0),
-        (issue.problem or "").strip().lower(),
-        (issue.severity or "").strip().upper(),
-        normalize_code_block(clean_replacement_text(issue.original_code or "")),
-        normalize_code_block(clean_replacement_text(issue.proposed_code or "")),
-    )
-
-# In case the AI returns duplicated issues, we can filter them by their SonarQube key to avoid duplicated comments in Bitbucket.
-def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
+# Clean, validate, and deduplicate the issues returned by the model
+def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
+    prepared_issues = []
+    dropped_invalid_issues = 0
     seen_sonar_keys = set()
     seen_semantic_keys = set()
-    unique_issues = []
 
     for issue in issues:
+        issue.file = (issue.file or "").strip()
+        issue.target_type = (issue.target_type or "").strip()
+        issue.target_name = (issue.target_name or "").strip()
+        issue.problem = (issue.problem or "").strip()
+        issue.severity = (issue.severity or "").strip().upper()
+        issue.solution = (issue.solution or "").strip()
+        issue.original_code = clean_replacement_text(issue.original_code or "")
+        issue.proposed_code = clean_replacement_text(issue.proposed_code or "")
+
+        if issue.line < 1:
+            issue.line = 1
+
+        if issue.original_start_line is not None and issue.original_start_line < 1:
+            issue.original_start_line = 1
+
+        if issue.original_end_line is not None and issue.original_end_line < 1:
+            issue.original_end_line = 1
+
+        if issue.original_start_line and issue.original_end_line:
+            if issue.original_end_line < issue.original_start_line:
+                issue.original_start_line, issue.original_end_line = issue.original_end_line, issue.original_start_line
+
+        if (not issue.file or not issue.problem or not issue.solution or not issue.severity or
+                not issue.original_code or not issue.proposed_code):
+            dropped_invalid_issues += 1
+            continue
+
         sonar_issue_key = build_issue_key(issue)
-        semantic_issue_key = build_semantic_issue_key(issue)
+        semantic_issue_key = (
+            issue.file,
+            int(getattr(issue, "line", 0) or 0),
+            issue.problem.lower(),
+            issue.severity.upper(),
+            normalize_code_block(issue.original_code),
+            normalize_code_block(issue.proposed_code),
+        )
 
         if sonar_issue_key in seen_sonar_keys:
             continue
@@ -107,53 +132,146 @@ def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
 
         seen_sonar_keys.add(sonar_issue_key)
         seen_semantic_keys.add(semantic_issue_key)
-        unique_issues.append(issue)
+        prepared_issues.append(issue)
 
-    return unique_issues
-
-def sanitize_issue(issue: Issue) -> Issue:
-    issue.file = (issue.file or "").strip()
-    issue.target_type = (issue.target_type or "").strip()
-    issue.target_name = (issue.target_name or "").strip()
-    issue.problem = (issue.problem or "").strip()
-    issue.severity = (issue.severity or "").strip().upper()
-    issue.solution = (issue.solution or "").strip()
-    issue.original_code = clean_replacement_text(issue.original_code or "")
-    issue.proposed_code = clean_replacement_text(issue.proposed_code or "")
-
-    if issue.line < 1:
-        issue.line = 1
-
-    if issue.original_start_line is not None and issue.original_start_line < 1:
-        issue.original_start_line = 1
-
-    if issue.original_end_line is not None and issue.original_end_line < 1:
-        issue.original_end_line = 1
-
-    if issue.original_start_line and issue.original_end_line:
-        if issue.original_end_line < issue.original_start_line:
-            issue.original_start_line, issue.original_end_line = issue.original_end_line, issue.original_start_line
-
-    return issue
+    return prepared_issues, dropped_invalid_issues
 
 
-def is_structurally_valid_issue(issue: Issue) -> bool:
-    if not issue.file:
-        return False
-    if not issue.problem:
-        return False
-    if not issue.solution:
-        return False
-    if not issue.severity:
-        return False
-    if not issue.original_code:
-        return False
-    if not issue.proposed_code:
-        return False
-    return True
+# Group issues that share the same replacement block
+def build_group_key(issue: Issue) -> tuple[str, str, str]:
+    return (
+        issue.file,
+        normalize_code_block(clean_replacement_text(issue.original_code)),
+        normalize_code_block(clean_replacement_text(issue.proposed_code)),
+    )
 
 
-# Extract the hidden issue identifiers previously stored in agent comments.
+# Build the final comment body for one issue or a grouped set of issues
+def build_comment_content(issues: list[Issue]) -> str:
+    if not issues:
+        return ""
+
+    issues = sorted(
+        issues,
+        key=lambda i: (
+            int(getattr(i, "original_start_line", i.line)),
+            int(getattr(i, "original_end_line", i.line)),
+            i.severity,
+            i.problem,
+        ),
+    )
+
+    base_issue = max(
+        issues,
+        key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
+    )
+
+    file_extension = base_issue.file.split(".")[-1] if "." in base_issue.file else "txt"
+    clean_orig = clean_replacement_text(base_issue.original_code)
+    clean_prop = clean_replacement_text(base_issue.proposed_code)
+
+    min_line = min(int(getattr(i, "original_start_line", i.line)) for i in issues)
+    max_line = max(int(getattr(i, "original_end_line", i.line)) for i in issues)
+    issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issues))
+
+    if len(issues) == 1:
+        issue = issues[0]
+        body = (f"### Code Issue\n\n"
+                f"**File:** {issue.file}\n\n"
+                f"**Lines:** {min_line}-{max_line}\n\n"
+                f"**Problem ({issue.severity}):** {issue.problem}\n\n"
+                f"**Solution:** {issue.solution}\n\n"
+                f"**Block to substitute:**\n"
+                f"```{file_extension}\n"
+                f"{clean_orig}\n"
+                f"```\n\n"
+                f"**Refactored Code:**\n"
+                f"```{file_extension}\n"
+                f"{clean_prop}\n"
+                f"```\n\n"
+                f"{build_hidden_ids(issue_keys)}")
+        return wrap_agent_comment(body)
+
+    seen_problem_lines = set()
+    problem_lines = []
+
+    for issue in issues:
+        problem_line = f"- Line {issue.line} ({issue.severity}): {issue.problem}"
+        normalized_problem_line = problem_line.strip().lower()
+
+        if normalized_problem_line in seen_problem_lines:
+            continue
+
+        seen_problem_lines.add(normalized_problem_line)
+        problem_lines.append(problem_line)
+
+    combined_problems = "\n".join(problem_lines)
+
+    body = (f"### Code Issues\n\n"
+            f"**File:** {base_issue.file}\n\n"
+            f"**Lines:** {min_line}-{max_line}\n\n"
+            f"**Detected problems:**\n\n"
+            f"{combined_problems}\n\n"
+            f"**Suggested solution:** {base_issue.solution}\n\n"
+            f"**Block to substitute:**\n"
+            f"```{file_extension}\n"
+            f"{clean_orig}\n"
+            f"```\n\n"
+            f"**Refactored Code:**\n"
+            f"```{file_extension}\n"
+            f"{clean_prop}\n"
+            f"```\n\n"
+            f"{build_hidden_ids(issue_keys)}")
+
+    return wrap_agent_comment(body)
+
+
+# Publish one inline comment for a whole issue group
+async def post_issue_group_comment(
+    session: ClientSession,
+    pr_id: str,
+    repo_slug: str,
+    issues: list[Issue],
+    workspace: str,
+) -> bool:
+    try:
+        if not issues:
+            return False
+
+        base_issue = max(
+            issues,
+            key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
+        )
+
+        if not is_valid_replacement(base_issue):
+            return False
+
+        if not validate_issue_against_file(base_issue):
+            return False
+
+        line_end = max(int(getattr(i, "original_end_line", i.line)) for i in issues)
+        content = build_comment_content(issues)
+
+        await session.call_tool(
+            name="addPullRequestComment",
+            arguments={
+                "workspace": workspace,
+                "pull_request_id": int(pr_id),
+                "repo_slug": repo_slug,
+                "content": content,
+                "inline": {
+                    "path": base_issue.file,
+                    "to": line_end,
+                },
+            },
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to add inline comment: {e}")
+        raise
+
+
+# Read the hidden IDs stored inside existing agent comments
 def extract_issue_key(comment_text: str) -> list[str]:
     keys = set()
 
@@ -174,8 +292,7 @@ def extract_issue_key(comment_text: str) -> list[str]:
     return list(keys)
 
 
-# Attach stable hidden identifiers to each agent comment so the next analysis
-# can map current issues to existing PR comments.
+# Store issue IDs inside a hidden block for later tracking
 def build_hidden_ids(issue_keys: list[str]) -> str:
     unique_keys = list(dict.fromkeys(k.strip() for k in issue_keys if k and k.strip()))
     if not unique_keys:
@@ -184,15 +301,17 @@ def build_hidden_ids(issue_keys: list[str]) -> str:
     return f"<!-- CodeGuardian-IDs:\n{ids_lines}\n-->"
 
 
+# Add a hidden marker so the agent can recognize its own comments
 def wrap_agent_comment(body: str) -> str:
     return f"{CODEGUARDIAN_AGENT_MARKER}\n{body}"
 
 
+# Check whether a comment was created by the agent
 def is_agent_comment(comment_text: str) -> bool:
     return CODEGUARDIAN_AGENT_MARKER in (comment_text or "")
 
 
-# Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
+# Read the basic pull request data from the webhook payload
 def load_webhook_data(filepath: str) -> tuple[str, str, str, str]:
     with open(filepath, "r") as file:
         data = json.load(file)
@@ -217,18 +336,19 @@ def load_webhook_data(filepath: str) -> tuple[str, str, str, str]:
     return project_key, str(pr_id), str(repo_slug), str(workspace)
 
 
-# Add nearby lines around the issue so the AI can understand the problem with some real context.
+# Read file lines once and keep them cached for repeated checks
 @lru_cache(maxsize=256)
-def _read_file_lines(filepath: str) -> list[str]:
+def read_file_lines(filepath: str) -> list[str]:
     if not os.path.exists(filepath):
         raise FileNotFoundError("File not found.")
     with open(filepath, "r", encoding="utf-8") as file:
         return file.readlines()
 
 
+# Return a code window around the reported line for model context
 def get_code_context(filepath: str, line_number: int, context_window: int = 60) -> str:
     try:
-        lines = _read_file_lines(filepath)
+        lines = read_file_lines(filepath)
 
         # Calculate the start and end lines for the code snippet
         start_line = max(0, line_number - context_window - 1)  # -1 because line numbers are typically 1-indexed
@@ -245,7 +365,7 @@ def get_code_context(filepath: str, line_number: int, context_window: int = 60) 
         return f"Error reading code context: {e}"
 
 
-# Trim the Sonar response before sending it to the LLM so the prompt stays smaller and cleaner.
+# Keep only the fields needed from the SonarQube response
 def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
     content_text = raw_results.content[0].text
     issues_data = json.loads(content_text)
@@ -269,7 +389,7 @@ def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
     return cleaned
 
 
-# Pull only the serious unresolved issues from new code so old debt does not mix into this run.
+# Fetch the most relevant unresolved issues from new code only
 async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
     # Configure the SonarQube parameters
@@ -352,7 +472,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
     return top_issues
 
 
-# Ask Gemini for the final verdict once the most relevant Sonar findings have already been filtered.
+# Ask the model for fixes and collect execution metrics
 def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     # Configure the Gemini model parameters
     client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
@@ -541,6 +661,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         raise AgentExecutionError("Gemini response parsing failed") from e
 
 
+# Load all pull request comments so they can be inspected
 async def get_pull_request_comments(
     session: ClientSession,
     pr_id: str,
@@ -571,6 +692,7 @@ async def get_pull_request_comments(
         raise
 
 
+# Find old top-level summary comments created by the agent
 def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
     summary_comment_ids: set[int] = set()
 
@@ -595,29 +717,29 @@ def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
     return summary_comment_ids
 
 
-# If the AI does not provide a valid code replacement, it is better to skip the comment than to publish a broken code suggestion.
+# Normalize raw replacement text returned by the model
 def clean_replacement_text(value: str) -> str:
     return value.replace('\\n', '\n').strip('`').strip()
 
 
-# Check if the AI response contains a valid code replacement that produces a real change in the code
+# Make sure the suggested replacement is not empty and actually changes the code.
 def is_valid_replacement(issue: Issue) -> bool:
     clean_orig = clean_replacement_text(issue.original_code)
     clean_prop = clean_replacement_text(issue.proposed_code)
     return bool(clean_orig and clean_prop and clean_orig != clean_prop)
 
 
-# Remove extra spaces and blank lines from the code blocks
+# Normalize code blocks before comparing them
 def normalize_code_block(text: str) -> str:
     if not text:
         return ""
     return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").strip().splitlines()).strip()
 
 
-# Before posting the comment, validate that the original code block provided by the AI matches exactly with the code in the file for the specified line range
+# Check whether the model output matches the real file content closely enough.
 def validate_issue_against_file(issue: Issue, line_tolerance: int = 20) -> bool:
     try:
-        lines = _read_file_lines(issue.file)
+        lines = read_file_lines(issue.file)
 
         start = int(getattr(issue, "original_start_line", issue.line) or issue.line)
         end = int(getattr(issue, "original_end_line", issue.line) or issue.line)
@@ -686,207 +808,7 @@ def validate_issue_against_file(issue: Issue, line_tolerance: int = 20) -> bool:
         return False
 
 
-def build_inline_comment_content(issue: Issue) -> str:
-    file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
-    issue_key = build_issue_key(issue)
-
-    clean_orig = clean_replacement_text(issue.original_code)
-    clean_prop = clean_replacement_text(issue.proposed_code)
-
-    line_start = int(getattr(issue, "original_start_line", issue.line))
-    line_end = int(getattr(issue, "original_end_line", issue.line))
-
-    body = (f"### Code Issue\n\n"
-            f"**File:** {issue.file}\n\n"
-            f"**Lines:** {line_start}-{line_end}\n\n"
-            f"**Problem ({issue.severity}):** {issue.problem}\n\n"
-            f"**Solution:** {issue.solution}\n\n"
-            f"**Block to substitute:**\n"
-            f"```{file_extension}\n"
-            f"{clean_orig}\n"
-            f"```\n\n"
-            f"**Refactored Code:**\n"
-            f"```{file_extension}\n"
-            f"{clean_prop}\n"
-            f"```\n\n"
-            f"{build_hidden_ids([issue_key])}")
-
-    return wrap_agent_comment(body)
-
-
-def build_grouping_key(issue: Issue) -> tuple[str, str, str]:
-    return (
-        issue.file,
-        normalize_code_block(clean_replacement_text(issue.original_code)),
-        normalize_code_block(clean_replacement_text(issue.proposed_code)),
-    )
-
-def build_grouping_key_from_issue_keys(
-    issue_keys: set[str],
-    desired_issues_by_key: dict[str, Issue],
-) -> tuple[str, str, str] | None:
-    issues = [desired_issues_by_key[k] for k in issue_keys if k in desired_issues_by_key]
-    if not issues:
-        return None
-
-    base_issue = max(
-        issues,
-        key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
-    )
-
-    return build_grouping_key(base_issue)
-
-
-def build_grouped_inline_comment_content(issues: list[Issue]) -> str:
-    if not issues:
-        return ""
-
-    issues = sorted(
-        issues,
-        key=lambda i: (
-            int(getattr(i, "original_start_line", i.line)),
-            int(getattr(i, "original_end_line", i.line)),
-            i.severity,
-            i.problem,
-        ),
-    )
-
-    base_issue = max(
-        issues,
-        key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
-    )
-
-    file_extension = base_issue.file.split(".")[-1] if "." in base_issue.file else "txt"
-    clean_orig = clean_replacement_text(base_issue.original_code)
-    clean_prop = clean_replacement_text(base_issue.proposed_code)
-
-    min_line = min(int(getattr(i, "original_start_line", i.line)) for i in issues)
-    max_line = max(int(getattr(i, "original_end_line", i.line)) for i in issues)
-
-    seen_problem_lines = set()
-    problem_lines = []
-
-    for i in issues:
-        problem_line = f"- Line {i.line} ({i.severity}): {i.problem}"
-        normalized_problem_line = problem_line.strip().lower()
-
-        if normalized_problem_line in seen_problem_lines:
-            continue
-
-        seen_problem_lines.add(normalized_problem_line)
-        problem_lines.append(problem_line)
-
-    combined_problems = "\n".join(problem_lines)
-
-    issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issues))
-
-    body = (
-        f"### Code Issues\n\n"
-        f"**File:** {base_issue.file}\n\n"
-        f"**Lines:** {min_line}-{max_line}\n\n"
-        f"**Detected problems:**\n\n"
-        f"{combined_problems}\n\n"
-        f"**Suggested solution:** {base_issue.solution}\n\n"
-        f"**Block to substitute:**\n"
-        f"```{file_extension}\n"
-        f"{clean_orig}\n"
-        f"```\n\n"
-        f"**Refactored Code:**\n"
-        f"```{file_extension}\n"
-        f"{clean_prop}\n"
-        f"```\n\n"
-        f"{build_hidden_ids(issue_keys)}"
-    )
-
-    return wrap_agent_comment(body)
-
-
-def build_expected_comment_content_for_group(issues: list[Issue]) -> str:
-    if len(issues) == 1:
-        return build_inline_comment_content(issues[0]).strip()
-    return build_grouped_inline_comment_content(issues).strip()
-
-# Publish one inline comment per current issue on its target line.
-async def post_inline_comment(
-    session: ClientSession,
-    pr_id: str,
-    repo_slug: str,
-    issue: Issue,
-    workspace: str,
-) -> bool:
-    try:
-        if not is_valid_replacement(issue):
-            return False
-
-        if not validate_issue_against_file(issue):
-            return False
-
-        line_end = int(getattr(issue, "original_end_line", issue.line))
-        content = build_inline_comment_content(issue)
-
-        await session.call_tool(
-            name="addPullRequestComment",
-            arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": repo_slug,
-                "content": content,
-                "inline": {
-                    "path": issue.file,
-                    "to": line_end,
-                },
-            },
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Failed to add inline comment: {e}")
-        raise
-
-
-async def post_grouped_inline_comment(
-    session: ClientSession,
-    pr_id: str,
-    repo_slug: str,
-    issues: list[Issue],
-    workspace: str,
-) -> bool:
-    try:
-        if not issues:
-            return False
-
-        base_issue = max(
-            issues,
-            key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
-        )
-
-        if not is_valid_replacement(base_issue):
-            return False
-
-        if not validate_issue_against_file(base_issue):
-            return False
-
-        line_end = max(int(getattr(i, "original_end_line", i.line)) for i in issues)
-        content = build_grouped_inline_comment_content(issues)
-
-        await session.call_tool(
-            name="addPullRequestComment",
-            arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": repo_slug,
-                "content": content,
-                "inline": {
-                    "path": base_issue.file,
-                    "to": line_end,
-                },
-            },
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Failed to add grouped inline comment: {e}")
-        raise
-
-# Read all existing agent comments from the pull request to reconcile current analysis state.
+# Load the current inline comments created by the agent
 async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
     try:
         results = await session.call_tool(
@@ -948,6 +870,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
         raise
 
 
+# Build the auth headers for direct Bitbucket REST calls
 def get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
     bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
     bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "").strip()
@@ -964,10 +887,12 @@ def get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
     }
 
 
+# Return the base Bitbucket API URL used by REST helpers
 def get_bitbucket_api_base_url() -> str:
     return os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
 
 
+# Build the REST URL for a pull request comment
 def build_pullrequest_comment_url(
     pr_id: str,
     repo_slug: str,
@@ -979,6 +904,7 @@ def build_pullrequest_comment_url(
             f"/pullrequests/{pr_id}/comments/{comment_id}")
 
 
+# Delete one inline comment directly through the REST API
 async def delete_inline_comment_by_rest(
     pr_id: str,
     repo_slug: str,
@@ -1011,6 +937,7 @@ async def delete_inline_comment_by_rest(
         return False
 
 
+# Delete a set of comments and track which ones failed
 async def delete_comment_ids(
     pr_id: str,
     repo_slug: str,
@@ -1037,6 +964,7 @@ async def delete_comment_ids(
     return deleted_comment_ids, failed_comment_ids
 
 
+# Remove old summary comments that should no longer stay in the PR
 async def delete_agent_summary_comments(
     session: ClientSession,
     pr_id: str,
@@ -1066,9 +994,7 @@ async def delete_agent_summary_comments(
     return len(deleted_comment_ids)
 
 
-# Synchronize PR inline comments with the current analysis state:
-# obsolete agent comments are deleted, missing comments are created,
-# and no agent comments remain when no issues are detected.
+# Reconcile the current analysis with the current PR comments
 async def synchronize_inline_comments(
     session: ClientSession,
     pr_id: str,
@@ -1093,6 +1019,10 @@ async def synchronize_inline_comments(
         valid_issues.append(issue)
 
     desired_issues_by_key = {build_issue_key(issue): issue for issue in valid_issues}
+    desired_groups: dict[tuple[str, str, str], list[Issue]] = {}
+
+    for issue in valid_issues:
+        desired_groups.setdefault(build_group_key(issue), []).append(issue)
 
     logger.info(
         "Issues detected=%s, publishable=%s, skipped_invalid_replacement=%s, skipped_file_mismatch=%s, tracked_agent_comments=%s",
@@ -1109,12 +1039,18 @@ async def synchronize_inline_comments(
     for comment_id in sorted(active_inline_comments.keys(), reverse=True):
         comment_info = active_inline_comments[comment_id]
         issue_keys = set(comment_info.get("issue_keys", set()))
+        matching_issues = [desired_issues_by_key[k] for k in issue_keys if k in desired_issues_by_key]
 
-        group_key = build_grouping_key_from_issue_keys(issue_keys, desired_issues_by_key)
-
-        if group_key is None:
+        if not matching_issues:
             comments_to_delete.add(comment_id)
             continue
+
+        group_key = build_group_key(
+            max(
+                matching_issues,
+                key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(
+                    getattr(i, "original_start_line", i.line)),
+            ))
 
         if group_key in existing_comments_by_group_key:
             comments_to_delete.add(comment_id)
@@ -1122,7 +1058,6 @@ async def synchronize_inline_comments(
 
         existing_comments_by_group_key[group_key] = comment_info
 
-    # First, delete clearly obsolete duplicate/grouped comments.
     deleted_comment_ids, failed_comment_ids = await delete_comment_ids(
         pr_id,
         repo_slug,
@@ -1136,12 +1071,6 @@ async def synchronize_inline_comments(
             len(deleted_comment_ids),
             pr_id,
         )
-
-    # Build desired groups
-    desired_groups: dict[tuple[str, str, str], list[Issue]] = {}
-    for issue in valid_issues:
-        group_key = build_grouping_key(issue)
-        desired_groups.setdefault(group_key, []).append(issue)
 
     blocked_group_keys: set[tuple[str, str, str]] = set()
 
@@ -1169,16 +1098,15 @@ async def synchronize_inline_comments(
         else:
             base_issue = max(
                 desired_group,
-                key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
+                key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(
+                    getattr(i, "original_start_line", i.line)),
             )
             expected_path = base_issue.file
             expected_line = max(int(getattr(i, "original_end_line", i.line)) for i in desired_group)
-            current_path = inline_data.get("path")
-            current_line = inline_data.get("to")
+            expected_raw_text = build_comment_content(desired_group).strip()
             current_raw_text = (comment_info.get("raw_text") or "").strip()
-            expected_raw_text = build_expected_comment_content_for_group(desired_group)
 
-            if current_path != expected_path or current_line != expected_line:
+            if inline_data.get("path") != expected_path or inline_data.get("to") != expected_line:
                 should_delete = True
             elif current_raw_text != expected_raw_text:
                 should_delete = True
@@ -1198,8 +1126,7 @@ async def synchronize_inline_comments(
                 blocked_group_keys.add(group_key)
 
     existing_group_keys_after_cleanup = {
-        group_key
-        for group_key, comment_info in existing_comments_by_group_key.items()
+        group_key for group_key, comment_info in existing_comments_by_group_key.items()
         if int(comment_info["comment_id"]) not in deleted_comment_ids
     }
 
@@ -1212,28 +1139,24 @@ async def synchronize_inline_comments(
         if group_key in blocked_group_keys:
             continue
 
-        if len(issue_group) == 1:
-            created = await post_inline_comment(session, pr_id, repo_slug, issue_group[0], workspace)
-        else:
-            created = await post_grouped_inline_comment(session, pr_id, repo_slug, issue_group, workspace)
-
+        created = await post_issue_group_comment(session, pr_id, repo_slug, issue_group, workspace)
         if created:
             created_comments += 1
 
         await asyncio.sleep(0.2)
 
     logger.info(
-        "Comment sync result for PR %s: deleted_comments=%s, blocked_issue_keys=%s, created_comments=%s",
+        "Comment sync result for PR %s: deleted_comments=%s, blocked_group_keys=%s, created_comments=%s",
         pr_id,
         len(deleted_comment_ids),
-        len(keys_blocked_by_failed_delete),
+        len(blocked_group_keys),
         created_comments,
     )
 
     return created_comments
 
 
-# Turn the final AI decision into visible comments in Bitbucket for a pull request.
+# Open the Bitbucket session and publish the final analysis state
 async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decision: Decision) -> None:
     bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "")
 
@@ -1288,7 +1211,7 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
         raise AgentExecutionError("Bitbucket reporting failed") from e
 
 
-# Main function to orchestrate the flow of the agent: load the webhook data, fetch and clean SonarQube issues, analyze with Gemini, and report back to Bitbucket.
+# Orchestrate the full flow from webhook input to PR update.
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", required=True, help="Path to the JSON file to analyze")
@@ -1317,17 +1240,7 @@ async def main() -> None:
 
     decision = analyze_code_with_gemini(project_key, issues)
 
-    sanitized_issues = []
-    dropped_invalid_issues = 0
-
-    for issue in decision.issues:
-        sanitized_issue = sanitize_issue(issue)
-        if not is_structurally_valid_issue(sanitized_issue):
-            dropped_invalid_issues += 1
-            continue
-        sanitized_issues.append(sanitized_issue)
-
-    decision.issues = deduplicate_issues(sanitized_issues)
+    decision.issues, dropped_invalid_issues = normalize_and_deduplicate_issues(decision.issues)
 
     if dropped_invalid_issues:
         logger.info("Dropped %s structurally invalid issues returned by Gemini", dropped_invalid_issues)
