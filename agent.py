@@ -704,6 +704,21 @@ def build_grouping_key(issue: Issue) -> tuple[str, str, str]:
         normalize_code_block(clean_replacement_text(issue.proposed_code)),
     )
 
+def build_grouping_key_from_issue_keys(
+    issue_keys: set[str],
+    desired_issues_by_key: dict[str, Issue],
+) -> tuple[str, str, str] | None:
+    issues = [desired_issues_by_key[k] for k in issue_keys if k in desired_issues_by_key]
+    if not issues:
+        return None
+
+    base_issue = max(
+        issues,
+        key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
+    )
+
+    return build_grouping_key(base_issue)
+
 
 def build_grouped_inline_comment_content(issues: list[Issue]) -> str:
     if not issues:
@@ -758,6 +773,11 @@ def build_grouped_inline_comment_content(issues: list[Issue]) -> str:
 
     return wrap_agent_comment(body)
 
+
+def build_expected_comment_content_for_group(issues: list[Issue]) -> str:
+    if len(issues) == 1:
+        return build_inline_comment_content(issues[0]).strip()
+    return build_grouped_inline_comment_content(issues).strip()
 
 # Publish one inline comment per current issue on its target line.
 async def post_inline_comment(
@@ -1057,25 +1077,23 @@ async def synchronize_inline_comments(
     )
 
     comments_to_delete: set[int] = set()
-    existing_comments_by_issue_key: dict[str, dict] = {}
+    existing_comments_by_group_key: dict[tuple[str, str, str], dict] = {}
 
-    # Keep only one comment per issue_key.
-    # Duplicates, grouped comments or legacy comments are deleted.
     for comment_id in sorted(active_inline_comments.keys(), reverse=True):
         comment_info = active_inline_comments[comment_id]
         issue_keys = set(comment_info.get("issue_keys", set()))
 
-        if len(issue_keys) != 1:
+        group_key = build_grouping_key_from_issue_keys(issue_keys, desired_issues_by_key)
+
+        if group_key is None:
             comments_to_delete.add(comment_id)
             continue
 
-        issue_key = next(iter(issue_keys))
-
-        if issue_key in existing_comments_by_issue_key:
+        if group_key in existing_comments_by_group_key:
             comments_to_delete.add(comment_id)
             continue
 
-        existing_comments_by_issue_key[issue_key] = comment_info
+        existing_comments_by_group_key[group_key] = comment_info
 
     # First, delete clearly obsolete duplicate/grouped comments.
     deleted_comment_ids, failed_comment_ids = await delete_comment_ids(
@@ -1092,37 +1110,46 @@ async def synchronize_inline_comments(
             pr_id,
         )
 
-    # Delete comments that no longer represent the current desired state
-    keys_blocked_by_failed_delete: set[str] = set()
+    # Build desired groups
+    desired_groups: dict[tuple[str, str, str], list[Issue]] = {}
+    for issue in valid_issues:
+        group_key = build_grouping_key(issue)
+        desired_groups.setdefault(group_key, []).append(issue)
 
-    for issue_key, comment_info in existing_comments_by_issue_key.items():
+    blocked_group_keys: set[tuple[str, str, str]] = set()
+
+    for group_key, comment_info in existing_comments_by_group_key.items():
         comment_id = int(comment_info["comment_id"])
 
         if comment_id in deleted_comment_ids:
             continue
 
         if comment_id in failed_comment_ids:
-            keys_blocked_by_failed_delete.add(issue_key)
+            blocked_group_keys.add(group_key)
             continue
 
         inline_data = comment_info.get("inline") or {}
-        desired_issue = desired_issues_by_key.get(issue_key)
+        desired_group = desired_groups.get(group_key)
 
         should_delete = False
 
-        if desired_issue is None:
+        if desired_group is None:
             should_delete = True
         elif comment_info.get("resolved", False):
             should_delete = True
         elif comment_info.get("outdated", False):
             should_delete = True
         else:
-            expected_path = desired_issue.file
-            expected_line = int(getattr(desired_issue, "original_end_line", desired_issue.line))
+            base_issue = max(
+                desired_group,
+                key=lambda i: int(getattr(i, "original_end_line", i.line)) - int(getattr(i, "original_start_line", i.line)),
+            )
+            expected_path = base_issue.file
+            expected_line = max(int(getattr(i, "original_end_line", i.line)) for i in desired_group)
             current_path = inline_data.get("path")
             current_line = inline_data.get("to")
             current_raw_text = (comment_info.get("raw_text") or "").strip()
-            expected_raw_text = build_inline_comment_content(desired_issue).strip()
+            expected_raw_text = build_expected_comment_content_for_group(desired_group)
 
             if current_path != expected_path or current_line != expected_line:
                 should_delete = True
@@ -1141,33 +1168,23 @@ async def synchronize_inline_comments(
                 await asyncio.sleep(0.2)
             else:
                 logger.info("Comment %s could not be deleted", comment_id)
-                keys_blocked_by_failed_delete.add(issue_key)
+                blocked_group_keys.add(group_key)
 
-    existing_issue_keys_after_cleanup = {
-        issue_key for issue_key, comment_info in existing_comments_by_issue_key.items()
+    existing_group_keys_after_cleanup = {
+        group_key
+        for group_key, comment_info in existing_comments_by_group_key.items()
         if int(comment_info["comment_id"]) not in deleted_comment_ids
     }
 
-    issues_to_create = []
-
-    for issue_key, issue in desired_issues_by_key.items():
-        if issue_key in existing_issue_keys_after_cleanup:
-            continue
-
-        if issue_key in keys_blocked_by_failed_delete:
-            continue
-
-        issues_to_create.append(issue)
-
-    grouped_issues: dict[tuple[str, str, str], list[Issue]] = {}
-
-    for issue in issues_to_create:
-        grouping_key = build_grouping_key(issue)
-        grouped_issues.setdefault(grouping_key, []).append(issue)
-
     created_comments = 0
 
-    for issue_group in grouped_issues.values():
+    for group_key, issue_group in desired_groups.items():
+        if group_key in existing_group_keys_after_cleanup:
+            continue
+
+        if group_key in blocked_group_keys:
+            continue
+
         if len(issue_group) == 1:
             created = await post_inline_comment(session, pr_id, repo_slug, issue_group[0], workspace)
         else:
