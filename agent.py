@@ -63,11 +63,14 @@ class Decision(BaseModel):
     issues: list[Issue]
     comment: str
 
+
 class AgentExecutionError(Exception):
     """Raised when the agent cannot complete a required execution step."""
 
+
 CODEGUARDIAN_SUMMARY_TITLE = "**CodeGuardian Analysis Summary**"
 CODEGUARDIAN_AGENT_MARKER = "<!-- CodeGuardian-Agent -->"
+
 
 # Generate a key for each issue
 def build_issue_key(issue: Issue) -> str:
@@ -89,7 +92,6 @@ def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
         unique_issues.append(issue)
 
     return unique_issues
-
 
 
 def sanitize_issue(issue: Issue) -> Issue:
@@ -171,6 +173,7 @@ def wrap_agent_comment(body: str) -> str:
 
 def is_agent_comment(comment_text: str) -> bool:
     return CODEGUARDIAN_AGENT_MARKER in (comment_text or "")
+
 
 # Get the project key and pull request ID from the webhook input and leave them in a format the rest of the flow can reuse.
 def load_webhook_data(filepath: str) -> tuple[str, str, str, str]:
@@ -551,7 +554,6 @@ async def get_pull_request_comments(
         raise
 
 
-
 def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
     summary_comment_ids: set[int] = set()
 
@@ -565,17 +567,16 @@ def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
         raw_text = (comment.get("content", {}) or {}).get("raw", "") or ""
         normalized_text = raw_text.replace(CODEGUARDIAN_AGENT_MARKER, "", 1).strip()
 
-        if (
-            is_agent_comment(raw_text)
-            or normalized_text.startswith(CODEGUARDIAN_SUMMARY_TITLE)
-            or raw_text.strip().startswith(CODEGUARDIAN_SUMMARY_TITLE)
-        ):
-            if normalized_text.startswith(CODEGUARDIAN_SUMMARY_TITLE) or raw_text.strip().startswith(CODEGUARDIAN_SUMMARY_TITLE):
+        if (is_agent_comment(raw_text) or normalized_text.startswith(CODEGUARDIAN_SUMMARY_TITLE) or
+                raw_text.strip().startswith(CODEGUARDIAN_SUMMARY_TITLE)):
+            if normalized_text.startswith(CODEGUARDIAN_SUMMARY_TITLE) or raw_text.strip().startswith(
+                    CODEGUARDIAN_SUMMARY_TITLE):
                 comment_id = comment.get("id")
                 if comment_id is not None:
                     summary_comment_ids.add(int(comment_id))
 
     return summary_comment_ids
+
 
 # If the AI does not provide a valid code replacement, it is better to skip the comment than to publish a broken code suggestion.
 def clean_replacement_text(value: str) -> str:
@@ -597,15 +598,19 @@ def normalize_code_block(text: str) -> str:
 
 
 # Before posting the comment, validate that the original code block provided by the AI matches exactly with the code in the file for the specified line range
-def validate_issue_against_file(issue: Issue, line_tolerance: int = 6) -> bool:
+def validate_issue_against_file(issue: Issue, line_tolerance: int = 20) -> bool:
     try:
         lines = _read_file_lines(issue.file)
 
         start = int(getattr(issue, "original_start_line", issue.line) or issue.line)
         end = int(getattr(issue, "original_end_line", issue.line) or issue.line)
 
-        if start < 1 or end < start or end > len(lines):
-            return False
+        if start < 1:
+            start = 1
+        if end < start:
+            end = start
+        if end > len(lines):
+            end = len(lines)
 
         original = normalize_code_block(clean_replacement_text(issue.original_code))
         proposed = normalize_code_block(clean_replacement_text(issue.proposed_code))
@@ -614,19 +619,53 @@ def validate_issue_against_file(issue: Issue, line_tolerance: int = 6) -> bool:
             return False
 
         exact_block = normalize_code_block("".join(lines[start - 1:end]))
-        if original == exact_block or original in exact_block:
+        if original == exact_block:
+            return True
+
+        if original in exact_block or exact_block in original:
             return True
 
         window_start = max(1, start - line_tolerance)
         window_end = min(len(lines), end + line_tolerance)
         nearby_block = normalize_code_block("".join(lines[window_start - 1:window_end]))
 
-        if original == nearby_block or original in nearby_block:
+        if original == nearby_block:
             return True
+
+        if original in nearby_block or nearby_block in original:
+            return True
+
+        original_compact = re.sub(r"\s+", "", original)
+        exact_compact = re.sub(r"\s+", "", exact_block)
+        nearby_compact = re.sub(r"\s+", "", nearby_block)
+
+        if original_compact == exact_compact or original_compact in exact_compact or exact_compact in original_compact:
+            return True
+
+        if original_compact == nearby_compact or original_compact in nearby_compact or nearby_compact in original_compact:
+            return True
+
+        logger.info(
+            "File match failed for issue key=%s file=%s start=%s end=%s sonar_line=%s",
+            build_issue_key(issue),
+            issue.file,
+            start,
+            end,
+            issue.line,
+        )
+        logger.info("Original code returned by model:\n%s", issue.original_code)
+        logger.info("Exact block from file:\n%s", exact_block)
+        logger.info("Nearby block from file:\n%s", nearby_block)
 
         return False
 
-    except Exception:
+    except Exception as e:
+        logger.info(
+            "Exception validating issue against file key=%s file=%s: %s",
+            build_issue_key(issue),
+            getattr(issue, "file", ""),
+            e,
+        )
         return False
 
 
@@ -640,24 +679,23 @@ def build_inline_comment_content(issue: Issue) -> str:
     line_start = int(getattr(issue, "original_start_line", issue.line))
     line_end = int(getattr(issue, "original_end_line", issue.line))
 
-    body = (
-        f"### Code Issue\n\n"
-        f"**File:** {issue.file}\n\n"
-        f"**Lines:** {line_start}-{line_end}\n\n"
-        f"**Problem ({issue.severity}):** {issue.problem}\n\n"
-        f"**Solution:** {issue.solution}\n\n"
-        f"**Block to substitute:**\n"
-        f"```{file_extension}\n"
-        f"{clean_orig}\n"
-        f"```\n\n"
-        f"**Refactored Code:**\n"
-        f"```{file_extension}\n"
-        f"{clean_prop}\n"
-        f"```\n\n"
-        f"{build_hidden_ids([issue_key])}"
-    )
+    body = (f"### Code Issue\n\n"
+            f"**File:** {issue.file}\n\n"
+            f"**Lines:** {line_start}-{line_end}\n\n"
+            f"**Problem ({issue.severity}):** {issue.problem}\n\n"
+            f"**Solution:** {issue.solution}\n\n"
+            f"**Block to substitute:**\n"
+            f"```{file_extension}\n"
+            f"{clean_orig}\n"
+            f"```\n\n"
+            f"**Refactored Code:**\n"
+            f"```{file_extension}\n"
+            f"{clean_prop}\n"
+            f"```\n\n"
+            f"{build_hidden_ids([issue_key])}")
 
     return wrap_agent_comment(body)
+
 
 # Publish one inline comment per current issue on its target line.
 async def post_inline_comment(
@@ -694,6 +732,7 @@ async def post_inline_comment(
     except Exception as e:
         logger.error(f"Failed to add inline comment: {e}")
         raise
+
 
 # Read all existing agent comments from the pull request to reconcile current analysis state.
 async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
@@ -757,7 +796,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
         raise
 
 
-def _get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
+def get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
     bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
     bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "").strip()
 
@@ -773,21 +812,19 @@ def _get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
     }
 
 
-def _get_bitbucket_api_base_url() -> str:
+def get_bitbucket_api_base_url() -> str:
     return os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
 
 
-def _build_pullrequest_comment_url(
+def build_pullrequest_comment_url(
     pr_id: str,
     repo_slug: str,
     comment_id: str,
     workspace: str,
 ) -> str:
-    base_url = _get_bitbucket_api_base_url()
-    return (
-        f"{base_url}/repositories/{workspace}/{repo_slug}"
-        f"/pullrequests/{pr_id}/comments/{comment_id}"
-    )
+    base_url = get_bitbucket_api_base_url()
+    return (f"{base_url}/repositories/{workspace}/{repo_slug}"
+            f"/pullrequests/{pr_id}/comments/{comment_id}")
 
 
 async def delete_inline_comment_by_rest(
@@ -796,11 +833,11 @@ async def delete_inline_comment_by_rest(
     comment_id: str,
     workspace: str,
 ) -> bool:
-    headers = _get_bitbucket_basic_auth_headers()
+    headers = get_bitbucket_basic_auth_headers()
     if not headers:
         return False
 
-    delete_url = _build_pullrequest_comment_url(pr_id, repo_slug, comment_id, workspace)
+    delete_url = build_pullrequest_comment_url(pr_id, repo_slug, comment_id, workspace)
 
     def _delete_comment() -> int:
         req = urllib.request.Request(
@@ -875,6 +912,7 @@ async def delete_agent_summary_comments(
         )
 
     return len(deleted_comment_ids)
+
 
 # Synchronize PR inline comments with the current analysis state:
 # obsolete agent comments are deleted, missing comments are created,
@@ -1001,8 +1039,7 @@ async def synchronize_inline_comments(
                 keys_blocked_by_failed_delete.add(issue_key)
 
     existing_issue_keys_after_cleanup = {
-        issue_key
-        for issue_key, comment_info in existing_comments_by_issue_key.items()
+        issue_key for issue_key, comment_info in existing_comments_by_issue_key.items()
         if int(comment_info["comment_id"]) not in deleted_comment_ids
     }
 
@@ -1064,7 +1101,7 @@ async def report_to_bitbucket(pr_id: str, repo_slug: str, workspace: str, decisi
                     repo_slug,
                     workspace,
                 )
-                
+
                 created_inline_comments = await synchronize_inline_comments(
                     session_bb,
                     pr_id,
@@ -1104,7 +1141,8 @@ async def main() -> None:
         auto_decision = Decision(
             decline_pr=False,
             issues=[],
-            comment="CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
+            comment=
+            "CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
         )
 
         await report_to_bitbucket(pr_id, repo_slug, workspace, auto_decision)
@@ -1134,6 +1172,7 @@ async def main() -> None:
     )
 
     await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
+
 
 if __name__ == "__main__":
     try:
