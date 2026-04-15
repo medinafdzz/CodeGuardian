@@ -499,8 +499,9 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
 
     decline_pr = any(str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"} for issue in issues)
 
-    batch_size = int(os.getenv("CODEGUARDIAN_BATCH_SIZE", "3"))
-    line_gap = int(os.getenv("CODEGUARDIAN_BATCH_LINE_GAP", "25"))
+    # Each finding is analyzed independently but they are sent in batches to optimize the Gemini context and token usage.
+    batch_size = int(os.getenv("CODEGUARDIAN_BATCH_SIZE", "1"))
+    line_gap = int(os.getenv("CODEGUARDIAN_BATCH_LINE_GAP", "10"))
 
     sorted_issues = sorted(
         issues,
