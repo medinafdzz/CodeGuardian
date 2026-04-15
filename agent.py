@@ -11,6 +11,7 @@ import re
 import base64
 import urllib.request
 import urllib.error
+from dataclasses import dataclass
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
 from google.genai import (
     types,)  # Library to manage the configuration and types for the Gemini model API
@@ -64,6 +65,14 @@ class Decision(BaseModel):
     comment: str
 
 
+@dataclass(frozen=True)
+class ScopeInfo:
+    kind: str
+    name: str
+    start_line: int
+    end_line: int
+
+
 class IssueBatchDecision(BaseModel):
     issues: list[Issue]
 
@@ -74,6 +83,188 @@ class AgentExecutionError(Exception):
 
 CODEGUARDIAN_SUMMARY_TITLE = "**CodeGuardian Analysis Summary**"
 CODEGUARDIAN_AGENT_MARKER = "<!-- CodeGuardian-Agent -->"
+
+
+# Detect the language of the file
+def detect_language(filepath: str) -> str:
+    ext = os.path.splitext(filepath)[1].lower()
+    mapping = {
+        ".py": "python",
+        ".java": "java",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".go": "go",
+        ".cs": "csharp",
+        ".cpp": "cpp",
+        ".cxx": "cpp",
+        ".cc": "cpp",
+        ".c": "c",
+        ".php": "php",
+        ".rb": "ruby",
+        ".rs": "rust",
+        ".kt": "kotlin",
+        ".swift": "swift",
+    }
+    return mapping.get(ext, "unknown")
+
+
+# Find the smallest executable scope (function, method, or global) that contains the line where the issue is located. It uses regex patterns to identify function/method definitions and their boundaries based on indentation (for Python) or braces (for C-like languages). If it cannot confidently determine a scope, it defaults to "global". This helps the agent provide more context-aware fixes by understanding the code structure around the issue.
+def resolve_scope_with_parser(filepath: str, line_number: int, language: str) -> ScopeInfo:
+
+    lines = read_file_lines(filepath)
+
+    if not lines:
+        return ScopeInfo("global", "", line_number, line_number)
+
+    line_number = max(1, min(line_number, len(lines)))
+
+    if language == "python":
+        for start_idx in range(line_number - 1, -1, -1):
+            match = re.match(
+                r"^([ \t]*)(?:async\s+def|def)\s+([A-Za-z_]\w*)\s*\(",
+                lines[start_idx],
+            )
+            if not match:
+                continue
+
+            base_indent = len(match.group(1).replace("\t", "    "))
+            end_line = len(lines)
+
+            for end_idx in range(start_idx + 1, len(lines)):
+                candidate = lines[end_idx]
+                stripped = candidate.strip()
+
+                if not stripped:
+                    continue
+
+                candidate_indent = len(candidate[:len(candidate) - len(candidate.lstrip(" \t"))].replace("\t", "    "))
+
+                if candidate_indent <= base_indent:
+                    end_line = end_idx
+                    break
+
+            if start_idx + 1 <= line_number <= end_line:
+                return ScopeInfo("function", match.group(2), start_idx + 1, end_line)
+
+        return ScopeInfo("global", "", line_number, line_number)
+
+    if language not in {
+            "java",
+            "javascript",
+            "typescript",
+            "go",
+            "csharp",
+            "cpp",
+            "c",
+            "php",
+            "rust",
+            "kotlin",
+            "swift",
+    }:
+        return ScopeInfo("global", "", line_number, line_number)
+
+    scope_kind = "method" if language in {"java", "csharp", "kotlin", "swift", "php"} else "function"
+
+    for start_idx in range(line_number - 1, -1, -1):
+        signature_parts = []
+        open_brace_line = None
+
+        for cursor in range(start_idx, min(len(lines), start_idx + 6)):
+            stripped = lines[cursor].strip()
+
+            if not stripped and not signature_parts:
+                break
+
+            signature_parts.append(stripped)
+
+            if "{" in stripped:
+                open_brace_line = cursor
+                break
+
+            if ";" in stripped:
+                break
+
+        if open_brace_line is None:
+            continue
+
+        signature_text = " ".join(signature_parts).strip()
+
+        if "(" not in signature_text or ")" not in signature_text:
+            continue
+
+        if re.match(
+                r"^(if|for|foreach|while|switch|catch|else|do|try|using|lock|with|synchronized)\b",
+                signature_text,
+        ):
+            continue
+
+        if re.search(r"\bnew\s+[A-Za-z_][\w$]*\s*\([^()]*\)\s*\{", signature_text):
+            continue
+
+        name_match = re.search(
+            r"([A-Za-z_][\w$]*)\s*\([^()]*\)\s*(?:throws\b[^{}]*)?\{",
+            signature_text,
+        )
+
+        if not name_match and language in {"javascript", "typescript"}:
+            name_match = re.search(
+                r"([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{",
+                signature_text,
+            )
+
+        if not name_match:
+            continue
+
+        scope_name = name_match.group(1)
+        if scope_name in {
+                "if",
+                "for",
+                "foreach",
+                "while",
+                "switch",
+                "catch",
+                "else",
+                "do",
+                "try",
+                "using",
+                "lock",
+                "with",
+                "synchronized",
+        }:
+            continue
+
+        brace_depth = 0
+        entered_scope = False
+        end_line = None
+
+        for end_idx in range(open_brace_line, len(lines)):
+            brace_depth += lines[end_idx].count("{")
+            brace_depth -= lines[end_idx].count("}")
+
+            if end_idx + 1 >= line_number and brace_depth > 0:
+                entered_scope = True
+
+            if brace_depth == 0:
+                end_line = end_idx + 1
+                break
+
+        if entered_scope and end_line is not None and start_idx + 1 <= line_number <= end_line:
+            return ScopeInfo(scope_kind, scope_name, start_idx + 1, end_line)
+
+    return ScopeInfo("global", "", line_number, line_number)
+
+
+def resolve_scope(filepath: str, line_number: int) -> ScopeInfo:
+    language = detect_language(filepath)
+
+    try:
+        if language == "unknown":
+            return ScopeInfo("global", "", line_number, line_number)
+
+        return resolve_scope_with_parser(filepath, line_number, language)
+
+    except Exception:
+        return ScopeInfo("global", "", line_number, line_number)
 
 
 # Generate a key for each issue
@@ -104,7 +295,7 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
 
         if issue.original_end_line is None:
             issue.original_end_line = issue.line
-    
+
         if issue.line < 1:
             issue.line = 1
 
@@ -142,6 +333,7 @@ def build_group_key(issue: Issue) -> tuple[str, str, str]:
         normalize_code_block(clean_replacement_text(issue.proposed_code or "")),
     )
 
+
 # Build the final comment body for one issue or a grouped set of issues
 def build_comment_content(issues: list[Issue]) -> str:
     if not issues:
@@ -159,8 +351,8 @@ def build_comment_content(issues: list[Issue]) -> str:
 
     base_issue = max(
         issues,
-        key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line)
-        - int(getattr(i, "original_start_line", i.line) or i.line),
+        key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
+            getattr(i, "original_start_line", i.line) or i.line),
     )
 
     min_line = min(int(getattr(i, "original_start_line", i.line) or i.line) for i in issues)
@@ -254,8 +446,8 @@ async def post_issue_group_comment(
 
         base_issue = max(
             issues,
-            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line)
-            - int(getattr(i, "original_start_line", i.line) or i.line),
+            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
+                getattr(i, "original_start_line", i.line) or i.line),
         )
 
         line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
@@ -482,7 +674,51 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
     for issue in top_issues:
         issue["code_context"] = get_code_context(issue["file"], issue["line"])
 
+        scope = resolve_scope(issue["file"], issue["line"])
+        issue["scope_kind"] = scope.kind
+        issue["scope_name"] = scope.name
+        issue["scope_start_line"] = scope.start_line
+        issue["scope_end_line"] = scope.end_line
+
     return top_issues
+
+
+def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
+    grouped: dict[tuple, list[dict]] = {}
+    ordered_keys: list[tuple] = []
+
+    for issue in sorted(
+            issues,
+            key=lambda item: (
+                item.get("file", ""),
+                int(item.get("scope_start_line", item.get("line", 0)) or 0),
+                int(item.get("line", 0) or 0),
+            ),
+    ):
+        scope_kind = issue.get("scope_kind", "global")
+        scope_name = issue.get("scope_name", "")
+        scope_start = int(issue.get("scope_start_line", issue.get("line", 0)) or issue.get("line", 0))
+        scope_end = int(issue.get("scope_end_line", issue.get("line", 0)) or issue.get("line", 0))
+
+        if scope_kind in {"function", "method"}:
+            key = (issue.get("file", ""), scope_kind, scope_name, scope_start, scope_end)
+        else:
+            # Los problemas fuera de función van solos
+            key = (
+                issue.get("file", ""),
+                "global",
+                f"global:{issue.get('sonar_key', 'NO_KEY')}:{issue.get('line', 0)}",
+                int(issue.get("line", 0) or 0),
+                int(issue.get("line", 0) or 0),
+            )
+
+        if key not in grouped:
+            grouped[key] = []
+            ordered_keys.append(key)
+
+        grouped[key].append(issue)
+
+    return [grouped[key] for key in ordered_keys]
 
 
 # Ask the model for fixes and collect execution metrics
@@ -497,73 +733,61 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
 
     decline_pr = any(str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"} for issue in issues)
 
-    # Each finding is analyzed independently but they are sent in batches to optimize the Gemini context and token usage.
-    batch_size = int(os.getenv("CODEGUARDIAN_BATCH_SIZE", "2"))
-    line_gap = int(os.getenv("CODEGUARDIAN_BATCH_LINE_GAP", "25"))
-
-    sorted_issues = sorted(
-        issues,
-        key=lambda issue: (
-            issue.get("file", ""),
-            int(issue.get("line", 0) or 0),
-        ),
-    )
-
-    batches: list[list[dict]] = []
-    current_batch: list[dict] = []
-
-    for sonar_issue in sorted_issues:
-        if not current_batch:
-            current_batch.append(sonar_issue)
-            continue
-
-        previous_issue = current_batch[-1]
-        same_file = sonar_issue.get("file", "") == previous_issue.get("file", "")
-        close_lines = abs(int(sonar_issue.get("line", 0) or 0) - int(previous_issue.get("line", 0) or 0)) <= line_gap
-
-        if same_file and close_lines and len(current_batch) < batch_size:
-            current_batch.append(sonar_issue)
-        else:
-            batches.append(current_batch)
-            current_batch = [sonar_issue]
-
-    if current_batch:
-        batches.append(current_batch)
+    batches = build_scope_batches(issues)
 
     for batch in batches:
+
+        batch_scope_kind = batch[0].get("scope_kind", "global")
+        batch_scope_name = batch[0].get("scope_name", "")
+        batch_scope_start = int(batch[0].get("scope_start_line", batch[0].get("line", 0)) or batch[0].get("line", 0))
+        batch_scope_end = int(batch[0].get("scope_end_line", batch[0].get("line", 0)) or batch[0].get("line", 0))
+
+        if batch_scope_kind in {"function", "method"}:
+            scope_instruction = f"""
+            All findings in this batch belong to the same {batch_scope_kind}: '{batch_scope_name}'.
+            This scope starts at line {batch_scope_start} and ends at line {batch_scope_end}.
+
+            Return exactly one issue object for this whole scope.
+            Consolidate all findings in the batch into one single refactor proposal.
+            Use one original_code block and one proposed_code block covering the full scope when needed.
+            Do not return multiple issue objects for the same function or method.
+            """
+        else:
+            scope_instruction = """
+            This finding is outside any function or method.
+            Treat it as a global or top-level issue.
+            Return one issue object for this finding only.
+            Do not merge it with any other scope.
+            """
+
         prompt = f"""
-        You are reviewing a small batch of SonarQube findings from project '{project_key}'.
+            You are reviewing SonarQube findings from project '{project_key}'.
 
-        Analyze only the findings below.
+            {scope_instruction}
 
-        If multiple findings in this batch belong to the same function or method and can be fixed safely with one coherent refactor, return a single issue object covering that whole function or method.
-        Otherwise, return one issue object per finding.
+            Rules:
+            - Keep the exact sonar_key from the input.
+            - proposed_code must directly replace original_code.
+            - Use the smallest valid replacement that compiles or parses in place.
+            - Do not invent APIs, symbols, imports, or variables unless strictly required.
+            - Keep formatting and indentation consistent with the code context.
+            - original_code must be the full replaceable block if a larger block is needed.
+            - Use real multiline code, not literal '\\n'.
 
-        When you return a single combined issue:
-        - summarize all covered findings inside "problem" as bullet points
-        - summarize all applied changes inside "solution" as bullet points
-        - set original_start_line and original_end_line to cover the whole function or method
-        - set original_code to the full function or method block before changes
-        - set proposed_code to the same full function or method block after applying all fixes
-        - use the sonar_key of the first covered finding in the batch
+            For function or method batches:
+            - return exactly one combined issue object
+            - summarize all covered findings inside "problem" as bullet points
+            - summarize all applied changes inside "solution" as bullet points
+            - set original_start_line and original_end_line to cover the full scope
+            - set original_code to the full scope before changes
+            - set proposed_code to the full scope after applying all fixes
+            - use the sonar_key of the first covered finding in the batch
 
-        Do not merge findings that are not clearly in the same function or that would require unrelated fixes.
-        Avoid omitting findings unless the finding is clearly unusable.
+            Return ONLY valid JSON with this shape:
+            {{"issues": [ ... ]}}
 
-        Rules:
-        - Keep the exact sonar_key from the input.
-        - proposed_code must directly replace original_code.
-        - Use the smallest valid replacement that compiles or parses in place.
-        - Do not invent APIs, symbols, imports, or variables unless strictly required.
-        - Keep formatting and indentation consistent with the code context.
-        - original_code must be the full replaceable block if a larger block is needed.
-        - Use real multiline code, not literal '\\n'.
-
-        Return ONLY valid JSON with this shape:
-        {{"issues": [ ... ]}}
-
-        SONARQUBE DATA:
-        {json.dumps(batch)}
+            SONARQUBE DATA:
+            {json.dumps(batch)}
         """
 
         response = client.models.generate_content(
@@ -963,15 +1187,9 @@ async def synchronize_inline_comments(
             continue
 
         last_issue = current_group[-1]
-        last_end = max(
-            int(getattr(i, "original_end_line", i.line) or i.line)
-            for i in current_group
-        )
+        last_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in current_group)
 
-        same_group = (
-            build_group_key(issue) == build_group_key(last_issue)
-            and issue_start <= last_end + merge_gap
-        )
+        same_group = (build_group_key(issue) == build_group_key(last_issue) and issue_start <= last_end + merge_gap)
 
         if same_group:
             current_group.append(issue)
