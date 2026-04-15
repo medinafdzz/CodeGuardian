@@ -42,7 +42,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
-# These models are the data the agent moves around between Sonar, Gemini and Bitbucket.class
+# These models are the data the agent moves around between Sonar, Gemini and Bitbucket
 class Issue(BaseModel):
     sonar_key: str
     file: str
@@ -179,8 +179,8 @@ def build_comment_content(issues: list[Issue]) -> str:
         body = (f"### Code Issue\n\n"
                 f"**File:** {issue.file}\n\n"
                 f"**Lines:** {min_line}-{max_line}\n\n"
-                f"**Problem ({issue.severity}):** {issue.problem}\n\n"
-                f"**Solution:** {issue.solution}\n\n"
+                f"**Problem ({issue.severity}):**\n{issue.problem}\n\n"
+                f"**Solution:**\n{issue.solution}\n\n"
                 f"**Block to substitute:**\n"
                 f"```{file_extension}\n"
                 f"{clean_orig}\n"
@@ -218,7 +218,7 @@ def build_comment_content(issues: list[Issue]) -> str:
         unique_solutions.append(issue.solution.strip())
 
     if len(unique_solutions) == 1:
-        solution_block = f"**Suggested solution:** {unique_solutions[0]}\n\n"
+        solution_block = f"**Suggested solution:**\n{unique_solutions[0]}\n\n"
     else:
         solution_block = "**Suggested actions:**\n\n" + "\n".join(
             f"- {solution}" for solution in unique_solutions) + "\n\n"
@@ -500,8 +500,8 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     decline_pr = any(str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"} for issue in issues)
 
     # Each finding is analyzed independently but they are sent in batches to optimize the Gemini context and token usage.
-    batch_size = int(os.getenv("CODEGUARDIAN_BATCH_SIZE", "1"))
-    line_gap = int(os.getenv("CODEGUARDIAN_BATCH_LINE_GAP", "10"))
+    batch_size = int(os.getenv("CODEGUARDIAN_BATCH_SIZE", "2"))
+    line_gap = int(os.getenv("CODEGUARDIAN_BATCH_LINE_GAP", "25"))
 
     sorted_issues = sorted(
         issues,
@@ -537,10 +537,19 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         You are reviewing a small batch of SonarQube findings from project '{project_key}'.
 
         Analyze only the findings below.
-        Return one issue object per input finding when a safe fix is possible.
-        Do not merge multiple findings into one issue object.
-        If several findings share the same fix, keep them as separate issue objects and reuse the same original_code, proposed_code, and solution.
-        Return one issue object per finding whenever a concrete code change can be suggested.
+
+        If multiple findings in this batch belong to the same function or method and can be fixed safely with one coherent refactor, return a single issue object covering that whole function or method.
+        Otherwise, return one issue object per finding.
+
+        When you return a single combined issue:
+        - summarize all covered findings inside "problem" as bullet points
+        - summarize all applied changes inside "solution" as bullet points
+        - set original_start_line and original_end_line to cover the whole function or method
+        - set original_code to the full function or method block before changes
+        - set proposed_code to the same full function or method block after applying all fixes
+        - use the sonar_key of the first covered finding in the batch
+
+        Do not merge findings that are not clearly in the same function or that would require unrelated fixes.
         Avoid omitting findings unless the finding is clearly unusable.
 
         Rules:
