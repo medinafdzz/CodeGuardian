@@ -377,20 +377,20 @@ def build_comment_content(issues: list[Issue]) -> str:
     if len(issues) == 1:
         issue = issues[0]
         body = (f"### Code Issue\n\n"
-                f"**File:** {issue.file}\n\n"
-                f"**Lines:** {min_line}-{max_line}\n\n"
-                f"**Severity:** {issue.severity}\n\n"
-                f"**Problems:**\n{issue.problem}\n\n"
-                f"**Solutions:**\n{issue.solution}\n\n"
-                f"**Block to substitute:**\n"
-                f"```{file_extension}\n"
-                f"{clean_orig}\n"
-                f"```\n\n"
-                f"**Refactored Code:**\n"
-                f"```{file_extension}\n"
-                f"{clean_prop}\n"
-                f"```\n\n"
-                f"{build_hidden_ids(issue_keys)}")
+            f"**File:** {issue.file}\n\n"
+            f"**Lines:** {min_line}-{max_line}\n\n"
+            f"**Severity:** {issue.severity}\n\n"
+            f"**Problems:**\n\n{issue.problem}\n\n"
+            f"**Solutions:**\n\n{issue.solution}\n\n"
+            f"**Block to substitute:**\n"
+            f"```{file_extension}\n"
+            f"{clean_orig}\n"
+            f"```\n\n"
+            f"**Refactored Code:**\n"
+            f"```{file_extension}\n"
+            f"{clean_prop}\n"
+            f"```\n\n"
+            f"{build_hidden_ids(issue_keys)}")
         return wrap_agent_comment(body)
 
     seen_problem_lines = set()
