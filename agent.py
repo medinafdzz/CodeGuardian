@@ -138,11 +138,12 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
 
 
 # Group issues that share the same replacement block
-def build_group_key(issue: Issue) -> tuple[str, str, str]:
+def build_group_key(issue: Issue) -> tuple[str, str, str, str]:
     return (
         issue.file,
         normalize_code_block(clean_replacement_text(issue.original_code)),
         normalize_code_block(clean_replacement_text(issue.proposed_code)),
+        normalize_code_block((issue.solution or "").strip().lower()),
     )
 
 
@@ -176,20 +177,22 @@ def build_comment_content(issues: list[Issue]) -> str:
 
     if len(issues) == 1:
         issue = issues[0]
-        body = (f"### Code Issue\n\n"
-                f"**File:** {issue.file}\n\n"
-                f"**Lines:** {min_line}-{max_line}\n\n"
-                f"**Problem ({issue.severity}):** {issue.problem}\n\n"
-                f"**Solution:** {issue.solution}\n\n"
-                f"**Block to substitute:**\n"
-                f"```{file_extension}\n"
-                f"{clean_orig}\n"
-                f"```\n\n"
-                f"**Refactored Code:**\n"
-                f"```{file_extension}\n"
-                f"{clean_prop}\n"
-                f"```\n\n"
-                f"{build_hidden_ids(issue_keys)}")
+        body = (
+            f"### Code Issue\n\n"
+            f"**File:** {issue.file}\n\n"
+            f"**Lines:** {min_line}-{max_line}\n\n"
+            f"**Problem ({issue.severity}):** {issue.problem}\n\n"
+            f"**Solution:** {issue.solution}\n\n"
+            f"**Block to substitute:**\n"
+            f"```{file_extension}\n"
+            f"{clean_orig}\n"
+            f"```\n\n"
+            f"**Refactored Code:**\n"
+            f"```{file_extension}\n"
+            f"{clean_prop}\n"
+            f"```\n\n"
+            f"{build_hidden_ids(issue_keys)}"
+        )
         return wrap_agent_comment(body)
 
     seen_problem_lines = set()
@@ -207,24 +210,42 @@ def build_comment_content(issues: list[Issue]) -> str:
 
     combined_problems = "\n".join(problem_lines)
 
-    body = (f"### Code Issues\n\n"
-            f"**File:** {base_issue.file}\n\n"
-            f"**Lines:** {min_line}-{max_line}\n\n"
-            f"**Detected problems:**\n\n"
-            f"{combined_problems}\n\n"
-            f"**Suggested solution:** {base_issue.solution}\n\n"
-            f"**Block to substitute:**\n"
-            f"```{file_extension}\n"
-            f"{clean_orig}\n"
-            f"```\n\n"
-            f"**Refactored Code:**\n"
-            f"```{file_extension}\n"
-            f"{clean_prop}\n"
-            f"```\n\n"
-            f"{build_hidden_ids(issue_keys)}")
+    unique_solutions = []
+    seen_solutions = set()
+
+    for issue in issues:
+        normalized_solution = (issue.solution or "").strip().lower()
+        if normalized_solution in seen_solutions:
+            continue
+        seen_solutions.add(normalized_solution)
+        unique_solutions.append(issue.solution.strip())
+
+    if len(unique_solutions) == 1:
+        solution_block = f"**Suggested solution:** {unique_solutions[0]}\n\n"
+    else:
+        solution_block = "**Suggested actions:**\n\n" + "\n".join(
+            f"- {solution}" for solution in unique_solutions
+        ) + "\n\n"
+
+    body = (
+        f"### Code Issues\n\n"
+        f"**File:** {base_issue.file}\n\n"
+        f"**Lines:** {min_line}-{max_line}\n\n"
+        f"**Detected problems:**\n\n"
+        f"{combined_problems}\n\n"
+        f"{solution_block}"
+        f"**Block to substitute:**\n"
+        f"```{file_extension}\n"
+        f"{clean_orig}\n"
+        f"```\n\n"
+        f"**Refactored Code:**\n"
+        f"```{file_extension}\n"
+        f"{clean_prop}\n"
+        f"```\n\n"
+        f"{build_hidden_ids(issue_keys)}"
+    )
 
     return wrap_agent_comment(body)
-
 
 # Publish one inline comment for a whole issue group
 async def post_issue_group_comment(
@@ -1019,7 +1040,7 @@ async def synchronize_inline_comments(
         valid_issues.append(issue)
 
     desired_issues_by_key = {build_issue_key(issue): issue for issue in valid_issues}
-    desired_groups: dict[tuple[str, str, str], list[Issue]] = {}
+    desired_groups: dict[tuple[str, str, str, str], list[Issue]] = {}
 
     for issue in valid_issues:
         desired_groups.setdefault(build_group_key(issue), []).append(issue)
@@ -1034,7 +1055,7 @@ async def synchronize_inline_comments(
     )
 
     comments_to_delete: set[int] = set()
-    existing_comments_by_group_key: dict[tuple[str, str, str], dict] = {}
+    existing_comments_by_group_key: dict[tuple[str, str, str, str], dict] = {}
 
     for comment_id in sorted(active_inline_comments.keys(), reverse=True):
         comment_info = active_inline_comments[comment_id]
@@ -1072,7 +1093,7 @@ async def synchronize_inline_comments(
             pr_id,
         )
 
-    blocked_group_keys: set[tuple[str, str, str]] = set()
+    blocked_group_keys: set[tuple[str, str, str, str]] = set()
 
     for group_key, comment_info in existing_comments_by_group_key.items():
         comment_id = int(comment_info["comment_id"])
