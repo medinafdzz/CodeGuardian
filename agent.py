@@ -950,6 +950,21 @@ async def synchronize_inline_comments(
     for issue in valid_issues:
         issue_start = int(getattr(issue, "original_start_line", issue.line) or issue.line)
 
+        if not current_group:
+            current_group = [issue]
+            continue
+
+        last_issue = current_group[-1]
+        last_end = max(
+            int(getattr(i, "original_end_line", i.line) or i.line)
+            for i in current_group
+        )
+
+        same_group = (
+            build_group_key(issue) == build_group_key(last_issue)
+            and issue_start <= last_end + merge_gap
+        )
+
         if same_group:
             current_group.append(issue)
         else:
