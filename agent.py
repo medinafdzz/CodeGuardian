@@ -1112,7 +1112,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
     except Exception as e:
         logger.error(f"Failed to retrieve inline comments: {e}")
         raise
-
+    
 # Build the auth headers for direct Bitbucket REST calls
 def get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
     bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
