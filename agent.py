@@ -391,9 +391,10 @@ def build_comment_content(issues: list[Issue]) -> str:
     imports_block = ""
     if all_required_imports:
         imports_block = (
-            "**Additional required imports:**\n\n"
-            + "\n".join(f"- {required_import}" for required_import in all_required_imports)
-            + "\n\n"
+            "**Additional required imports:**\n"
+            f"```{file_extension}\n"
+            + "\n".join(required_import for required_import in all_required_imports)
+            + "\n```\n\n"
         )
 
     if len(issues) == 1:
@@ -409,7 +410,7 @@ def build_comment_content(issues: list[Issue]) -> str:
             f"```{file_extension}\n"
             f"{clean_orig}\n"
             f"```\n\n"
-            f"**Refactored Code:**\n"
+            f"**Proposed Code:**\n"
             f"```{file_extension}\n"
             f"{clean_prop}\n"
             f"```\n\n"
@@ -458,7 +459,7 @@ def build_comment_content(issues: list[Issue]) -> str:
             f"```{file_extension}\n"
             f"{clean_orig}\n"
             f"```\n\n"
-            f"**Refactored Code:**\n"
+            f"**Proposed Code:**\n"
             f"```{file_extension}\n"
             f"{clean_prop}\n"
             f"```\n\n"
