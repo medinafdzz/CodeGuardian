@@ -1331,52 +1331,32 @@ async def report_to_bitbucket(
     workspace: str,
     decision: Decision,
 ) -> None:
-    bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "")
-
-    bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "")
-
-    bitbucket_env = os.environ.copy()
-    bitbucket_env.update({
-        "BITBUCKET_URL": os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0"),
-        "BITBUCKET_WORKSPACE": workspace,
-        "BITBUCKET_USERNAME": bitbucket_username,
-        "BITBUCKET_PASSWORD": bitbucket_password,
-    })
-
     if not pr_id or str(pr_id).lower() == "null":
         logger.error("No valid pull request ID was provided.")
         raise AgentExecutionError("Missing pull request ID")
 
     try:
-        async with stdio_client(StdioServerParameters(
-                command="bitbucket-mcp",
-                args=[],
-                env=bitbucket_env,
-        )) as (read, write):
-            async with ClientSession(read, write) as session_bb:
-                await session_bb.initialize()
+        async with atlassian_rovo_session() as session_bb:
+            await delete_agent_summary_comments(
+                session_bb,
+                pr_id,
+                repo_slug,
+                workspace,
+            )
 
-                await delete_agent_summary_comments(
-                    session_bb,
-                    pr_id,
-                    repo_slug,
-                    workspace,
-                )
+            await synchronize_inline_comments(
+                session_bb,
+                pr_id,
+                repo_slug,
+                workspace,
+                decision.issues,
+            )
 
-                await synchronize_inline_comments(
-                    session_bb,
-                    pr_id,
-                    repo_slug,
-                    workspace,
-                    decision.issues,
-                )
-
-                logger.info("Comments synchronized")
+            logger.info("Comments synchronized")
 
     except Exception as e:
         logger.error(f"Failed to report analysis results to Bitbucket: {e}")
         raise AgentExecutionError("Bitbucket reporting failed") from e
-
 
 # Orchestrate the full flow from webhook input to PR update.
 async def main() -> None:
