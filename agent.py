@@ -1072,24 +1072,7 @@ def normalize_code_block(text: str) -> str:
 # Load the current inline comments created by the agent
 async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
     try:
-        results = await session.call_tool(
-            name="getPullRequestComments",
-            arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": repo_slug,
-                "all": True,
-            },
-        )
-
-        comments_data = json.loads(results.content[0].text)
-
-        if isinstance(comments_data, dict):
-            comments = comments_data.get("values", [])
-        elif isinstance(comments_data, list):
-            comments = comments_data
-        else:
-            comments = []
+        comments = await get_pull_request_comments(session, pr_id, repo_slug, workspace)
 
         active_inline_comments = {}
 
@@ -1100,7 +1083,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
             if comment.get("parent"):
                 continue
 
-            raw_text = comment.get("content", {}).get("raw", "")
+            raw_text = (comment.get("content", {}) or {}).get("raw", "") or comment.get("content", "")
 
             if not is_agent_comment(raw_text):
                 continue
@@ -1129,7 +1112,6 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
     except Exception as e:
         logger.error(f"Failed to retrieve inline comments: {e}")
         raise
-
 
 # Build the auth headers for direct Bitbucket REST calls
 def get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
