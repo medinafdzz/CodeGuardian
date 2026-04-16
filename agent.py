@@ -1082,7 +1082,7 @@ def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
         if comment.get("parent"):
             continue
 
-        raw_text = (comment.get("content", {}) or {}).get("raw", "") or ""
+        raw_text = (comment.get("content", {}) or {}).get("raw", "") or comment.get("content", "")
         normalized_text = raw_text.replace(CODEGUARDIAN_AGENT_MARKER, "", 1).strip()
 
         if (is_agent_comment(raw_text) or normalized_text.startswith(CODEGUARDIAN_SUMMARY_TITLE) or
