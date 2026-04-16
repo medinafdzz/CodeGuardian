@@ -21,7 +21,7 @@ from mcp import (
 )  # Library to manage the client session with the MCP tools
 from mcp.client.stdio import (
     stdio_client,)  # Library to interact with the MCP tools using standard input/output
-from pydantic import BaseModel  # Library for json formating and validation
+from pydantic import BaseModel, Field  # Library for json formating and validation
 from prometheus_client import (
     CollectorRegistry,
     Gauge,
@@ -57,6 +57,7 @@ class Issue(BaseModel):
     solution: str
     original_code: str
     proposed_code: str
+    required_imports: list[str] = Field(default_factory=list)
 
 
 class Decision(BaseModel):
@@ -374,6 +375,27 @@ def build_comment_content(issues: list[Issue]) -> str:
 
     issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issues))
 
+    all_required_imports = []
+    seen_required_imports = set()
+
+    for issue in issues:
+        for required_import in getattr(issue, "required_imports", []) or []:
+            normalized_required_import = (required_import or "").strip()
+            if not normalized_required_import:
+                continue
+            if normalized_required_import in seen_required_imports:
+                continue
+            seen_required_imports.add(normalized_required_import)
+            all_required_imports.append(normalized_required_import)
+
+    imports_block = ""
+    if all_required_imports:
+        imports_block = (
+            "**Additional required imports:**\n\n"
+            + "\n".join(f"- {required_import}" for required_import in all_required_imports)
+            + "\n\n"
+        )
+
     if len(issues) == 1:
         issue = issues[0]
         body = (f"### Code Issue\n\n"
@@ -382,6 +404,7 @@ def build_comment_content(issues: list[Issue]) -> str:
             f"**Severity:** {issue.severity}\n\n"
             f"**Problems:**\n\n{issue.problem}\n\n"
             f"**Solutions:**\n\n{issue.solution}\n\n"
+            f"{imports_block}"
             f"**Block to substitute:**\n"
             f"```{file_extension}\n"
             f"{clean_orig}\n"
@@ -430,6 +453,7 @@ def build_comment_content(issues: list[Issue]) -> str:
             f"**Detected problems:**\n\n"
             f"{combined_problems}\n\n"
             f"{solution_block}"
+            f"{imports_block}"
             f"**Block to substitute:**\n"
             f"```{file_extension}\n"
             f"{clean_orig}\n"
@@ -789,6 +813,11 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             - Never return an issue when original_code and proposed_code would be identical.
             - Do not emit issues for false positives, already-fixed code, or findings that only justify an explanation without a code change.
             - Only return issues that require a real code modification.
+            - proposed_code must contain only the replacement block for original_code.
+            - Do not prepend or append import statements to proposed_code unless original_code itself includes the import section.
+            - If the fix requires new imports outside the replaceable block, list them in required_imports.
+            - required_imports must contain only concrete import lines exactly as they should appear in the file, for example: "import java.sql.PreparedStatement;".
+            - If no additional imports are required, return an empty required_imports array.
 
             For function or method batches:
             - return exactly one combined issue object only if a real code change is needed
@@ -798,10 +827,29 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             - set original_code to the full scope before changes
             - set proposed_code to the full scope after applying all fixes
             - use the sonar_key of the first covered finding in the batch
+            - merge and deduplicate all needed imports into required_imports
             - if no real fix is needed, return an empty issues list
 
             Return ONLY valid JSON with this shape:
-            {{"issues": [ ... ]}}
+            {{
+              "issues": [
+                {{
+                  "sonar_key": "...",
+                  "file": "...",
+                  "target_type": "...",
+                  "target_name": "...",
+                  "line": 0,
+                  "original_start_line": 0,
+                  "original_end_line": 0,
+                  "problem": "...",
+                  "severity": "...",
+                  "solution": "...",
+                  "original_code": "...",
+                  "proposed_code": "...",
+                  "required_imports": []
+                }}
+              ]
+            }}
 
             SONARQUBE DATA:
             {json.dumps(batch)}
