@@ -13,6 +13,8 @@ import urllib.request
 import urllib.error
 from dataclasses import dataclass
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
+from contextlib import asynccontextmanager
+from mcp.client.streamable_http import streamable_http_client
 from google.genai import (
     types,)  # Library to manage the configuration and types for the Gemini model API
 from mcp import (
@@ -42,6 +44,38 @@ logging.getLogger("google").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
+
+# DEFINE THE ATLASSIAN MCP ENDPOINT CONNECTION
+ATLASSIAN_ROVO_MCP_URL = "https://mcp.atlassian.com/v1/mcp"
+
+
+def use_atlassian_rovo_mcp() -> bool:
+    return (os.getenv("BITBUCKET_MCP_PROVIDER", "legacy") or "").strip().lower() == "atlassian_rovo"
+
+
+def get_atlassian_mcp_url() -> str:
+    return (os.getenv("ATLASSIAN_MCP_URL") or ATLASSIAN_ROVO_MCP_URL).strip()
+
+
+def get_atlassian_mcp_headers() -> dict[str, str]:
+    auth_header = (os.getenv("ATLASSIAN_MCP_AUTH_HEADER") or "").strip()
+
+    if not auth_header:
+        raise AgentExecutionError("Missing ATLASSIAN_MCP_AUTH_HEADER for Atlassian Rovo MCP")
+
+    return {
+        "Authorization": auth_header,
+    }
+    
+@asynccontextmanager
+async def atlassian_rovo_session():
+    async with streamable_http_client(
+        get_atlassian_mcp_url(),
+        headers=get_atlassian_mcp_headers(),
+    ) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            yield session
 
 # These models are the data the agent moves around between Sonar, Gemini and Bitbucket
 class Issue(BaseModel):
@@ -294,11 +328,8 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
         normalized_original_code = normalize_code_block(issue.original_code)
         normalized_proposed_code = normalize_code_block(issue.proposed_code)
 
-        if (
-            not normalized_original_code
-            or not normalized_proposed_code
-            or normalized_original_code == normalized_proposed_code
-        ):
+        if (not normalized_original_code or not normalized_proposed_code or
+                normalized_original_code == normalized_proposed_code):
             dropped_invalid_issues += 1
             continue
 
@@ -335,6 +366,7 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
         prepared_issues.append(issue)
 
     return prepared_issues, dropped_invalid_issues
+
 
 # Group issues that share the same structure block
 def build_group_key(issue: Issue) -> tuple[str, str, str]:
@@ -390,31 +422,28 @@ def build_comment_content(issues: list[Issue]) -> str:
 
     imports_block = ""
     if all_required_imports:
-        imports_block = (
-            "**Additional required imports:**\n"
-            f"```{file_extension}\n"
-            + "\n".join(required_import for required_import in all_required_imports)
-            + "\n```\n\n"
-        )
+        imports_block = ("**Additional required imports:**\n"
+                         f"```{file_extension}\n" +
+                         "\n".join(required_import for required_import in all_required_imports) + "\n```\n\n")
 
     if len(issues) == 1:
         issue = issues[0]
         body = (f"### Code Issue\n\n"
-            f"**File:** {issue.file}\n\n"
-            f"**Lines:** {min_line}-{max_line}\n\n"
-            f"**Severity:** {issue.severity}\n\n"
-            f"**Problems:**\n\n{issue.problem}\n\n"
-            f"**Solutions:**\n\n{issue.solution}\n\n"
-            f"{imports_block}"
-            f"**Block to substitute:**\n"
-            f"```{file_extension}\n"
-            f"{clean_orig}\n"
-            f"```\n\n"
-            f"**Proposed Code:**\n"
-            f"```{file_extension}\n"
-            f"{clean_prop}\n"
-            f"```\n\n"
-            f"{build_hidden_ids(issue_keys)}")
+                f"**File:** {issue.file}\n\n"
+                f"**Lines:** {min_line}-{max_line}\n\n"
+                f"**Severity:** {issue.severity}\n\n"
+                f"**Problems:**\n\n{issue.problem}\n\n"
+                f"**Solutions:**\n\n{issue.solution}\n\n"
+                f"{imports_block}"
+                f"**Block to substitute:**\n"
+                f"```{file_extension}\n"
+                f"{clean_orig}\n"
+                f"```\n\n"
+                f"**Proposed Code:**\n"
+                f"```{file_extension}\n"
+                f"{clean_prop}\n"
+                f"```\n\n"
+                f"{build_hidden_ids(issue_keys)}")
         return wrap_agent_comment(body)
 
     seen_problem_lines = set()
@@ -1367,7 +1396,7 @@ async def main() -> None:
     decision.issues, dropped_invalid_issues = normalize_and_deduplicate_issues(decision.issues)
 
     decision.decline_pr = any(issue.severity in {"BLOCKER", "CRITICAL"} for issue in decision.issues)
-    
+
     if dropped_invalid_issues:
         logger.info("Dropped %s invalid issues", dropped_invalid_issues)
 
