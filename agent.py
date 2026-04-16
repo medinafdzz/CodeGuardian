@@ -496,6 +496,50 @@ def build_comment_content(issues: list[Issue]) -> str:
 
     return wrap_agent_comment(body)
 
+# Add inline comments calling the API (if the MCP get update update this call)
+async def create_inline_comment_by_rest(
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+    file_path: str,
+    line_to: int,
+    content: str,
+) -> bool:
+    headers = get_bitbucket_basic_auth_headers()
+    if not headers:
+        return False
+
+    create_url = f"{get_bitbucket_api_base_url()}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/comments"
+
+    payload = json.dumps({
+        "content": {
+            "raw": content,
+        },
+        "inline": {
+            "path": file_path,
+            "to": line_to,
+        },
+    }).encode("utf-8")
+
+    def _create_comment() -> int:
+        req = urllib.request.Request(
+            url=create_url,
+            data=payload,
+            headers={**headers, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return int(resp.status)
+
+    try:
+        status = await asyncio.to_thread(_create_comment)
+        return status in (200, 201)
+    except urllib.error.HTTPError as e:
+        if e.code in (200, 201):
+            return True
+        return False
+    except Exception:
+        return False
 
 # Publish one inline comment for a whole issue group
 async def post_issue_group_comment(
@@ -509,29 +553,35 @@ async def post_issue_group_comment(
         if not issues:
             return False
 
-        content = build_comment_content(issues)
-
-        await session.call_tool(
-            name="bitbucketPullRequest",
-            arguments={
-                "action": "comment",
-                "workspaceId": workspace,
-                "repoId": repo_slug,
-                "prId": int(pr_id),
-                "content": content,
-            },
+        base_issue = max(
+            issues,
+            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line)
+            - int(getattr(i, "original_start_line", i.line) or i.line),
         )
 
-        if len(issues) == 1:
-            logger.info("Comment added")
-        else:
-            logger.info("Comment added with %s issues", len(issues))
+        line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
+        content = build_comment_content(issues)
 
-        return True
+        created = await create_inline_comment_by_rest(
+            pr_id=pr_id,
+            repo_slug=repo_slug,
+            workspace=workspace,
+            file_path=base_issue.file,
+            line_to=line_end,
+            content=content,
+        )
+
+        if created:
+            if len(issues) == 1:
+                logger.info("Inline comment added")
+            else:
+                logger.info("Inline comment added with %s issues", len(issues))
+
+        return created
     except Exception as e:
-        logger.error(f"Failed to add pull request comment: {e}")
+        logger.error(f"Failed to add inline comment: {e}")
         raise
-
+    
 # Read the hidden IDs stored inside existing agent comments
 def extract_issue_key(comment_text: str) -> list[str]:
     keys = set()
