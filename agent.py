@@ -1005,35 +1005,20 @@ async def get_pull_request_comments(
     workspace: str,
 ) -> list[dict]:
     try:
-        if use_atlassian_rovo_mcp():
-            results = await session.call_tool(
-                name="bitbucketPullRequest",
-                arguments={
-                    "action": "comments",
-                    "workspaceId": workspace,
-                    "repoId": repo_slug,
-                    "prId": int(pr_id),
-                },
-            )
-        else:
-            results = await session.call_tool(
-                name="getPullRequestComments",
-                arguments={
-                    "workspace": workspace,
-                    "pull_request_id": int(pr_id),
-                    "repo_slug": repo_slug,
-                    "all": True,
-                },
-            )
+        results = await session.call_tool(
+            name="getPullRequestComments",
+            arguments={
+                "workspace": workspace,
+                "pull_request_id": int(pr_id),
+                "repo_slug": repo_slug,
+                "all": True,
+            },
+        )
 
         comments_data = json.loads(results.content[0].text)
 
         if isinstance(comments_data, dict):
-            if isinstance(comments_data.get("values"), list):
-                return comments_data.get("values", [])
-            if isinstance(comments_data.get("comments"), list):
-                return comments_data.get("comments", [])
-
+            return comments_data.get("values", [])
         if isinstance(comments_data, list):
             return comments_data
 
@@ -1041,7 +1026,8 @@ async def get_pull_request_comments(
     except Exception as e:
         logger.error(f"Failed to retrieve pull request comments: {e}")
         raise
-
+    
+    
 # Find old top-level summary comments created by the agent
 def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
     summary_comment_ids: set[int] = set()
