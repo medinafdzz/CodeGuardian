@@ -509,26 +509,16 @@ async def post_issue_group_comment(
         if not issues:
             return False
 
-        base_issue = max(
-            issues,
-            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
-                getattr(i, "original_start_line", i.line) or i.line),
-        )
-
-        line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
         content = build_comment_content(issues)
 
         await session.call_tool(
-            name="addPullRequestComment",
+            name="bitbucketPullRequest",
             arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": repo_slug,
+                "action": "comment",
+                "workspaceId": workspace,
+                "repoId": repo_slug,
+                "prId": int(pr_id),
                 "content": content,
-                "inline": {
-                    "path": base_issue.file,
-                    "to": line_end,
-                },
             },
         )
 
@@ -539,9 +529,8 @@ async def post_issue_group_comment(
 
         return True
     except Exception as e:
-        logger.error(f"Failed to add inline comment: {e}")
+        logger.error(f"Failed to add pull request comment: {e}")
         raise
-
 
 # Read the hidden IDs stored inside existing agent comments
 def extract_issue_key(comment_text: str) -> list[str]:
