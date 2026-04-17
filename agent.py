@@ -980,35 +980,55 @@ async def get_pull_request_comments(
     workspace: str,
 ) -> list[dict]:
     try:
-        results = await session.call_tool(
-            name="bitbucketPullRequest",
-            arguments={
-                "action": "comments",
-                "workspaceId": workspace,
-                "repoId": repo_slug,
-                "prId": int(pr_id),
-                "pagelen": 100,
-            },
-        )
+        all_comments = []
+        page = 1
 
-        comments_data = json.loads(results.content[0].text)
+        while True:
+            results = await session.call_tool(
+                name="bitbucketPullRequest",
+                arguments={
+                    "action": "comments",
+                    "workspaceId": workspace,
+                    "repoId": repo_slug,
+                    "prId": int(pr_id),
+                    "pagelen": 100,
+                    "page": page,
+                    "sort": "-created_on",
+                },
+            )
 
-        if isinstance(comments_data, dict):
-            logger.info("PR comments retrieved: %s", len(comments_data.get("values", [])))
-            if isinstance(comments_data.get("values"), list):
-                return comments_data.get("values", [])
-            if isinstance(comments_data.get("comments"), list):
-                return comments_data.get("comments", [])
+            comments_data = json.loads(results.content[0].text)
 
-        if isinstance(comments_data, list):
-            logger.info("PR comments retrieved: %s", len(comments_data))
-            return comments_data
+            if isinstance(comments_data, dict):
+                if isinstance(comments_data.get("values"), list):
+                    page_comments = comments_data.get("values", [])
+                elif isinstance(comments_data.get("comments"), list):
+                    page_comments = comments_data.get("comments", [])
+                else:
+                    page_comments = []
+            elif isinstance(comments_data, list):
+                page_comments = comments_data
+            else:
+                page_comments = []
 
-        return []
+            logger.info("PR comments retrieved on page %s: %s", page, len(page_comments))
+
+            if not page_comments:
+                break
+
+            all_comments.extend(page_comments)
+
+            if len(page_comments) < 100:
+                break
+
+            page += 1
+
+        logger.info("Total PR comments retrieved: %s", len(all_comments))
+        return all_comments
+
     except Exception as e:
         logger.error(f"Failed to retrieve pull request comments: {e}")
         raise
-
 
 def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
     summary_comment_ids: set[int] = set()
@@ -1047,6 +1067,9 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
                 continue
 
             if comment.get("parent"):
+                continue
+
+            if not comment.get("inline"):
                 continue
 
             raw_text = (comment.get("content", {}) or {}).get("raw", "") or comment.get("content", "")
