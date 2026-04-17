@@ -107,9 +107,7 @@ def get_atlassian_mcp_auth() -> httpx.Auth:
             decoded = base64.b64decode(token).decode("utf-8")
             username, password = decoded.split(":", 1)
         except Exception as e:
-            raise AgentExecutionError(
-                "Invalid Basic auth format in ATLASSIAN_MCP_AUTH_HEADER"
-            ) from e
+            raise AgentExecutionError("Invalid Basic auth format in ATLASSIAN_MCP_AUTH_HEADER") from e
 
         return httpx.BasicAuth(username, password)
 
@@ -117,6 +115,7 @@ def get_atlassian_mcp_auth() -> httpx.Auth:
         token = auth_header[len("Bearer "):].strip()
 
         class BearerAuth(httpx.Auth):
+
             def auth_flow(self, request):
                 request.headers["Authorization"] = f"Bearer {token}"
                 yield request
@@ -125,15 +124,16 @@ def get_atlassian_mcp_auth() -> httpx.Auth:
 
     raise AgentExecutionError("Unsupported ATLASSIAN_MCP_AUTH_HEADER scheme")
 
+
 @asynccontextmanager
 async def atlassian_rovo_session():
     async with httpx.AsyncClient(
-        auth=get_atlassian_mcp_auth(),
-        follow_redirects=True,
+            auth=get_atlassian_mcp_auth(),
+            follow_redirects=True,
     ) as custom_client:
         async with streamable_http_client(
-            get_atlassian_mcp_url(),
-            http_client=custom_client,
+                get_atlassian_mcp_url(),
+                http_client=custom_client,
         ) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -722,6 +722,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
     return top_issues
 
+
 # AI analysis and batching logic for model-generated fixes
 def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
     grouped: dict[tuple, list[dict]] = {}
@@ -1209,6 +1210,7 @@ async def delete_comment_ids(
         )
         if deleted:
             deleted_comment_ids.add(comment_id)
+            logger.info("Inline comment removed: %s", comment_id)
             await asyncio.sleep(0.2)
         else:
             failed_comment_ids.add(comment_id)
