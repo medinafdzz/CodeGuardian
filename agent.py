@@ -12,6 +12,7 @@ import re
 import base64
 import urllib.request
 import urllib.error
+import httpx
 from dataclasses import dataclass
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
 from contextlib import asynccontextmanager
@@ -89,31 +90,54 @@ CODEGUARDIAN_AGENT_MARKER = "<!-- CodeGuardian-Agent -->"
 ATLASSIAN_ROVO_MCP_URL = "https://mcp.atlassian.com/v1/mcp"
 
 
-# Atlassian Rovo MCP connection helpers
+# Atlassian Rovo MCP connection helpers using an authenticated HTTP client
 def get_atlassian_mcp_url() -> str:
     return (os.getenv("ATLASSIAN_MCP_URL") or ATLASSIAN_ROVO_MCP_URL).strip()
 
 
-def get_atlassian_mcp_headers() -> dict[str, str]:
+def get_atlassian_mcp_auth() -> httpx.Auth:
     auth_header = (os.getenv("ATLASSIAN_MCP_AUTH_HEADER") or "").strip()
 
     if not auth_header:
         raise AgentExecutionError("Missing ATLASSIAN_MCP_AUTH_HEADER for Atlassian Rovo MCP")
 
-    return {
-        "Authorization": auth_header,
-    }
+    if auth_header.startswith("Basic "):
+        token = auth_header[len("Basic "):].strip()
+        try:
+            decoded = base64.b64decode(token).decode("utf-8")
+            username, password = decoded.split(":", 1)
+        except Exception as e:
+            raise AgentExecutionError(
+                "Invalid Basic auth format in ATLASSIAN_MCP_AUTH_HEADER"
+            ) from e
 
+        return httpx.BasicAuth(username, password)
+
+    if auth_header.startswith("Bearer "):
+        token = auth_header[len("Bearer "):].strip()
+
+        class BearerAuth(httpx.Auth):
+            def auth_flow(self, request):
+                request.headers["Authorization"] = f"Bearer {token}"
+                yield request
+
+        return BearerAuth()
+
+    raise AgentExecutionError("Unsupported ATLASSIAN_MCP_AUTH_HEADER scheme")
 
 @asynccontextmanager
 async def atlassian_rovo_session():
-    async with streamable_http_client(
+    async with httpx.AsyncClient(
+        auth=get_atlassian_mcp_auth(),
+        follow_redirects=True,
+    ) as custom_client:
+        async with streamable_http_client(
             get_atlassian_mcp_url(),
-            headers=get_atlassian_mcp_headers(),
-    ) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
+            http_client=custom_client,
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
 
 
 # Generic file reading and text normalization helpers
