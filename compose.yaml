@@ -22,6 +22,7 @@ services:
     # Environment variables; the rest are defined in the Dockerfile
     environment:
       - TZ=Europe/Madrid # Set timezone for consistent SonarQube and Jenkins logs
+      - ATLASSIAN_MCP_URL=https://mcp.atlassian.com/v1/mcp
 
     networks:
       - "services-net"
@@ -57,6 +58,7 @@ services:
       - "sonarqube_data:/opt/sonarqube/data"
       - "sonarqube_temp:/opt/sonarqube/temp"
       - "sonarqube_extensions:/opt/sonarqube/extensions"
+  
 
   # -- PROMETHEUS, PUSHGATEWAY AND GRAFANA --
   prometheus:
