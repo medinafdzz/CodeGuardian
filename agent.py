@@ -1011,8 +1011,6 @@ async def get_pull_request_comments(
             else:
                 page_comments = []
 
-            logger.info("PR comments retrieved on page %s: %s", page, len(page_comments))
-
             if not page_comments:
                 break
 
@@ -1023,12 +1021,12 @@ async def get_pull_request_comments(
 
             page += 1
 
-        logger.info("Total PR comments retrieved: %s", len(all_comments))
         return all_comments
 
     except Exception as e:
         logger.error(f"Failed to retrieve pull request comments: {e}")
         raise
+
 
 def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
     summary_comment_ids: set[int] = set()
@@ -1058,8 +1056,6 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
     try:
         comments = await get_pull_request_comments(session, pr_id, repo_slug, workspace)
 
-        logger.info("Comments received for inline sync: %s", len(comments))
-
         active_inline_comments = {}
 
         for comment in comments:
@@ -1074,15 +1070,6 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
 
             raw_text = (comment.get("content", {}) or {}).get("raw", "") or comment.get("content", "")
             comment_id = int(comment.get("id"))
-
-            logger.info(
-                "Comment %s -> parent=%s deleted=%s inline=%s agent=%s",
-                comment_id,
-                bool(comment.get("parent")),
-                bool(comment.get("deleted", False)),
-                bool(comment.get("inline")),
-                is_agent_comment(raw_text),
-            )
 
             if not is_agent_comment(raw_text):
                 continue
@@ -1102,7 +1089,6 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
                 "raw_text": raw_text,
             }
 
-        logger.info("Detected existing agent inline comments: %s", len(active_inline_comments))
         return active_inline_comments
 
     except Exception as e:
