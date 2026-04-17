@@ -994,12 +994,14 @@ async def get_pull_request_comments(
         comments_data = json.loads(results.content[0].text)
 
         if isinstance(comments_data, dict):
+            logger.info("PR comments retrieved: %s", len(comments_data.get("values", [])))
             if isinstance(comments_data.get("values"), list):
                 return comments_data.get("values", [])
             if isinstance(comments_data.get("comments"), list):
                 return comments_data.get("comments", [])
 
         if isinstance(comments_data, list):
+            logger.info("PR comments retrieved: %s", len(comments_data))
             return comments_data
 
         return []
@@ -1036,6 +1038,8 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
     try:
         comments = await get_pull_request_comments(session, pr_id, repo_slug, workspace)
 
+        logger.info("Comments received for inline sync: %s", len(comments))
+
         active_inline_comments = {}
 
         for comment in comments:
@@ -1046,13 +1050,22 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
                 continue
 
             raw_text = (comment.get("content", {}) or {}).get("raw", "") or comment.get("content", "")
+            comment_id = int(comment.get("id"))
+
+            logger.info(
+                "Comment %s -> parent=%s deleted=%s inline=%s agent=%s",
+                comment_id,
+                bool(comment.get("parent")),
+                bool(comment.get("deleted", False)),
+                bool(comment.get("inline")),
+                is_agent_comment(raw_text),
+            )
 
             if not is_agent_comment(raw_text):
                 continue
 
             issue_keys = extract_issue_key(raw_text)
 
-            comment_id = int(comment.get("id"))
             resolved = comment.get("resolved", False)
             inline_data = comment.get("inline") or {}
             outdated = bool(inline_data.get("outdated", False))
@@ -1066,20 +1079,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
                 "raw_text": raw_text,
             }
 
-            comment_id = int(comment.get("id"))
-            resolved = comment.get("resolved", False)
-            inline_data = comment.get("inline") or {}
-            outdated = bool(inline_data.get("outdated", False))
-
-            active_inline_comments[comment_id] = {
-                "comment_id": comment_id,
-                "resolved": resolved,
-                "inline": inline_data,
-                "outdated": outdated,
-                "issue_keys": set(issue_keys),
-                "raw_text": raw_text,
-            }
-
+        logger.info("Detected existing agent inline comments: %s", len(active_inline_comments))
         return active_inline_comments
 
     except Exception as e:
