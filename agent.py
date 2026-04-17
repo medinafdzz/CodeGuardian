@@ -1052,8 +1052,19 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
 
             issue_keys = extract_issue_key(raw_text)
 
-            if not issue_keys:
-                continue
+            comment_id = int(comment.get("id"))
+            resolved = comment.get("resolved", False)
+            inline_data = comment.get("inline") or {}
+            outdated = bool(inline_data.get("outdated", False))
+
+            active_inline_comments[comment_id] = {
+                "comment_id": comment_id,
+                "resolved": resolved,
+                "inline": inline_data,
+                "outdated": outdated,
+                "issue_keys": set(issue_keys),
+                "raw_text": raw_text,
+            }
 
             comment_id = int(comment.get("id"))
             resolved = comment.get("resolved", False)
