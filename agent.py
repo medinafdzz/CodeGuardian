@@ -13,6 +13,9 @@ import base64
 import urllib.request
 import urllib.error
 import httpx
+import hashlib
+from pathlib import Path
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
 from contextlib import asynccontextmanager
@@ -141,8 +144,62 @@ Return ONLY valid JSON with this shape:
   ]
 }
 """
+CACHE_METADATA_PATH = os.getenv(
+    "CACHE_METADATA_PATH",
+    "/var/jenkins_home/codeguardian/gemini_prompt_cache.json",
+).strip()
+CACHE_MODEL = "gemini-2.5-flash"
 CACHE_MODE = os.getenv("CACHE_MODE", "implicit").strip().lower()
 CACHE_TTL = os.getenv("CACHE_TTL", "3600s").strip()
+
+
+# Gemini cache persistence helpers for prompt reuse across executions
+def rules_hash() -> str:
+    return hashlib.sha256(REVIEW_RULES.encode("utf-8")).hexdigest()
+
+
+def load_cache_metadata() -> dict | None:
+    path = Path(CACHE_METADATA_PATH)
+
+    if not path.exists():
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def save_cache_metadata(data: dict) -> None:
+    path = Path(CACHE_METADATA_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def cache_meta_valid(metadata: dict | None) -> bool:
+    if not metadata:
+        return False
+
+    if metadata.get("model") != CACHE_MODEL:
+        return False
+
+    if metadata.get("ttl") != CACHE_TTL:
+        return False
+
+    if metadata.get("rules_hash") != rules_hash():
+        return False
+
+    expire_time = metadata.get("expire_time")
+    if not expire_time:
+        return False
+
+    try:
+        expires_at = datetime.fromisoformat(expire_time.replace("Z", "+00:00"))
+    except Exception:
+        return False
+
+    return expires_at > datetime.now(timezone.utc)
+
 
 # Atlassian Rovo MCP connection helpers using an authenticated HTTP client
 def get_atlassian_mcp_url() -> str:
@@ -754,8 +811,12 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
         "INFO": 4,
     }
 
-    cleaned_issues = [issue for issue in all_issues if issue.get("severity") in severity_order]
-
+    cleaned_issues = [
+        issue
+        for issue in all_issues
+        if issue.get("severity") in severity_order and os.path.exists(issue.get("file", ""))
+    ]
+    
     cleaned_issues.sort(key=lambda issue: (
         severity_order.get(issue.get("severity"), 99),
         issue.get("file", ""),
@@ -778,16 +839,41 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
 
 # AI analysis and batching logic for model-generated fixes
-def get_or_create_prompt_cache(client: genai.Client):
+def ensure_prompt_cache(client: genai.Client) -> str:
+    metadata = load_cache_metadata()
+
+    if cache_meta_valid(metadata):
+        cache_name = metadata["name"]
+
+        try:
+            cache = client.caches.get(name=cache_name)
+            return cache.name
+        except Exception:
+            pass
+
     cache = client.caches.create(
-        model="gemini-2.5-flash",
+        model=CACHE_MODEL,
         config=types.CreateCachedContentConfig(
             system_instruction=REVIEW_RULES,
             display_name="codeguardian-review-rules",
             ttl=CACHE_TTL,
         ),
     )
+
+    expire_time = getattr(cache, "expire_time", None)
+    if expire_time is not None:
+        expire_time = str(expire_time)
+
+    save_cache_metadata({
+        "name": cache.name,
+        "model": CACHE_MODEL,
+        "ttl": CACHE_TTL,
+        "rules_hash": rules_hash(),
+        "expire_time": expire_time,
+    })
+
     return cache.name
+
 
 def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
     grouped: dict[tuple, list[dict]] = {}
@@ -843,7 +929,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
 
     cached_name = None
     if CACHE_MODE == "explicit":
-        cached_name = get_or_create_prompt_cache(client)
+        cached_name = ensure_prompt_cache(client)
 
     for batch in batches:
 
@@ -895,7 +981,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
                 SONARQUBE DATA:
                 {json.dumps(batch)}
             """
-    
+
         generate_config = types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=IssueBatchDecision,
@@ -917,7 +1003,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             contents=prompt,
             config=generate_config,
         )
-        
+
         try:
             total_prompt_tokens += int(response.usage_metadata.prompt_token_count)
             total_response_tokens += int(response.usage_metadata.candidates_token_count)
@@ -1013,10 +1099,9 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
 
     logger.info("Gemini produced %s issues", len(all_model_issues))
 
-
     if total_cached_tokens:
         logger.info("Gemini total cached tokens: %s", total_cached_tokens)
-        
+
     return Decision(
         decline_pr=decline_pr,
         issues=all_model_issues,
@@ -1307,6 +1392,10 @@ async def post_issue_group_comment(
             key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
                 getattr(i, "original_start_line", i.line) or i.line),
         )
+
+        if not os.path.exists(base_issue.file):
+            logger.info("Skipping inline comment for missing file: %s", base_issue.file)
+            return False
 
         line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
         content = build_comment_content(issues)
