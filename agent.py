@@ -1,3 +1,4 @@
+# Standard imports, third-party dependencies and logging configuration
 import argparse
 import json
 import asyncio
@@ -11,8 +12,11 @@ import re
 import base64
 import urllib.request
 import urllib.error
+import httpx
 from dataclasses import dataclass
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
+from contextlib import asynccontextmanager
+from mcp.client.streamable_http import streamable_http_client
 from google.genai import (
     types,)  # Library to manage the configuration and types for the Gemini model API
 from mcp import (
@@ -28,7 +32,6 @@ from prometheus_client import (
     push_to_gateway,
 )
 
-# Keep Jenkins logs readable without hiding useful info when something breaks.
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -43,7 +46,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
-# These models are the data the agent moves around between Sonar, Gemini and Bitbucket
+# Core models, custom exceptions and global constants used by the agent
 class Issue(BaseModel):
     sonar_key: str
     file: str
@@ -84,9 +87,79 @@ class AgentExecutionError(Exception):
 
 CODEGUARDIAN_SUMMARY_TITLE = "**CodeGuardian Analysis Summary**"
 CODEGUARDIAN_AGENT_MARKER = "<!-- CodeGuardian-Agent -->"
+ATLASSIAN_ROVO_MCP_URL = "https://mcp.atlassian.com/v1/mcp"
 
 
-# Detect the language of the file
+# Atlassian Rovo MCP connection helpers using an authenticated HTTP client
+def get_atlassian_mcp_url() -> str:
+    return (os.getenv("ATLASSIAN_MCP_URL") or ATLASSIAN_ROVO_MCP_URL).strip()
+
+
+def get_atlassian_mcp_auth() -> httpx.Auth:
+    auth_header = (os.getenv("ATLASSIAN_MCP_AUTH_HEADER") or "").strip()
+
+    if not auth_header:
+        raise AgentExecutionError("Missing ATLASSIAN_MCP_AUTH_HEADER for Atlassian Rovo MCP")
+
+    if auth_header.startswith("Basic "):
+        token = auth_header[len("Basic "):].strip()
+        try:
+            decoded = base64.b64decode(token).decode("utf-8")
+            username, password = decoded.split(":", 1)
+        except Exception as e:
+            raise AgentExecutionError("Invalid Basic auth format in ATLASSIAN_MCP_AUTH_HEADER") from e
+
+        return httpx.BasicAuth(username, password)
+
+    if auth_header.startswith("Bearer "):
+        token = auth_header[len("Bearer "):].strip()
+
+        class BearerAuth(httpx.Auth):
+
+            def auth_flow(self, request):
+                request.headers["Authorization"] = f"Bearer {token}"
+                yield request
+
+        return BearerAuth()
+
+    raise AgentExecutionError("Unsupported ATLASSIAN_MCP_AUTH_HEADER scheme")
+
+
+@asynccontextmanager
+async def atlassian_rovo_session():
+    async with httpx.AsyncClient(
+            auth=get_atlassian_mcp_auth(),
+            follow_redirects=True,
+    ) as custom_client:
+        async with streamable_http_client(
+                get_atlassian_mcp_url(),
+                http_client=custom_client,
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
+
+
+# Generic file reading and text normalization helpers
+@lru_cache(maxsize=256)
+def read_file_lines(filepath: str) -> list[str]:
+    if not os.path.exists(filepath):
+        raise FileNotFoundError("File not found.")
+    with open(filepath, "r", encoding="utf-8") as file:
+        return file.readlines()
+
+
+def clean_replacement_text(value: str) -> str:
+    return value.replace('\\n', '\n').strip('`').strip()
+
+
+def normalize_code_block(text: str) -> str:
+    if not text:
+        return ""
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").strip().splitlines()).strip()
+
+
+# Source code structure helpers to detect language and affected scope
 def detect_language(filepath: str) -> str:
     ext = os.path.splitext(filepath)[1].lower()
     mapping = {
@@ -109,7 +182,6 @@ def detect_language(filepath: str) -> str:
     return mapping.get(ext, "unknown")
 
 
-# Find the smallest executable scope (function, method, or global) that contains the line where the issue is located. It uses regex patterns to identify function/method definitions and their boundaries based on indentation (for Python) or braces (for C-like languages). If it cannot confidently determine a scope, it defaults to "global". This helps the agent provide more context-aware fixes by understanding the code structure around the issue.
 def resolve_scope_with_parser(filepath: str, line_number: int, language: str) -> ScopeInfo:
 
     lines = read_file_lines(filepath)
@@ -268,14 +340,13 @@ def resolve_scope(filepath: str, line_number: int) -> ScopeInfo:
         return ScopeInfo("global", "", line_number, line_number)
 
 
-# Generate a key for each issue
+# Issue normalization, grouping and deduplication helpers
 def build_issue_key(issue: Issue) -> str:
     if issue.sonar_key and issue.sonar_key != "NO_KEY":
         return issue.sonar_key
     return f"{issue.file}:{issue.line}:{issue.target_name}:{issue.severity}"
 
 
-# Clean, validate, and deduplicate the issues returned by the model
 def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
     prepared_issues = []
     dropped_invalid_issues = 0
@@ -294,11 +365,8 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
         normalized_original_code = normalize_code_block(issue.original_code)
         normalized_proposed_code = normalize_code_block(issue.proposed_code)
 
-        if (
-            not normalized_original_code
-            or not normalized_proposed_code
-            or normalized_original_code == normalized_proposed_code
-        ):
+        if (not normalized_original_code or not normalized_proposed_code or
+                normalized_original_code == normalized_proposed_code):
             dropped_invalid_issues += 1
             continue
 
@@ -336,7 +404,7 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
 
     return prepared_issues, dropped_invalid_issues
 
-# Group issues that share the same structure block
+
 def build_group_key(issue: Issue) -> tuple[str, str, str]:
     return (
         issue.file,
@@ -345,7 +413,43 @@ def build_group_key(issue: Issue) -> tuple[str, str, str]:
     )
 
 
-# Build the final comment body for one issue or a grouped set of issues
+# Comment formatting and hidden tracking metadata helpers
+def extract_issue_key(comment_text: str) -> list[str]:
+    keys = set()
+
+    # 1) Search for ID format
+    blocks = re.findall(r"<!--\s*CodeGuardian-IDs?:\s*([\s\S]*?)-->", comment_text, flags=re.IGNORECASE)
+
+    # 2) Extract keys from the founded blocks of IDs
+    for block in blocks:
+        for key in re.findall(r"\bID\s*:\s*([^\s<,]+)", block, flags=re.IGNORECASE):
+            keys.add(key.strip())
+
+        # 3) Separte the ids by comma
+        for legacy in re.split(r"[, \n\r\t]+", block):
+            legacy = legacy.strip()
+            if legacy and not legacy.upper().startswith("ID:"):
+                keys.add(legacy)
+
+    return list(keys)
+
+
+def build_hidden_ids(issue_keys: list[str]) -> str:
+    unique_keys = list(dict.fromkeys(k.strip() for k in issue_keys if k and k.strip()))
+    if not unique_keys:
+        return ""
+    ids_lines = "\n".join(f"ID: {k}" for k in unique_keys)
+    return f"<!-- CodeGuardian-IDs:\n{ids_lines}\n-->"
+
+
+def wrap_agent_comment(body: str) -> str:
+    return f"{CODEGUARDIAN_AGENT_MARKER}\n{body}"
+
+
+def is_agent_comment(comment_text: str) -> bool:
+    return CODEGUARDIAN_AGENT_MARKER in (comment_text or "")
+
+
 def build_comment_content(issues: list[Issue]) -> str:
     if not issues:
         return ""
@@ -390,31 +494,28 @@ def build_comment_content(issues: list[Issue]) -> str:
 
     imports_block = ""
     if all_required_imports:
-        imports_block = (
-            "**Additional required imports:**\n"
-            f"```{file_extension}\n"
-            + "\n".join(required_import for required_import in all_required_imports)
-            + "\n```\n\n"
-        )
+        imports_block = ("**Additional required imports:**\n"
+                         f"```{file_extension}\n" +
+                         "\n".join(required_import for required_import in all_required_imports) + "\n```\n\n")
 
     if len(issues) == 1:
         issue = issues[0]
         body = (f"### Code Issue\n\n"
-            f"**File:** {issue.file}\n\n"
-            f"**Lines:** {min_line}-{max_line}\n\n"
-            f"**Severity:** {issue.severity}\n\n"
-            f"**Problems:**\n\n{issue.problem}\n\n"
-            f"**Solutions:**\n\n{issue.solution}\n\n"
-            f"{imports_block}"
-            f"**Block to substitute:**\n"
-            f"```{file_extension}\n"
-            f"{clean_orig}\n"
-            f"```\n\n"
-            f"**Proposed Code:**\n"
-            f"```{file_extension}\n"
-            f"{clean_prop}\n"
-            f"```\n\n"
-            f"{build_hidden_ids(issue_keys)}")
+                f"**File:** {issue.file}\n\n"
+                f"**Lines:** {min_line}-{max_line}\n\n"
+                f"**Severity:** {issue.severity}\n\n"
+                f"**Problems:**\n\n{issue.problem}\n\n"
+                f"**Solutions:**\n\n{issue.solution}\n\n"
+                f"{imports_block}"
+                f"**Block to substitute:**\n"
+                f"```{file_extension}\n"
+                f"{clean_orig}\n"
+                f"```\n\n"
+                f"**Proposed Code:**\n"
+                f"```{file_extension}\n"
+                f"{clean_prop}\n"
+                f"```\n\n"
+                f"{build_hidden_ids(issue_keys)}")
         return wrap_agent_comment(body)
 
     seen_problem_lines = set()
@@ -468,93 +569,7 @@ def build_comment_content(issues: list[Issue]) -> str:
     return wrap_agent_comment(body)
 
 
-# Publish one inline comment for a whole issue group
-async def post_issue_group_comment(
-    session: ClientSession,
-    pr_id: str,
-    repo_slug: str,
-    issues: list[Issue],
-    workspace: str,
-) -> bool:
-    try:
-        if not issues:
-            return False
-
-        base_issue = max(
-            issues,
-            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
-                getattr(i, "original_start_line", i.line) or i.line),
-        )
-
-        line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
-        content = build_comment_content(issues)
-
-        await session.call_tool(
-            name="addPullRequestComment",
-            arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": repo_slug,
-                "content": content,
-                "inline": {
-                    "path": base_issue.file,
-                    "to": line_end,
-                },
-            },
-        )
-
-        if len(issues) == 1:
-            logger.info("Comment added")
-        else:
-            logger.info("Comment added with %s issues", len(issues))
-
-        return True
-    except Exception as e:
-        logger.error(f"Failed to add inline comment: {e}")
-        raise
-
-
-# Read the hidden IDs stored inside existing agent comments
-def extract_issue_key(comment_text: str) -> list[str]:
-    keys = set()
-
-    # 1) Search for ID format
-    blocks = re.findall(r"<!--\s*CodeGuardian-IDs?:\s*([\s\S]*?)-->", comment_text, flags=re.IGNORECASE)
-
-    # 2) Extract keys from the founded blocks of IDs
-    for block in blocks:
-        for key in re.findall(r"\bID\s*:\s*([^\s<,]+)", block, flags=re.IGNORECASE):
-            keys.add(key.strip())
-
-        # 3) Separte the ids by comma
-        for legacy in re.split(r"[, \n\r\t]+", block):
-            legacy = legacy.strip()
-            if legacy and not legacy.upper().startswith("ID:"):
-                keys.add(legacy)
-
-    return list(keys)
-
-
-# Store issue IDs inside a hidden block for later tracking
-def build_hidden_ids(issue_keys: list[str]) -> str:
-    unique_keys = list(dict.fromkeys(k.strip() for k in issue_keys if k and k.strip()))
-    if not unique_keys:
-        return ""
-    ids_lines = "\n".join(f"ID: {k}" for k in unique_keys)
-    return f"<!-- CodeGuardian-IDs:\n{ids_lines}\n-->"
-
-
-# Add a hidden marker so the agent can recognize its own comments
-def wrap_agent_comment(body: str) -> str:
-    return f"{CODEGUARDIAN_AGENT_MARKER}\n{body}"
-
-
-# Check whether a comment was created by the agent
-def is_agent_comment(comment_text: str) -> bool:
-    return CODEGUARDIAN_AGENT_MARKER in (comment_text or "")
-
-
-# Read the basic pull request data from the webhook payload
+# Webhook payload and repository context helpers
 def load_webhook_data(filepath: str) -> tuple[str, str, str, str]:
     with open(filepath, "r") as file:
         data = json.load(file)
@@ -579,16 +594,6 @@ def load_webhook_data(filepath: str) -> tuple[str, str, str, str]:
     return project_key, str(pr_id), str(repo_slug), str(workspace)
 
 
-# Read file lines once and keep them cached for repeated checks
-@lru_cache(maxsize=256)
-def read_file_lines(filepath: str) -> list[str]:
-    if not os.path.exists(filepath):
-        raise FileNotFoundError("File not found.")
-    with open(filepath, "r", encoding="utf-8") as file:
-        return file.readlines()
-
-
-# Return a code window around the reported line for model context
 def get_code_context(filepath: str, line_number: int, context_window: int = 20) -> str:
     try:
         lines = read_file_lines(filepath)
@@ -608,7 +613,7 @@ def get_code_context(filepath: str, line_number: int, context_window: int = 20) 
         return f"Error reading code context: {e}"
 
 
-# Keep only the fields needed from the SonarQube response
+# SonarQube integration helpers
 def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
     content_text = raw_results.content[0].text
     issues_data = json.loads(content_text)
@@ -630,7 +635,6 @@ def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
     return cleaned
 
 
-# Fetch the most relevant unresolved issues from new code only
 async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
     # Configure the SonarQube parameters
@@ -719,6 +723,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
     return top_issues
 
 
+# AI analysis and batching logic for model-generated fixes
 def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
     grouped: dict[tuple, list[dict]] = {}
     ordered_keys: list[tuple] = []
@@ -757,7 +762,6 @@ def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
     return [grouped[key] for key in ordered_keys]
 
 
-# Ask the model for fixes and collect execution metrics
 def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
 
@@ -968,7 +972,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     )
 
 
-# Load all pull request comments so they can be inspected
+# Pull request comment readers using Atlassian Rovo MCP
 async def get_pull_request_comments(
     session: ClientSession,
     pr_id: str,
@@ -976,30 +980,54 @@ async def get_pull_request_comments(
     workspace: str,
 ) -> list[dict]:
     try:
-        results = await session.call_tool(
-            name="getPullRequestComments",
-            arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": repo_slug,
-                "all": True,
-            },
-        )
+        all_comments = []
+        page = 1
 
-        comments_data = json.loads(results.content[0].text)
+        while True:
+            results = await session.call_tool(
+                name="bitbucketPullRequest",
+                arguments={
+                    "action": "comments",
+                    "workspaceId": workspace,
+                    "repoId": repo_slug,
+                    "prId": int(pr_id),
+                    "pagelen": 100,
+                    "page": page,
+                    "sort": "-created_on",
+                },
+            )
 
-        if isinstance(comments_data, dict):
-            return comments_data.get("values", [])
-        if isinstance(comments_data, list):
-            return comments_data
+            comments_data = json.loads(results.content[0].text)
 
-        return []
+            if isinstance(comments_data, dict):
+                if isinstance(comments_data.get("values"), list):
+                    page_comments = comments_data.get("values", [])
+                elif isinstance(comments_data.get("comments"), list):
+                    page_comments = comments_data.get("comments", [])
+                else:
+                    page_comments = []
+            elif isinstance(comments_data, list):
+                page_comments = comments_data
+            else:
+                page_comments = []
+
+            if not page_comments:
+                break
+
+            all_comments.extend(page_comments)
+
+            if len(page_comments) < 100:
+                break
+
+            page += 1
+
+        return all_comments
+
     except Exception as e:
         logger.error(f"Failed to retrieve pull request comments: {e}")
         raise
 
 
-# Find old top-level summary comments created by the agent
 def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
     summary_comment_ids: set[int] = set()
 
@@ -1010,7 +1038,7 @@ def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
         if comment.get("parent"):
             continue
 
-        raw_text = (comment.get("content", {}) or {}).get("raw", "") or ""
+        raw_text = (comment.get("content", {}) or {}).get("raw", "") or comment.get("content", "")
         normalized_text = raw_text.replace(CODEGUARDIAN_AGENT_MARKER, "", 1).strip()
 
         if (is_agent_comment(raw_text) or normalized_text.startswith(CODEGUARDIAN_SUMMARY_TITLE) or
@@ -1024,39 +1052,9 @@ def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
     return summary_comment_ids
 
 
-# Normalize raw replacement text returned by the model
-def clean_replacement_text(value: str) -> str:
-    return value.replace('\\n', '\n').strip('`').strip()
-
-
-# Normalize code blocks before comparing them
-def normalize_code_block(text: str) -> str:
-    if not text:
-        return ""
-    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").strip().splitlines()).strip()
-
-
-# Load the current inline comments created by the agent
 async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
     try:
-        results = await session.call_tool(
-            name="getPullRequestComments",
-            arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": repo_slug,
-                "all": True,
-            },
-        )
-
-        comments_data = json.loads(results.content[0].text)
-
-        if isinstance(comments_data, dict):
-            comments = comments_data.get("values", [])
-        elif isinstance(comments_data, list):
-            comments = comments_data
-        else:
-            comments = []
+        comments = await get_pull_request_comments(session, pr_id, repo_slug, workspace)
 
         active_inline_comments = {}
 
@@ -1067,17 +1065,17 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
             if comment.get("parent"):
                 continue
 
-            raw_text = comment.get("content", {}).get("raw", "")
+            if not comment.get("inline"):
+                continue
+
+            raw_text = (comment.get("content", {}) or {}).get("raw", "") or comment.get("content", "")
+            comment_id = int(comment.get("id"))
 
             if not is_agent_comment(raw_text):
                 continue
 
             issue_keys = extract_issue_key(raw_text)
 
-            if not issue_keys:
-                continue
-
-            comment_id = int(comment.get("id"))
             resolved = comment.get("resolved", False)
             inline_data = comment.get("inline") or {}
             outdated = bool(inline_data.get("outdated", False))
@@ -1098,7 +1096,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
         raise
 
 
-# Build the auth headers for direct Bitbucket REST calls
+# Bitbucket REST helpers for inline comment creation and deletion
 def get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
     bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
     bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "").strip()
@@ -1115,12 +1113,15 @@ def get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
     }
 
 
-# Return the base Bitbucket API URL used by REST helpers
+def ensure_bitbucket_rest_auth() -> None:
+    if not get_bitbucket_basic_auth_headers():
+        raise AgentExecutionError("Missing BITBUCKET_EMAIL/BITBUCKET_API_TOKEN for Bitbucket REST inline comments")
+
+
 def get_bitbucket_api_base_url() -> str:
     return os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
 
 
-# Build the REST URL for a pull request comment
 def build_pullrequest_comment_url(
     pr_id: str,
     repo_slug: str,
@@ -1132,7 +1133,53 @@ def build_pullrequest_comment_url(
             f"/pullrequests/{pr_id}/comments/{comment_id}")
 
 
-# Delete one inline comment directly through the REST API
+async def create_inline_comment_by_rest(
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+    file_path: str,
+    line_to: int,
+    content: str,
+) -> bool:
+    headers = get_bitbucket_basic_auth_headers()
+    if not headers:
+        return False
+
+    create_url = f"{get_bitbucket_api_base_url()}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/comments"
+
+    payload = json.dumps({
+        "content": {
+            "raw": content,
+        },
+        "inline": {
+            "path": file_path,
+            "to": line_to,
+        },
+    }).encode("utf-8")
+
+    def _create_comment() -> int:
+        req = urllib.request.Request(
+            url=create_url,
+            data=payload,
+            headers={
+                **headers, "Content-Type": "application/json"
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return int(resp.status)
+
+    try:
+        status = await asyncio.to_thread(_create_comment)
+        return status in (200, 201)
+    except urllib.error.HTTPError as e:
+        if e.code in (200, 201):
+            return True
+        return False
+    except Exception:
+        return False
+
+
 async def delete_inline_comment_by_rest(
     pr_id: str,
     repo_slug: str,
@@ -1165,7 +1212,6 @@ async def delete_inline_comment_by_rest(
         return False
 
 
-# Delete a set of comments and track which ones failed
 async def delete_comment_ids(
     pr_id: str,
     repo_slug: str,
@@ -1184,6 +1230,7 @@ async def delete_comment_ids(
         )
         if deleted:
             deleted_comment_ids.add(comment_id)
+            logger.info("Inline comment removed: %s", comment_id)
             await asyncio.sleep(0.2)
         else:
             failed_comment_ids.add(comment_id)
@@ -1192,7 +1239,47 @@ async def delete_comment_ids(
     return deleted_comment_ids, failed_comment_ids
 
 
-# Remove old summary comments that should no longer stay in the PR
+# Pull request synchronization and final reporting workflow
+async def post_issue_group_comment(
+    pr_id: str,
+    repo_slug: str,
+    issues: list[Issue],
+    workspace: str,
+) -> bool:
+    try:
+        if not issues:
+            return False
+
+        base_issue = max(
+            issues,
+            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
+                getattr(i, "original_start_line", i.line) or i.line),
+        )
+
+        line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
+        content = build_comment_content(issues)
+
+        created = await create_inline_comment_by_rest(
+            pr_id=pr_id,
+            repo_slug=repo_slug,
+            workspace=workspace,
+            file_path=base_issue.file,
+            line_to=line_end,
+            content=content,
+        )
+
+        if created:
+            if len(issues) == 1:
+                logger.info("Inline comment added")
+            else:
+                logger.info("Inline comment added with %s issues", len(issues))
+
+        return created
+    except Exception as e:
+        logger.error(f"Failed to add inline comment: {e}")
+        raise
+
+
 async def delete_agent_summary_comments(
     session: ClientSession,
     pr_id: str,
@@ -1222,7 +1309,6 @@ async def delete_agent_summary_comments(
     return len(deleted_comment_ids)
 
 
-# Reconcile the current analysis with the current PR comments
 async def synchronize_inline_comments(
     session: ClientSession,
     pr_id: str,
@@ -1273,7 +1359,7 @@ async def synchronize_inline_comments(
     created_comments = 0
 
     for issue_group in reversed(grouped_issues):
-        created = await post_issue_group_comment(session, pr_id, repo_slug, issue_group, workspace)
+        created = await post_issue_group_comment(pr_id, repo_slug, issue_group, workspace)
         if created:
             created_comments += 1
         await asyncio.sleep(0.2)
@@ -1281,61 +1367,43 @@ async def synchronize_inline_comments(
     return created_comments
 
 
-# Open the Bitbucket session and publish the final analysis state
 async def report_to_bitbucket(
     pr_id: str,
     repo_slug: str,
     workspace: str,
     decision: Decision,
 ) -> None:
-    bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "")
-
-    bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "")
-
-    bitbucket_env = os.environ.copy()
-    bitbucket_env.update({
-        "BITBUCKET_URL": os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0"),
-        "BITBUCKET_WORKSPACE": workspace,
-        "BITBUCKET_USERNAME": bitbucket_username,
-        "BITBUCKET_PASSWORD": bitbucket_password,
-    })
-
     if not pr_id or str(pr_id).lower() == "null":
         logger.error("No valid pull request ID was provided.")
         raise AgentExecutionError("Missing pull request ID")
 
+    ensure_bitbucket_rest_auth()
+
     try:
-        async with stdio_client(StdioServerParameters(
-                command="bitbucket-mcp",
-                args=[],
-                env=bitbucket_env,
-        )) as (read, write):
-            async with ClientSession(read, write) as session_bb:
-                await session_bb.initialize()
+        async with atlassian_rovo_session() as session_bb:
+            await delete_agent_summary_comments(
+                session_bb,
+                pr_id,
+                repo_slug,
+                workspace,
+            )
 
-                await delete_agent_summary_comments(
-                    session_bb,
-                    pr_id,
-                    repo_slug,
-                    workspace,
-                )
+            await synchronize_inline_comments(
+                session_bb,
+                pr_id,
+                repo_slug,
+                workspace,
+                decision.issues,
+            )
 
-                await synchronize_inline_comments(
-                    session_bb,
-                    pr_id,
-                    repo_slug,
-                    workspace,
-                    decision.issues,
-                )
-
-                logger.info("Comments synchronized")
+            logger.info("Comments synchronized")
 
     except Exception as e:
         logger.error(f"Failed to report analysis results to Bitbucket: {e}")
         raise AgentExecutionError("Bitbucket reporting failed") from e
 
 
-# Orchestrate the full flow from webhook input to PR update.
+# Main orchestration entry point
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", required=True, help="Path to the JSON file to analyze")
@@ -1367,7 +1435,7 @@ async def main() -> None:
     decision.issues, dropped_invalid_issues = normalize_and_deduplicate_issues(decision.issues)
 
     decision.decline_pr = any(issue.severity in {"BLOCKER", "CRITICAL"} for issue in decision.issues)
-    
+
     if dropped_invalid_issues:
         logger.info("Dropped %s invalid issues", dropped_invalid_issues)
 
