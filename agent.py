@@ -88,7 +88,61 @@ class AgentExecutionError(Exception):
 CODEGUARDIAN_SUMMARY_TITLE = "**CodeGuardian Analysis Summary**"
 CODEGUARDIAN_AGENT_MARKER = "<!-- CodeGuardian-Agent -->"
 ATLASSIAN_ROVO_MCP_URL = "https://mcp.atlassian.com/v1/mcp"
+REVIEW_RULES = """
+You are reviewing SonarQube findings and must return only valid JSON.
 
+Rules:
+- Keep the exact sonar_key from the input.
+- proposed_code must directly replace original_code.
+- Use the smallest valid replacement that compiles or parses in place.
+- Do not invent APIs, symbols, imports, or variables unless strictly required.
+- Keep formatting and indentation consistent with the code context.
+- original_code must be the full replaceable block if a larger block is needed.
+- Use real multiline code, not literal '\\n'.
+- If the code is already correct, already handled, already uses the proper construct, or no code change is required, return no issue for that finding.
+- Never return an issue when original_code and proposed_code would be identical.
+- Do not emit issues for false positives, already-fixed code, or findings that only justify an explanation without a code change.
+- Only return issues that require a real code modification.
+- proposed_code must contain only the replacement block for original_code.
+- Do not prepend or append import statements to proposed_code unless original_code itself includes the import section.
+- If the fix requires new imports outside the replaceable block, list them in required_imports.
+- required_imports must contain only concrete import lines exactly as they should appear in the file.
+- If no additional imports are required, return an empty required_imports array.
+
+For function or method batches:
+- return exactly one combined issue object only if a real code change is needed
+- summarize all covered findings inside "problem" as bullet points
+- summarize all applied changes inside "solution" as bullet points
+- set original_start_line and original_end_line to cover the full scope
+- set original_code to the full scope before changes
+- set proposed_code to the full scope after applying all fixes
+- use the sonar_key of the first covered finding in the batch
+- merge and deduplicate all needed imports into required_imports
+- if no real fix is needed, return an empty issues list
+
+Return ONLY valid JSON with this shape:
+{
+  "issues": [
+    {
+      "sonar_key": "...",
+      "file": "...",
+      "target_type": "...",
+      "target_name": "...",
+      "line": 0,
+      "original_start_line": 0,
+      "original_end_line": 0,
+      "problem": "...",
+      "severity": "...",
+      "solution": "...",
+      "original_code": "...",
+      "proposed_code": "...",
+      "required_imports": []
+    }
+  ]
+}
+"""
+CACHE_MODE = os.getenv("CACHE_MODE", "implicit").strip().lower()
+CACHE_TTL = os.getenv("CACHE_TTL", "3600s").strip()
 
 # Atlassian Rovo MCP connection helpers using an authenticated HTTP client
 def get_atlassian_mcp_url() -> str:
@@ -708,7 +762,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
         issue.get("line", 0),
     ))
 
-    max_issues = int(os.getenv("CODEGUARDIAN_MAX_ISSUES", "50"))
+    max_issues = int(os.getenv("CODEGUARDIAN_MAX_ISSUES", "35"))
     top_issues = cleaned_issues[:max_issues]  # Limit the number of issues sent to the AI after sorting by severity
 
     for issue in top_issues:
@@ -724,6 +778,17 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
 
 # AI analysis and batching logic for model-generated fixes
+def get_or_create_prompt_cache(client: genai.Client):
+    cache = client.caches.create(
+        model="gemini-2.5-flash",
+        config=types.CreateCachedContentConfig(
+            system_instruction=REVIEW_RULES,
+            display_name="codeguardian-review-rules",
+            ttl=CACHE_TTL,
+        ),
+    )
+    return cache.name
+
 def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
     grouped: dict[tuple, list[dict]] = {}
     ordered_keys: list[tuple] = []
@@ -769,11 +834,16 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     total_prompt_tokens = 0
     total_response_tokens = 0
     total_tokens = 0
+    total_cached_tokens = 0
     start_time = time.time()
 
     decline_pr = any(str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"} for issue in issues)
 
     batches = build_scope_batches(issues)
+
+    cached_name = None
+    if CACHE_MODE == "explicit":
+        cached_name = get_or_create_prompt_cache(client)
 
     for batch in batches:
 
@@ -801,80 +871,58 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             Do not merge it with any other scope.
             """
 
-        prompt = f"""
-            You are reviewing SonarQube findings from project '{project_key}'.
+        if CACHE_MODE == "explicit":
+            prompt = f"""
+                Project:
+                {project_key}
 
-            {scope_instruction}
+                Scope instructions:
+                {scope_instruction}
 
-            Rules:
-            - Keep the exact sonar_key from the input.
-            - proposed_code must directly replace original_code.
-            - Use the smallest valid replacement that compiles or parses in place.
-            - Do not invent APIs, symbols, imports, or variables unless strictly required.
-            - Keep formatting and indentation consistent with the code context.
-            - original_code must be the full replaceable block if a larger block is needed.
-            - Use real multiline code, not literal '\\n'.
-            - If the code is already correct, already handled, already uses the proper construct, or no code change is required, return no issue for that finding.
-            - Never return an issue when original_code and proposed_code would be identical.
-            - Do not emit issues for false positives, already-fixed code, or findings that only justify an explanation without a code change.
-            - Only return issues that require a real code modification.
-            - proposed_code must contain only the replacement block for original_code.
-            - Do not prepend or append import statements to proposed_code unless original_code itself includes the import section.
-            - If the fix requires new imports outside the replaceable block, list them in required_imports.
-            - required_imports must contain only concrete import lines exactly as they should appear in the file, for example: "import java.sql.PreparedStatement;".
-            - If no additional imports are required, return an empty required_imports array.
+                SONARQUBE DATA:
+                {json.dumps(batch)}
+            """
+        else:
+            prompt = f"""
+                {REVIEW_RULES}
 
-            For function or method batches:
-            - return exactly one combined issue object only if a real code change is needed
-            - summarize all covered findings inside "problem" as bullet points
-            - summarize all applied changes inside "solution" as bullet points
-            - set original_start_line and original_end_line to cover the full scope
-            - set original_code to the full scope before changes
-            - set proposed_code to the full scope after applying all fixes
-            - use the sonar_key of the first covered finding in the batch
-            - merge and deduplicate all needed imports into required_imports
-            - if no real fix is needed, return an empty issues list
+                Project:
+                {project_key}
 
-            Return ONLY valid JSON with this shape:
-            {{
-              "issues": [
-                {{
-                  "sonar_key": "...",
-                  "file": "...",
-                  "target_type": "...",
-                  "target_name": "...",
-                  "line": 0,
-                  "original_start_line": 0,
-                  "original_end_line": 0,
-                  "problem": "...",
-                  "severity": "...",
-                  "solution": "...",
-                  "original_code": "...",
-                  "proposed_code": "...",
-                  "required_imports": []
-                }}
-              ]
-            }}
+                Scope instructions:
+                {scope_instruction}
 
-            SONARQUBE DATA:
-            {json.dumps(batch)}
-        """
+                SONARQUBE DATA:
+                {json.dumps(batch)}
+            """
+    
+        generate_config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=IssueBatchDecision,
+            temperature=0,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
+        if CACHE_MODE == "explicit":
+            generate_config = types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=IssueBatchDecision,
                 temperature=0,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            ),
-        )
+                cached_content=cached_name,
+            )
 
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=generate_config,
+        )
+        
         try:
             total_prompt_tokens += int(response.usage_metadata.prompt_token_count)
             total_response_tokens += int(response.usage_metadata.candidates_token_count)
             total_tokens += int(response.usage_metadata.total_token_count)
+            total_cached_tokens += int(getattr(response.usage_metadata, "cached_content_token_count", 0) or 0)
         except Exception:
             pass
 
@@ -965,6 +1013,10 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
 
     logger.info("Gemini produced %s issues", len(all_model_issues))
 
+
+    if total_cached_tokens:
+        logger.info("Gemini total cached tokens: %s", total_cached_tokens)
+        
     return Decision(
         decline_pr=decline_pr,
         issues=all_model_issues,
