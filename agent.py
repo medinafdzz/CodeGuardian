@@ -823,7 +823,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
         issue.get("line", 0),
     ))
 
-    max_issues = int(os.getenv("CODEGUARDIAN_MAX_ISSUES", "35"))
+    max_issues = int(os.getenv("CODEGUARDIAN_MAX_ISSUES", "30"))
     top_issues = cleaned_issues[:max_issues]  # Limit the number of issues sent to the AI after sorting by severity
 
     for issue in top_issues:
