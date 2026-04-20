@@ -151,6 +151,11 @@ CACHE_METADATA_PATH = os.getenv(
 CACHE_MODEL = "gemini-2.5-flash"
 CACHE_MODE = os.getenv("CACHE_MODE", "implicit").strip().lower()
 CACHE_TTL = os.getenv("CACHE_TTL", "3600s").strip()
+BATCH_CACHE_PATH = os.getenv(
+    "BATCH_CACHE_PATH",
+    "/var/jenkins_home/codeguardian/gemini_batch_cache.json",
+).strip()
+BATCH_CACHE_MAX_AGE_SECONDS = int(os.getenv("BATCH_CACHE_MAX_AGE_SECONDS", "86400"))  # 1 day cache for batch results
 
 
 # Gemini cache persistence helpers for prompt reuse across executions
@@ -199,6 +204,35 @@ def cache_meta_valid(metadata: dict | None) -> bool:
         return False
 
     return expires_at > datetime.now(timezone.utc)
+
+
+# Gemini batch-result cache helpers for reusing model outputs across executions
+def load_batch_cache() -> dict:
+    path = Path(BATCH_CACHE_PATH)
+
+    if not path.exists():
+        return {}
+
+    try:
+        file_age_seconds = time.time() - path.stat().st_mtime
+        if file_age_seconds > BATCH_CACHE_MAX_AGE_SECONDS:
+            path.unlink(missing_ok=True)
+            logger.info("Deleted expired Gemini batch cache")
+            return {}
+    except Exception:
+        return {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_batch_cache(data: dict) -> None:
+    path = Path(BATCH_CACHE_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 # Atlassian Rovo MCP connection helpers using an authenticated HTTP client
@@ -812,11 +846,10 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
     }
 
     cleaned_issues = [
-        issue
-        for issue in all_issues
+        issue for issue in all_issues
         if issue.get("severity") in severity_order and os.path.exists(issue.get("file", ""))
     ]
-    
+
     cleaned_issues.sort(key=lambda issue: (
         severity_order.get(issue.get("severity"), 99),
         issue.get("file", ""),
@@ -913,6 +946,34 @@ def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
     return [grouped[key] for key in ordered_keys]
 
 
+def build_batch_signature(project_key: str, batch: list[dict]) -> str:
+    normalized_batch = []
+
+    for issue in batch:
+        normalized_batch.append({
+            "sonar_key": issue.get("sonar_key", "NO_KEY"),
+            "file": issue.get("file", ""),
+            "line": int(issue.get("line", 0) or 0),
+            "severity": issue.get("severity", ""),
+            "message": issue.get("message", ""),
+            "code_context": issue.get("code_context", ""),
+            "scope_kind": issue.get("scope_kind", "global"),
+            "scope_name": issue.get("scope_name", ""),
+            "scope_start_line": int(issue.get("scope_start_line", issue.get("line", 0)) or 0),
+            "scope_end_line": int(issue.get("scope_end_line", issue.get("line", 0)) or 0),
+        })
+
+    payload = {
+        "project_key": project_key,
+        "model": CACHE_MODEL,
+        "rules_hash": rules_hash(),
+        "batch": normalized_batch,
+    }
+
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
 
@@ -922,6 +983,10 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     total_tokens = 0
     total_cached_tokens = 0
     start_time = time.time()
+    batch_cache = load_batch_cache()
+    batch_cache_hits = 0
+    batch_cache_misses = 0
+    batch_cache_changed = False
 
     decline_pr = any(str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"} for issue in issues)
 
@@ -982,46 +1047,68 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
                 {json.dumps(batch)}
             """
 
-        generate_config = types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=IssueBatchDecision,
-            temperature=0,
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        )
+        batch_signature = build_batch_signature(project_key, batch)
+        cached_response_text = batch_cache.get(batch_signature)
 
-        if CACHE_MODE == "explicit":
+        response_text = None
+
+        if cached_response_text:
+            try:
+                partial_decision = IssueBatchDecision.model_validate_json(cached_response_text)
+                batch_cache_hits += 1
+            except Exception:
+                partial_decision = None
+        else:
+            partial_decision = None
+
+        if partial_decision is None:
+            batch_cache_misses += 1
+
             generate_config = types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=IssueBatchDecision,
                 temperature=0,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                cached_content=cached_name,
             )
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=generate_config,
-        )
+            if CACHE_MODE == "explicit":
+                generate_config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=IssueBatchDecision,
+                    temperature=0,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                    cached_content=cached_name,
+                )
 
-        try:
-            total_prompt_tokens += int(response.usage_metadata.prompt_token_count)
-            total_response_tokens += int(response.usage_metadata.candidates_token_count)
-            total_tokens += int(response.usage_metadata.total_token_count)
-            total_cached_tokens += int(getattr(response.usage_metadata, "cached_content_token_count", 0) or 0)
-        except Exception:
-            pass
-
-        try:
-            partial_decision = IssueBatchDecision.model_validate_json(response.text)
-        except Exception as e:
-            logger.error(
-                "Failed to parse Gemini batch response for sonar keys %s: %s",
-                [issue.get("sonar_key", "NO_KEY") for issue in batch],
-                e,
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=generate_config,
             )
-            logger.error("The response from the model was: %s", response.text)
-            continue
+
+            try:
+                total_prompt_tokens += int(response.usage_metadata.prompt_token_count)
+                total_response_tokens += int(response.usage_metadata.candidates_token_count)
+                total_tokens += int(response.usage_metadata.total_token_count)
+                total_cached_tokens += int(getattr(response.usage_metadata, "cached_content_token_count", 0) or 0)
+            except Exception:
+                pass
+
+            response_text = response.text
+
+            try:
+                partial_decision = IssueBatchDecision.model_validate_json(response_text)
+            except Exception as e:
+                logger.error(
+                    "Failed to parse Gemini batch response for sonar keys %s: %s",
+                    [issue.get("sonar_key", "NO_KEY") for issue in batch],
+                    e,
+                )
+                logger.error("The response from the model was: %s", response_text)
+                continue
+
+            batch_cache[batch_signature] = response_text
+            batch_cache_changed = True
 
         expected_sonar_keys = {
             issue.get("sonar_key", "NO_KEY") for issue in batch if issue.get("sonar_key", "NO_KEY") != "NO_KEY"
@@ -1101,6 +1188,12 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
 
     if total_cached_tokens:
         logger.info("Gemini total cached tokens: %s", total_cached_tokens)
+
+    if batch_cache_changed:
+        save_batch_cache(batch_cache)
+
+    logger.info("Gemini batch cache hits: %s", batch_cache_hits)
+    logger.info("Gemini batch cache misses: %s", batch_cache_misses)
 
     return Decision(
         decline_pr=decline_pr,
@@ -1514,8 +1607,6 @@ async def synchronize_inline_comments(
             continue
 
         line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issue_group)
-        content = build_comment_content(issue_group)
-        normalized_content = content.replace("\r\n", "\n").strip()
 
         issue_keys = tuple(sorted(build_issue_key(i) for i in issue_group))
 
