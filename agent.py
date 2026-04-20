@@ -1216,6 +1216,8 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
             resolved = comment.get("resolved", False)
             inline_data = comment.get("inline") or {}
             outdated = bool(inline_data.get("outdated", False))
+            file_path = (inline_data.get("path") or "").strip()
+            line_to = int(inline_data.get("to") or inline_data.get("from") or 0)
 
             active_inline_comments[comment_id] = {
                 "comment_id": comment_id,
@@ -1224,6 +1226,8 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
                 "outdated": outdated,
                 "issue_keys": set(issue_keys),
                 "raw_text": raw_text,
+                "file_path": file_path,
+                "line_to": line_to,
             }
 
         return active_inline_comments
@@ -1493,14 +1497,81 @@ async def synchronize_inline_comments(
     if current_group:
         grouped_issues.append(current_group)
 
-    existing_comment_ids = set(active_inline_comments.keys())
-    if existing_comment_ids:
-        await delete_comment_ids(pr_id, repo_slug, workspace, existing_comment_ids)
+    desired_comments = []
+    seen_desired_signatures = set()
+
+    for issue_group in reversed(grouped_issues):
+        if not issue_group:
+            continue
+
+        base_issue = max(
+            issue_group,
+            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
+                getattr(i, "original_start_line", i.line) or i.line),
+        )
+
+        if not os.path.exists(base_issue.file):
+            continue
+
+        line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issue_group)
+        content = build_comment_content(issue_group)
+        normalized_content = content.replace("\r\n", "\n").strip()
+
+        signature = (
+            base_issue.file,
+            line_end,
+            normalized_content,
+        )
+
+        if signature in seen_desired_signatures:
+            continue
+
+        seen_desired_signatures.add(signature)
+        desired_comments.append({
+            "signature": signature,
+            "issues": issue_group,
+        })
+
+    existing_by_signature: dict[tuple[str, int, str], int] = {}
+    comment_ids_to_delete: set[int] = set()
+
+    for comment_id, comment_data in active_inline_comments.items():
+        file_path = (comment_data.get("file_path") or "").strip()
+        line_to = int(comment_data.get("line_to") or 0)
+        raw_text = (comment_data.get("raw_text") or "").replace("\r\n", "\n").strip()
+
+        if not file_path or not line_to or not raw_text:
+            comment_ids_to_delete.add(comment_id)
+            continue
+
+        signature = (
+            file_path,
+            line_to,
+            raw_text,
+        )
+
+        if signature in existing_by_signature:
+            comment_ids_to_delete.add(comment_id)
+            continue
+
+        existing_by_signature[signature] = comment_id
+
+    desired_signatures = {item["signature"] for item in desired_comments}
+
+    for signature, comment_id in existing_by_signature.items():
+        if signature not in desired_signatures:
+            comment_ids_to_delete.add(comment_id)
+
+    if comment_ids_to_delete:
+        await delete_comment_ids(pr_id, repo_slug, workspace, comment_ids_to_delete)
 
     created_comments = 0
 
-    for issue_group in reversed(grouped_issues):
-        created = await post_issue_group_comment(pr_id, repo_slug, issue_group, workspace)
+    for desired in desired_comments:
+        if desired["signature"] in existing_by_signature:
+            continue
+
+        created = await post_issue_group_comment(pr_id, repo_slug, desired["issues"], workspace)
         if created:
             created_comments += 1
         await asyncio.sleep(0.2)
