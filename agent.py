@@ -111,6 +111,11 @@ Rules:
 - If the fix requires new imports outside the replaceable block, list them in required_imports.
 - required_imports must contain only concrete import lines exactly as they should appear in the file.
 - If no additional imports are required, return an empty required_imports array.
+- Prefer the most explicit safe form over shorthand syntax when type inference may be ambiguous.
+- Do not use constructor references, method references, or abbreviated syntax unless the replacement is unquestionably type-safe in the given code.
+- Preserve existing concrete generic types exactly.
+- If there is any risk that the proposed replacement may not compile, return no issue for that finding.
+- Never replace working code with a stylistic refactor unless the replacement is clearly safer and compile-safe.
 
 For function or method batches:
 - return exactly one combined issue object only if a real code change is needed
