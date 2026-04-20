@@ -13,6 +13,9 @@ import base64
 import urllib.request
 import urllib.error
 import httpx
+import hashlib
+from pathlib import Path
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
 from contextlib import asynccontextmanager
@@ -88,6 +91,153 @@ class AgentExecutionError(Exception):
 CODEGUARDIAN_SUMMARY_TITLE = "**CodeGuardian Analysis Summary**"
 CODEGUARDIAN_AGENT_MARKER = "<!-- CodeGuardian-Agent -->"
 ATLASSIAN_ROVO_MCP_URL = "https://mcp.atlassian.com/v1/mcp"
+REVIEW_RULES = """
+You are reviewing SonarQube findings and must return only valid JSON.
+
+Rules:
+- Keep the exact sonar_key from the input.
+- proposed_code must directly replace original_code.
+- Use the smallest valid replacement that compiles or parses in place.
+- Do not invent APIs, symbols, imports, or variables unless strictly required.
+- Keep formatting and indentation consistent with the code context.
+- original_code must be the full replaceable block if a larger block is needed.
+- Use real multiline code, not literal '\\n'.
+- If the code is already correct, already handled, already uses the proper construct, or no code change is required, return no issue for that finding.
+- Never return an issue when original_code and proposed_code would be identical.
+- Do not emit issues for false positives, already-fixed code, or findings that only justify an explanation without a code change.
+- Only return issues that require a real code modification.
+- proposed_code must contain only the replacement block for original_code.
+- Do not prepend or append import statements to proposed_code unless original_code itself includes the import section.
+- If the fix requires new imports outside the replaceable block, list them in required_imports.
+- required_imports must contain only concrete import lines exactly as they should appear in the file.
+- If no additional imports are required, return an empty required_imports array.
+- Prefer the most explicit safe form over shorthand syntax when type inference may be ambiguous.
+- Do not use constructor references, method references, or abbreviated syntax unless the replacement is unquestionably type-safe in the given code.
+- Preserve existing concrete generic types exactly.
+- If there is any risk that the proposed replacement may not compile, return no issue for that finding.
+- Never replace working code with a stylistic refactor unless the replacement is clearly safer and compile-safe.
+
+For function or method batches:
+- return exactly one combined issue object only if a real code change is needed
+- summarize all covered findings inside "problem" as bullet points
+- summarize all applied changes inside "solution" as bullet points
+- set original_start_line and original_end_line to cover the full scope
+- set original_code to the full scope before changes
+- set proposed_code to the full scope after applying all fixes
+- use the sonar_key of the first covered finding in the batch
+- merge and deduplicate all needed imports into required_imports
+- if no real fix is needed, return an empty issues list
+
+Return ONLY valid JSON with this shape:
+{
+  "issues": [
+    {
+      "sonar_key": "...",
+      "file": "...",
+      "target_type": "...",
+      "target_name": "...",
+      "line": 0,
+      "original_start_line": 0,
+      "original_end_line": 0,
+      "problem": "...",
+      "severity": "...",
+      "solution": "...",
+      "original_code": "...",
+      "proposed_code": "...",
+      "required_imports": []
+    }
+  ]
+}
+"""
+CACHE_METADATA_PATH = os.getenv(
+    "CACHE_METADATA_PATH",
+    "/var/jenkins_home/codeguardian/gemini_prompt_cache.json",
+).strip()
+CACHE_MODEL = "gemini-2.5-flash"
+CACHE_MODE = os.getenv("CACHE_MODE", "implicit").strip().lower()
+CACHE_TTL = os.getenv("CACHE_TTL", "3600s").strip()
+BATCH_CACHE_PATH = os.getenv(
+    "BATCH_CACHE_PATH",
+    "/var/jenkins_home/codeguardian/gemini_batch_cache.json",
+).strip()
+BATCH_CACHE_MAX_AGE_SECONDS = int(os.getenv("BATCH_CACHE_MAX_AGE_SECONDS", "86400"))  # 1 day cache for batch results
+
+
+# Gemini cache persistence helpers for prompt reuse across executions
+def rules_hash() -> str:
+    return hashlib.sha256(REVIEW_RULES.encode("utf-8")).hexdigest()
+
+
+def load_cache_metadata() -> dict | None:
+    path = Path(CACHE_METADATA_PATH)
+
+    if not path.exists():
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def save_cache_metadata(data: dict) -> None:
+    path = Path(CACHE_METADATA_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def cache_meta_valid(metadata: dict | None) -> bool:
+    if not metadata:
+        return False
+
+    if metadata.get("model") != CACHE_MODEL:
+        return False
+
+    if metadata.get("ttl") != CACHE_TTL:
+        return False
+
+    if metadata.get("rules_hash") != rules_hash():
+        return False
+
+    expire_time = metadata.get("expire_time")
+    if not expire_time:
+        return False
+
+    try:
+        expires_at = datetime.fromisoformat(expire_time.replace("Z", "+00:00"))
+    except Exception:
+        return False
+
+    return expires_at > datetime.now(timezone.utc)
+
+
+# Gemini batch-result cache helpers for reusing model outputs across executions
+def load_batch_cache() -> dict:
+    path = Path(BATCH_CACHE_PATH)
+
+    if not path.exists():
+        return {}
+
+    try:
+        file_age_seconds = time.time() - path.stat().st_mtime
+        if file_age_seconds > BATCH_CACHE_MAX_AGE_SECONDS:
+            path.unlink(missing_ok=True)
+            logger.info("Deleted expired Gemini batch cache")
+            return {}
+    except Exception:
+        return {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_batch_cache(data: dict) -> None:
+    path = Path(BATCH_CACHE_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 # Atlassian Rovo MCP connection helpers using an authenticated HTTP client
@@ -700,7 +850,10 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
         "INFO": 4,
     }
 
-    cleaned_issues = [issue for issue in all_issues if issue.get("severity") in severity_order]
+    cleaned_issues = [
+        issue for issue in all_issues
+        if issue.get("severity") in severity_order and os.path.exists(issue.get("file", ""))
+    ]
 
     cleaned_issues.sort(key=lambda issue: (
         severity_order.get(issue.get("severity"), 99),
@@ -708,7 +861,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
         issue.get("line", 0),
     ))
 
-    max_issues = int(os.getenv("CODEGUARDIAN_MAX_ISSUES", "20"))
+    max_issues = int(os.getenv("CODEGUARDIAN_MAX_ISSUES", "30"))
     top_issues = cleaned_issues[:max_issues]  # Limit the number of issues sent to the AI after sorting by severity
 
     for issue in top_issues:
@@ -724,6 +877,42 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
 
 # AI analysis and batching logic for model-generated fixes
+def ensure_prompt_cache(client: genai.Client) -> str:
+    metadata = load_cache_metadata()
+
+    if cache_meta_valid(metadata):
+        cache_name = metadata["name"]
+
+        try:
+            cache = client.caches.get(name=cache_name)
+            return cache.name
+        except Exception:
+            pass
+
+    cache = client.caches.create(
+        model=CACHE_MODEL,
+        config=types.CreateCachedContentConfig(
+            system_instruction=REVIEW_RULES,
+            display_name="codeguardian-review-rules",
+            ttl=CACHE_TTL,
+        ),
+    )
+
+    expire_time = getattr(cache, "expire_time", None)
+    if expire_time is not None:
+        expire_time = str(expire_time)
+
+    save_cache_metadata({
+        "name": cache.name,
+        "model": CACHE_MODEL,
+        "ttl": CACHE_TTL,
+        "rules_hash": rules_hash(),
+        "expire_time": expire_time,
+    })
+
+    return cache.name
+
+
 def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
     grouped: dict[tuple, list[dict]] = {}
     ordered_keys: list[tuple] = []
@@ -762,6 +951,34 @@ def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
     return [grouped[key] for key in ordered_keys]
 
 
+def build_batch_signature(project_key: str, batch: list[dict]) -> str:
+    normalized_batch = []
+
+    for issue in batch:
+        normalized_batch.append({
+            "sonar_key": issue.get("sonar_key", "NO_KEY"),
+            "file": issue.get("file", ""),
+            "line": int(issue.get("line", 0) or 0),
+            "severity": issue.get("severity", ""),
+            "message": issue.get("message", ""),
+            "code_context": issue.get("code_context", ""),
+            "scope_kind": issue.get("scope_kind", "global"),
+            "scope_name": issue.get("scope_name", ""),
+            "scope_start_line": int(issue.get("scope_start_line", issue.get("line", 0)) or 0),
+            "scope_end_line": int(issue.get("scope_end_line", issue.get("line", 0)) or 0),
+        })
+
+    payload = {
+        "project_key": project_key,
+        "model": CACHE_MODEL,
+        "rules_hash": rules_hash(),
+        "batch": normalized_batch,
+    }
+
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
 
@@ -769,11 +986,20 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     total_prompt_tokens = 0
     total_response_tokens = 0
     total_tokens = 0
+    total_cached_tokens = 0
     start_time = time.time()
+    batch_cache = load_batch_cache()
+    batch_cache_hits = 0
+    batch_cache_misses = 0
+    batch_cache_changed = False
 
     decline_pr = any(str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"} for issue in issues)
 
     batches = build_scope_batches(issues)
+
+    cached_name = None
+    if CACHE_MODE == "explicit":
+        cached_name = ensure_prompt_cache(client)
 
     for batch in batches:
 
@@ -801,93 +1027,93 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
             Do not merge it with any other scope.
             """
 
-        prompt = f"""
-            You are reviewing SonarQube findings from project '{project_key}'.
+        if CACHE_MODE == "explicit":
+            prompt = f"""
+                Project:
+                {project_key}
 
-            {scope_instruction}
+                Scope instructions:
+                {scope_instruction}
 
-            Rules:
-            - Keep the exact sonar_key from the input.
-            - proposed_code must directly replace original_code.
-            - Use the smallest valid replacement that compiles or parses in place.
-            - Do not invent APIs, symbols, imports, or variables unless strictly required.
-            - Keep formatting and indentation consistent with the code context.
-            - original_code must be the full replaceable block if a larger block is needed.
-            - Use real multiline code, not literal '\\n'.
-            - If the code is already correct, already handled, already uses the proper construct, or no code change is required, return no issue for that finding.
-            - Never return an issue when original_code and proposed_code would be identical.
-            - Do not emit issues for false positives, already-fixed code, or findings that only justify an explanation without a code change.
-            - Only return issues that require a real code modification.
-            - proposed_code must contain only the replacement block for original_code.
-            - Do not prepend or append import statements to proposed_code unless original_code itself includes the import section.
-            - If the fix requires new imports outside the replaceable block, list them in required_imports.
-            - required_imports must contain only concrete import lines exactly as they should appear in the file, for example: "import java.sql.PreparedStatement;".
-            - If no additional imports are required, return an empty required_imports array.
+                SONARQUBE DATA:
+                {json.dumps(batch)}
+            """
+        else:
+            prompt = f"""
+                {REVIEW_RULES}
 
-            For function or method batches:
-            - return exactly one combined issue object only if a real code change is needed
-            - summarize all covered findings inside "problem" as bullet points
-            - summarize all applied changes inside "solution" as bullet points
-            - set original_start_line and original_end_line to cover the full scope
-            - set original_code to the full scope before changes
-            - set proposed_code to the full scope after applying all fixes
-            - use the sonar_key of the first covered finding in the batch
-            - merge and deduplicate all needed imports into required_imports
-            - if no real fix is needed, return an empty issues list
+                Project:
+                {project_key}
 
-            Return ONLY valid JSON with this shape:
-            {{
-              "issues": [
-                {{
-                  "sonar_key": "...",
-                  "file": "...",
-                  "target_type": "...",
-                  "target_name": "...",
-                  "line": 0,
-                  "original_start_line": 0,
-                  "original_end_line": 0,
-                  "problem": "...",
-                  "severity": "...",
-                  "solution": "...",
-                  "original_code": "...",
-                  "proposed_code": "...",
-                  "required_imports": []
-                }}
-              ]
-            }}
+                Scope instructions:
+                {scope_instruction}
 
-            SONARQUBE DATA:
-            {json.dumps(batch)}
-        """
+                SONARQUBE DATA:
+                {json.dumps(batch)}
+            """
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
+        batch_signature = build_batch_signature(project_key, batch)
+        cached_response_text = batch_cache.get(batch_signature)
+
+        response_text = None
+
+        if cached_response_text:
+            try:
+                partial_decision = IssueBatchDecision.model_validate_json(cached_response_text)
+                batch_cache_hits += 1
+            except Exception:
+                partial_decision = None
+        else:
+            partial_decision = None
+
+        if partial_decision is None:
+            batch_cache_misses += 1
+
+            generate_config = types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=IssueBatchDecision,
                 temperature=0,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            ),
-        )
-
-        try:
-            total_prompt_tokens += int(response.usage_metadata.prompt_token_count)
-            total_response_tokens += int(response.usage_metadata.candidates_token_count)
-            total_tokens += int(response.usage_metadata.total_token_count)
-        except Exception:
-            pass
-
-        try:
-            partial_decision = IssueBatchDecision.model_validate_json(response.text)
-        except Exception as e:
-            logger.error(
-                "Failed to parse Gemini batch response for sonar keys %s: %s",
-                [issue.get("sonar_key", "NO_KEY") for issue in batch],
-                e,
             )
-            logger.error("The response from the model was: %s", response.text)
-            continue
+
+            if CACHE_MODE == "explicit":
+                generate_config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=IssueBatchDecision,
+                    temperature=0,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                    cached_content=cached_name,
+                )
+
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=generate_config,
+            )
+
+            try:
+                total_prompt_tokens += int(response.usage_metadata.prompt_token_count)
+                total_response_tokens += int(response.usage_metadata.candidates_token_count)
+                total_tokens += int(response.usage_metadata.total_token_count)
+                total_cached_tokens += int(getattr(response.usage_metadata, "cached_content_token_count", 0) or 0)
+            except Exception:
+                pass
+
+            response_text = response.text
+
+            try:
+                partial_decision = IssueBatchDecision.model_validate_json(response_text)
+            except Exception as e:
+                logger.error(
+                    "Failed to parse Gemini batch response for sonar keys %s: %s",
+                    [issue.get("sonar_key", "NO_KEY") for issue in batch],
+                    e,
+                )
+                logger.error("The response from the model was: %s", response_text)
+                continue
+
+            batch_cache[batch_signature] = response_text
+            batch_cache_changed = True
 
         expected_sonar_keys = {
             issue.get("sonar_key", "NO_KEY") for issue in batch if issue.get("sonar_key", "NO_KEY") != "NO_KEY"
@@ -964,6 +1190,15 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         logger.error(f"Failed to push metrics to Prometheus Pushgateway: {metric_error}")
 
     logger.info("Gemini produced %s issues", len(all_model_issues))
+
+    if total_cached_tokens:
+        logger.info("Gemini total cached tokens: %s", total_cached_tokens)
+
+    if batch_cache_changed:
+        save_batch_cache(batch_cache)
+
+    logger.info("Gemini batch cache hits: %s", batch_cache_hits)
+    logger.info("Gemini batch cache misses: %s", batch_cache_misses)
 
     return Decision(
         decline_pr=decline_pr,
@@ -1079,6 +1314,8 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
             resolved = comment.get("resolved", False)
             inline_data = comment.get("inline") or {}
             outdated = bool(inline_data.get("outdated", False))
+            file_path = (inline_data.get("path") or "").strip()
+            line_to = int(inline_data.get("to") or inline_data.get("from") or 0)
 
             active_inline_comments[comment_id] = {
                 "comment_id": comment_id,
@@ -1087,6 +1324,8 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
                 "outdated": outdated,
                 "issue_keys": set(issue_keys),
                 "raw_text": raw_text,
+                "file_path": file_path,
+                "line_to": line_to,
             }
 
         return active_inline_comments
@@ -1256,6 +1495,10 @@ async def post_issue_group_comment(
                 getattr(i, "original_start_line", i.line) or i.line),
         )
 
+        if not os.path.exists(base_issue.file):
+            logger.info("Skipping inline comment for missing file: %s", base_issue.file)
+            return False
+
         line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
         content = build_comment_content(issues)
 
@@ -1352,14 +1595,81 @@ async def synchronize_inline_comments(
     if current_group:
         grouped_issues.append(current_group)
 
-    existing_comment_ids = set(active_inline_comments.keys())
-    if existing_comment_ids:
-        await delete_comment_ids(pr_id, repo_slug, workspace, existing_comment_ids)
+    desired_comments = []
+    seen_desired_signatures = set()
+
+    for issue_group in reversed(grouped_issues):
+        if not issue_group:
+            continue
+
+        base_issue = max(
+            issue_group,
+            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
+                getattr(i, "original_start_line", i.line) or i.line),
+        )
+
+        if not os.path.exists(base_issue.file):
+            continue
+
+        line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issue_group)
+
+        issue_keys = tuple(sorted(build_issue_key(i) for i in issue_group))
+
+        signature = (
+            base_issue.file,
+            line_end,
+            issue_keys,
+        )
+
+        if signature in seen_desired_signatures:
+            continue
+
+        seen_desired_signatures.add(signature)
+        desired_comments.append({
+            "signature": signature,
+            "issues": issue_group,
+        })
+
+    existing_by_signature: dict[tuple, int] = {}
+    comment_ids_to_delete: set[int] = set()
+
+    for comment_id, comment_data in active_inline_comments.items():
+        file_path = (comment_data.get("file_path") or "").strip()
+        line_to = int(comment_data.get("line_to") or 0)
+        issue_keys = tuple(sorted(comment_data.get("issue_keys") or []))
+
+        if not file_path or not line_to or not issue_keys:
+            comment_ids_to_delete.add(comment_id)
+            continue
+
+        signature = (
+            file_path,
+            line_to,
+            issue_keys,
+        )
+
+        if signature in existing_by_signature:
+            comment_ids_to_delete.add(comment_id)
+            continue
+
+        existing_by_signature[signature] = comment_id
+
+    desired_signatures = {item["signature"] for item in desired_comments}
+
+    for signature, comment_id in existing_by_signature.items():
+        if signature not in desired_signatures:
+            comment_ids_to_delete.add(comment_id)
+
+    if comment_ids_to_delete:
+        await delete_comment_ids(pr_id, repo_slug, workspace, comment_ids_to_delete)
 
     created_comments = 0
 
-    for issue_group in reversed(grouped_issues):
-        created = await post_issue_group_comment(pr_id, repo_slug, issue_group, workspace)
+    for desired in desired_comments:
+        if desired["signature"] in existing_by_signature:
+            continue
+
+        created = await post_issue_group_comment(pr_id, repo_slug, desired["issues"], workspace)
         if created:
             created_comments += 1
         await asyncio.sleep(0.2)
