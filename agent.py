@@ -1517,10 +1517,12 @@ async def synchronize_inline_comments(
         content = build_comment_content(issue_group)
         normalized_content = content.replace("\r\n", "\n").strip()
 
+        issue_keys = tuple(sorted(build_issue_key(i) for i in issue_group))
+
         signature = (
             base_issue.file,
             line_end,
-            normalized_content,
+            issue_keys,
         )
 
         if signature in seen_desired_signatures:
@@ -1532,22 +1534,22 @@ async def synchronize_inline_comments(
             "issues": issue_group,
         })
 
-    existing_by_signature: dict[tuple[str, int, str], int] = {}
+    existing_by_signature: dict[tuple, int] = {}
     comment_ids_to_delete: set[int] = set()
 
     for comment_id, comment_data in active_inline_comments.items():
         file_path = (comment_data.get("file_path") or "").strip()
         line_to = int(comment_data.get("line_to") or 0)
-        raw_text = (comment_data.get("raw_text") or "").replace("\r\n", "\n").strip()
+        issue_keys = tuple(sorted(comment_data.get("issue_keys") or []))
 
-        if not file_path or not line_to or not raw_text:
+        if not file_path or not line_to or not issue_keys:
             comment_ids_to_delete.add(comment_id)
             continue
 
         signature = (
             file_path,
             line_to,
-            raw_text,
+            issue_keys,
         )
 
         if signature in existing_by_signature:
