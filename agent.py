@@ -212,7 +212,6 @@ def cache_meta_valid(metadata: dict | None) -> bool:
     return expires_at > datetime.now(timezone.utc)
 
 
-# Gemini batch-result cache helpers for reusing model outputs across executions
 def load_batch_cache() -> dict:
     path = Path(BATCH_CACHE_PATH)
 
@@ -492,13 +491,13 @@ def resolve_scope(filepath: str, line_number: int) -> ScopeInfo:
 
 
 # Issue normalization, grouping and deduplication helpers
-def build_issue_key(issue: Issue) -> str:
+def issue_key(issue: Issue) -> str:
     if issue.sonar_key and issue.sonar_key != "NO_KEY":
         return issue.sonar_key
     return f"{issue.file}:{issue.line}:{issue.target_name}:{issue.severity}"
 
 
-def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
+def normalize_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
     prepared_issues = []
     dropped_invalid_issues = 0
     seen_sonar_keys = set()
@@ -544,7 +543,7 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
             dropped_invalid_issues += 1
             continue
 
-        sonar_issue_key = build_issue_key(issue)
+        sonar_issue_key = issue_key(issue)
 
         if issue.sonar_key and issue.sonar_key != "NO_KEY":
             if sonar_issue_key in seen_sonar_keys:
@@ -556,7 +555,7 @@ def normalize_and_deduplicate_issues(issues: list[Issue]) -> tuple[list[Issue], 
     return prepared_issues, dropped_invalid_issues
 
 
-def build_group_key(issue: Issue) -> tuple[str, str, str]:
+def group_key(issue: Issue) -> tuple[str, str, str]:
     return (
         issue.file,
         normalize_code_block(clean_replacement_text(issue.original_code or "")),
@@ -565,51 +564,39 @@ def build_group_key(issue: Issue) -> tuple[str, str, str]:
 
 
 # Validation blocks to ensure code changes
-def build_batch_signature(project_key: str, batch: list[dict]) -> str:
-    normalized_batch = []
+def patched_file_content(issue: Issue) -> str | None:
+    if not issue.file or not os.path.exists(issue.file):
+        return None
 
-    for issue in batch:
-        scope_start_line = int(issue.get("scope_start_line", issue.get("line", 0)) or 0)
-        scope_end_line = int(issue.get("scope_end_line", issue.get("line", 0)) or 0)
-        file_path = issue.get("file", "")
+    try:
+        lines = read_file_lines(issue.file)
+    except Exception:
+        return None
 
-        scope_content_hash = ""
-        if file_path and os.path.exists(file_path) and scope_start_line > 0 and scope_end_line >= scope_start_line:
-            try:
-                lines = read_file_lines(file_path)
-                if scope_end_line <= len(lines):
-                    scope_content = "".join(lines[scope_start_line - 1:scope_end_line])
-                    scope_content_hash = hashlib.sha256(scope_content.encode("utf-8")).hexdigest()
-            except Exception:
-                scope_content_hash = ""
+    start_line = int(issue.original_start_line or issue.line or 0)
+    end_line = int(issue.original_end_line or issue.line or 0)
 
-        normalized_batch.append({
-            "sonar_key": issue.get("sonar_key", "NO_KEY"),
-            "file": file_path,
-            "line": int(issue.get("line", 0) or 0),
-            "severity": issue.get("severity", ""),
-            "message": issue.get("message", ""),
-            "code_context": issue.get("code_context", ""),
-            "scope_kind": issue.get("scope_kind", "global"),
-            "scope_name": issue.get("scope_name", ""),
-            "scope_start_line": scope_start_line,
-            "scope_end_line": scope_end_line,
-            "scope_content_hash": scope_content_hash,
-        })
+    if start_line < 1 or end_line < start_line or end_line > len(lines):
+        return None
 
-    payload = {
-        "project_key": project_key,
-        "model": CACHE_MODEL,
-        "rules_hash": rules_hash(),
-        "batch": normalized_batch,
-    }
+    original_slice = "".join(lines[start_line - 1:end_line])
+    normalized_file_block = normalize_code_block(original_slice)
+    normalized_issue_block = normalize_code_block(issue.original_code)
 
-    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    if not normalized_issue_block or normalized_file_block != normalized_issue_block:
+        return None
+
+    replacement = issue.proposed_code or ""
+
+    if original_slice.endswith("\n") and replacement and not replacement.endswith("\n"):
+        replacement += "\n"
+
+    patched_content = "".join(lines[:start_line - 1]) + replacement + "".join(lines[end_line:])
+    return patched_content
 
 
-def validate_issue_patch(issue: Issue) -> tuple[bool, str]:
-    patched_content = build_patched_file_content(issue)
+def validate_issue(issue: Issue) -> tuple[bool, str]:
+    patched_content = patched_file_content(issue)
     if patched_content is None:
         return False, "original_code does not match the current file content in the expected line range"
 
@@ -624,12 +611,12 @@ def validate_issue_patch(issue: Issue) -> tuple[bool, str]:
     return True, ""
 
 
-def validate_generated_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
-    validated_issues: list[Issue] = []
+def filter_valid_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
+    valid_issues: list[Issue] = []
     dropped_issues = 0
 
     for issue in issues:
-        is_valid, reason = validate_issue_patch(issue)
+        is_valid, reason = validate_issue(issue)
 
         if not is_valid:
             dropped_issues += 1
@@ -642,9 +629,9 @@ def validate_generated_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
             )
             continue
 
-        validated_issues.append(issue)
+        valid_issues.append(issue)
 
-    return validated_issues, dropped_issues
+    return valid_issues, dropped_issues
 
 
 # Comment formatting and hidden tracking metadata helpers
@@ -668,7 +655,7 @@ def extract_issue_key(comment_text: str) -> list[str]:
     return list(keys)
 
 
-def build_hidden_ids(issue_keys: list[str]) -> str:
+def hidden_ids(issue_keys: list[str]) -> str:
     unique_keys = list(dict.fromkeys(k.strip() for k in issue_keys if k and k.strip()))
     if not unique_keys:
         return ""
@@ -684,7 +671,7 @@ def is_agent_comment(comment_text: str) -> bool:
     return CODEGUARDIAN_AGENT_MARKER in (comment_text or "")
 
 
-def build_comment_content(issues: list[Issue]) -> str:
+def comment_content(issues: list[Issue]) -> str:
     if not issues:
         return ""
 
@@ -711,7 +698,7 @@ def build_comment_content(issues: list[Issue]) -> str:
     clean_orig = clean_replacement_text(base_issue.original_code)
     clean_prop = clean_replacement_text(base_issue.proposed_code)
 
-    issue_keys = list(dict.fromkeys(build_issue_key(i) for i in issues))
+    issue_keys = list(dict.fromkeys(issue_key(i) for i in issues))
 
     all_required_imports = []
     seen_required_imports = set()
@@ -749,7 +736,7 @@ def build_comment_content(issues: list[Issue]) -> str:
                 f"```{file_extension}\n"
                 f"{clean_prop}\n"
                 f"```\n\n"
-                f"{build_hidden_ids(issue_keys)}")
+                f"{hidden_ids(issue_keys)}")
         return wrap_agent_comment(body)
 
     seen_problem_lines = set()
@@ -798,7 +785,7 @@ def build_comment_content(issues: list[Issue]) -> str:
             f"```{file_extension}\n"
             f"{clean_prop}\n"
             f"```\n\n"
-            f"{build_hidden_ids(issue_keys)}")
+            f"{hidden_ids(issue_keys)}")
 
     return wrap_agent_comment(body)
 
@@ -934,19 +921,19 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
         "INFO": 4,
     }
 
-    cleaned_issues = [
+    filtered_issues = [
         issue for issue in all_issues
         if issue.get("severity") in severity_order and os.path.exists(issue.get("file", ""))
     ]
 
-    cleaned_issues.sort(key=lambda issue: (
+    filtered_issues.sort(key=lambda issue: (
         severity_order.get(issue.get("severity"), 99),
         issue.get("file", ""),
         issue.get("line", 0),
     ))
 
     max_issues = int(os.getenv("CODEGUARDIAN_MAX_ISSUES", "30"))
-    top_issues = cleaned_issues[:max_issues]  # Limit the number of issues sent to the AI after sorting by severity
+    top_issues = filtered_issues[:max_issues]  # Limit the number of issues sent to the AI after sorting by severity
 
     for issue in top_issues:
         issue["code_context"] = get_code_context(issue["file"], issue["line"])
@@ -1035,21 +1022,36 @@ def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
     return [grouped[key] for key in ordered_keys]
 
 
-def build_batch_signature(project_key: str, batch: list[dict]) -> str:
+def batch_signature(project_key: str, batch: list[dict]) -> str:
     normalized_batch = []
 
     for issue in batch:
+        scope_start_line = int(issue.get("scope_start_line", issue.get("line", 0)) or 0)
+        scope_end_line = int(issue.get("scope_end_line", issue.get("line", 0)) or 0)
+        file_path = issue.get("file", "")
+
+        scope_content_hash = ""
+        if file_path and os.path.exists(file_path) and scope_start_line > 0 and scope_end_line >= scope_start_line:
+            try:
+                lines = read_file_lines(file_path)
+                if scope_end_line <= len(lines):
+                    scope_content = "".join(lines[scope_start_line - 1:scope_end_line])
+                    scope_content_hash = hashlib.sha256(scope_content.encode("utf-8")).hexdigest()
+            except Exception:
+                scope_content_hash = ""
+
         normalized_batch.append({
             "sonar_key": issue.get("sonar_key", "NO_KEY"),
-            "file": issue.get("file", ""),
+            "file": file_path,
             "line": int(issue.get("line", 0) or 0),
             "severity": issue.get("severity", ""),
             "message": issue.get("message", ""),
             "code_context": issue.get("code_context", ""),
             "scope_kind": issue.get("scope_kind", "global"),
             "scope_name": issue.get("scope_name", ""),
-            "scope_start_line": int(issue.get("scope_start_line", issue.get("line", 0)) or 0),
-            "scope_end_line": int(issue.get("scope_end_line", issue.get("line", 0)) or 0),
+            "scope_start_line": scope_start_line,
+            "scope_end_line": scope_end_line,
+            "scope_content_hash": scope_content_hash,
         })
 
     payload = {
@@ -1066,7 +1068,7 @@ def build_batch_signature(project_key: str, batch: list[dict]) -> str:
 def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
 
-    all_model_issues: list[Issue] = []
+    model_issues: list[Issue] = []
     total_prompt_tokens = 0
     total_response_tokens = 0
     total_tokens = 0
@@ -1076,8 +1078,6 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     batch_cache_hits = 0
     batch_cache_misses = 0
     batch_cache_changed = False
-
-    decline_pr = any(str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"} for issue in issues)
 
     batches = build_scope_batches(issues)
 
@@ -1136,8 +1136,8 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
                 {json.dumps(batch)}
             """
 
-        batch_signature = build_batch_signature(project_key, batch)
-        cached_response_text = batch_cache.get(batch_signature)
+        cache_key = batch_signature(project_key, batch)
+        cached_response_text = batch_cache.get(cache_key)
 
         response_text = None
 
@@ -1196,7 +1196,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
                 logger.error("The response from the model was: %s", response_text)
                 continue
 
-            batch_cache[batch_signature] = response_text
+            batch_cache[cache_key] = response_text
             batch_cache_changed = True
 
         expected_sonar_keys = {
@@ -1214,7 +1214,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
                 continue
             kept_batch_issues[issue.sonar_key] = issue
 
-        all_model_issues.extend(kept_batch_issues.values())
+        model_issues.extend(kept_batch_issues.values())
 
     duration = time.time() - start_time
     current_timestamp = time.time()
@@ -1273,7 +1273,7 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     except Exception as metric_error:
         logger.error(f"Failed to push metrics to Prometheus Pushgateway: {metric_error}")
 
-    logger.info("Gemini produced %s issues", len(all_model_issues))
+    logger.info("Gemini produced %s issues", len(model_issues))
 
     if total_cached_tokens:
         logger.info("Gemini total cached tokens: %s", total_cached_tokens)
@@ -1285,9 +1285,9 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     logger.info("Gemini batch cache misses: %s", batch_cache_misses)
 
     return Decision(
-        decline_pr=decline_pr,
-        issues=all_model_issues,
-        comment=f"Generated fixes for {len(all_model_issues)} Sonar findings.",
+        decline_pr=False,
+        issues=model_issues,
+        comment=f"Generated fixes for {len(model_issues)} Sonar findings.",
     )
 
 
@@ -1395,19 +1395,14 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
 
             issue_keys = extract_issue_key(raw_text)
 
-            resolved = comment.get("resolved", False)
             inline_data = comment.get("inline") or {}
-            outdated = bool(inline_data.get("outdated", False))
             file_path = (inline_data.get("path") or "").strip()
             line_to = int(inline_data.get("to") or inline_data.get("from") or 0)
 
             active_inline_comments[comment_id] = {
                 "comment_id": comment_id,
-                "resolved": resolved,
                 "inline": inline_data,
-                "outdated": outdated,
                 "issue_keys": set(issue_keys),
-                "raw_text": raw_text,
                 "file_path": file_path,
                 "line_to": line_to,
                 "content_hash": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
@@ -1615,7 +1610,7 @@ async def post_issue_group_comment(
             return False
 
         line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
-        content = build_comment_content(issues)
+        content = comment_content(issues)
 
         created = await create_inline_comment_by_rest(
             pr_id=pr_id,
@@ -1699,7 +1694,7 @@ async def synchronize_inline_comments(
         last_issue = current_group[-1]
         last_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in current_group)
 
-        same_group = (build_group_key(issue) == build_group_key(last_issue) and issue_start <= last_end + merge_gap)
+        same_group = (group_key(issue) == group_key(last_issue) and issue_start <= last_end + merge_gap)
 
         if same_group:
             current_group.append(issue)
@@ -1728,8 +1723,8 @@ async def synchronize_inline_comments(
 
         line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issue_group)
 
-        issue_keys = tuple(sorted(build_issue_key(i) for i in issue_group))
-        content = build_comment_content(issue_group)
+        issue_keys = tuple(sorted(issue_key(i) for i in issue_group))
+        content = comment_content(issue_group)
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         signature = (
@@ -1748,8 +1743,8 @@ async def synchronize_inline_comments(
             "issues": issue_group,
         })
 
-    existing_by_signature: dict[tuple, int] = {}
-    comment_ids_to_delete: set[int] = set()
+    existing: dict[tuple, int] = {}
+    to_delete: set[int] = set()
 
     for comment_id, comment_data in active_inline_comments.items():
         file_path = (comment_data.get("file_path") or "").strip()
@@ -1758,7 +1753,7 @@ async def synchronize_inline_comments(
         content_hash = comment_data.get("content_hash", "")
 
         if not file_path or not line_to or not issue_keys or not content_hash:
-            comment_ids_to_delete.add(comment_id)
+            to_delete.add(comment_id)
             continue
 
         signature = (
@@ -1768,25 +1763,25 @@ async def synchronize_inline_comments(
             content_hash,
         )
 
-        if signature in existing_by_signature:
-            comment_ids_to_delete.add(comment_id)
+        if signature in existing:
+            to_delete.add(comment_id)
             continue
 
-        existing_by_signature[signature] = comment_id
+        existing[signature] = comment_id
 
     desired_signatures = {item["signature"] for item in desired_comments}
 
-    for signature, comment_id in existing_by_signature.items():
+    for signature, comment_id in existing.items():
         if signature not in desired_signatures:
-            comment_ids_to_delete.add(comment_id)
+            to_delete.add(comment_id)
 
-    if comment_ids_to_delete:
-        await delete_comment_ids(pr_id, repo_slug, workspace, comment_ids_to_delete)
+    if to_delete:
+        await delete_comment_ids(pr_id, repo_slug, workspace, to_delete)
 
     created_comments = 0
 
     for desired in desired_comments:
-        if desired["signature"] in existing_by_signature:
+        if desired["signature"] in existing:
             continue
 
         created = await post_issue_group_comment(pr_id, repo_slug, desired["issues"], workspace)
@@ -1795,7 +1790,7 @@ async def synchronize_inline_comments(
         await asyncio.sleep(0.2)
 
     reused_comments = len(desired_comments) - created_comments
-    deleted_comments = len(comment_ids_to_delete)
+    deleted_comments = len(to_delete)
 
     logger.info(
         "Inline synchronization summary: desired=%s created=%s reused=%s deleted=%s",
@@ -1875,23 +1870,23 @@ async def main() -> None:
 
     decision = analyze_code_with_gemini(project_key, issues)
 
-    decision.issues, dropped_invalid_issues = normalize_and_deduplicate_issues(decision.issues)
-    decision.issues, dropped_patch_validation_issues = validate_generated_issues(decision.issues)
+    decision.issues, invalid_count = normalize_issues(decision.issues)
+    decision.issues, patch_invalid_count = filter_valid_issues(decision.issues)
 
     decision.decline_pr = has_blocking_findings
 
-    if dropped_invalid_issues:
-        logger.info("Dropped %s invalid issues", dropped_invalid_issues)
+    if invalid_count:
+        logger.info("Dropped %s invalid issues", invalid_count)
 
-    if dropped_patch_validation_issues:
-        logger.info("Dropped %s issues after patch validation", dropped_patch_validation_issues)
+    if patch_invalid_count:
+        logger.info("Dropped %s issues after patch validation", patch_invalid_count)
 
     logger.info(
         "Execution summary: sonar_findings=%s generated_issues=%s dropped_invalid=%s dropped_patch_validation=%s final_issues=%s blocking_findings=%s",
         len(issues),
-        len(decision.issues) + dropped_invalid_issues + dropped_patch_validation_issues,
-        dropped_invalid_issues,
-        dropped_patch_validation_issues,
+        len(decision.issues) + invalid_count + patch_invalid_count,
+        invalid_count,
+        patch_invalid_count,
         len(decision.issues),
         has_blocking_findings,
     )
