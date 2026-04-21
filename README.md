@@ -3,7 +3,7 @@
 ## Summary
 
 CodeGuardian is an automated pull request review assistant designed for CI/CD environments.
-SonarQube performs issue detection, the agent transforms and validates findings, and Gemini proposes concrete code fixes.
+SonarQube performs issue detection, the agent transforms and validates findings, and AI proposes concrete code fixes.
 Its goal is to transform static analysis findings into safe code-fix suggestions and publish them as inline comments in Bitbucket.
 
 This repository contains the main agent logic in `agent.py` and the technical documentation in the `docs/` folder.
@@ -20,7 +20,7 @@ The system clearly separates detection, generation, and publication:
 
 - SonarQube detects problems.
 - The agent decides what to process, validates results, and orchestrates the workflow.
-- Gemini proposes concrete code changes.
+- AI proposes concrete code changes.
 - Bitbucket displays the final feedback inside the pull request.
 
 This separation reduces operational risk compared to direct "LLM-only" approaches without validation barriers.
@@ -32,7 +32,7 @@ This separation reduces operational risk compared to direct "LLM-only" approache
 3. Jenkins builds a PR-context JSON file and executes `agent.py`.
 4. The agent queries SonarQube through MCP and receives findings in JSON format.
 5. The agent filters, enriches, and groups findings by code scope.
-6. Gemini generates fix proposals per batch.
+6. AI generates fix proposals per batch.
 7. The agent normalizes and validates each proposal.
 8. Valid proposals are synchronized as inline comments in Bitbucket.
 9. Execution metrics are exported to Prometheus Pushgateway.
@@ -145,50 +145,59 @@ config:
     rankSpacing: 70
     padding: 28
     htmlLabels: true
-  layout: fixed
 ---
 flowchart TB
- subgraph CI[" "]
+  subgraph CI[" "]
     direction TB
-        B["Jenkins pipeline"]
-        A["Pull request event"]
-        C["SonarQube analysis"]
-        D["Generate data.json with  PR metadata"]
+    A["Pull request event"]
+    B["Jenkins pipeline"]
+    C["SonarQube analysis"]
+    D["Generate data.json with PR metadata"]
   end
- subgraph AG[" "]
+
+  E["Agent execution"]
+
+  subgraph AG[" "]
     direction TB
-        F["Read SonarQube issues via MCP"]
-        G["Add code context and resolve scope"]
-        H["Generate proposals with AI"]
-        I["Normalize and validate suggestions"]
+    F["Read SonarQube issues via MCP"]
+    G["Add code context and resolve scope"]
+    H["Generate proposals with AI"]
+    I["Normalize and validate suggestions"]
   end
- subgraph RP[" "]
+
+  subgraph RP[" "]
     direction TB
-        K["Read PR comments via Atlassian MCP"]
-        J["Prepare Bitbucket sync"]
-        L["Compare current and desired comment state"]
-        M["Update inline comments via Bitbucket REST"]
+    J["Prepare Bitbucket sync"]
+    K["Read PR comments via Atlassian MCP"]
+    L["Compare current and desired comment state"]
+    M["Update inline comments via Bitbucket REST"]
   end
- subgraph OB[" "]
+
+  subgraph OB[" "]
     direction TB
-        O["Prometheus scrapes Pushgateway"]
-        N["Send metrics to Pushgateway"]
-        P["Grafana dashboards"]
+    N["Send metrics to Pushgateway"]
+    O["Prometheus scrapes Pushgateway"]
+    P["Grafana dashboards"]
   end
-    A --> B
-    B --> C
-    C --> D
-    F --> G
-    G --> H
-    H --> I
-    J --> K
-    K --> L
-    L --> M
-    N --> O
-    O --> P
-    D --> E["Agent execution"]
-    E --> F & N
-    I --> J
+
+  A --> B
+  B --> C
+  C --> D
+  D --> E
+
+  E --> F
+  F --> G
+  G --> H
+  H --> I
+
+  I --> J
+  J --> K
+  K --> L
+  L --> M
+
+  E --> N
+  N --> O
+  O --> P
 
      A:::pipeline
      B:::pipeline
@@ -230,42 +239,41 @@ Jenkins pipeline
 SonarQube analysis
   |
   v
-PR metadata input contract
+Generate data.json with PR metadata
   |
   v
-Run the agent on the reviewed repository
+Agent execution
   |
-  v
-Read the issues that SonarQube returned via MCP
+  +--> Read SonarQube issues via MCP
+  |      |
+  |      v
+  |   Add code context and resolve scope
+  |      |
+  |      v
+  |   Generate proposals with AI
+  |      |
+  |      v
+  |   Normalize and validate suggestions
+  |      |
+  |      v
+  |   Prepare Bitbucket sync
+  |      |
+  |      v
+  |   Read PR comments via Atlassian MCP
+  |      |
+  |      v
+  |   Compare current and desired comment state
+  |      |
+  |      v
+  |   Update inline comments via Bitbucket REST
   |
-  v
-Add nearby code context
-  |
-  v
-Ask Gemini for a fix idea
-  |
-  v
-Keep only valid suggestions
-  |
-  v
-Prepare Bitbucket sync
-  |
-  v
-Read PR comments via Atlassian MCP
-  |
-  v
-Write inline comments via Bitbucket REST
-
-Observability branch from agent execution:
-  |
-  v
-Send metrics to Pushgateway
-  |
-  v
-Prometheus scrapes Pushgateway
-  |
-  v
-Grafana dashboards
+  +--> Send metrics to Pushgateway
+         |
+         v
+     Prometheus scrapes Pushgateway
+         |
+         v
+     Grafana dashboards
 ```
 
 ## Technical documentation
