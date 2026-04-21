@@ -19,7 +19,7 @@ A prompt alone is not enough to guarantee correct code changes. Even when the mo
 - use a replacement based on stale context,
 - or introduce syntax errors.
 
-This means that a system that directly publishes model output would be too fragile for a real CI/CD workflow. For this reason, CodeGuardian validates the generated issues after the Gemini step and before the Bitbucket reporting step.
+This means that a system that directly publishes model output would be too fragile for a real CI/CD workflow. For this reason, CodeGuardian validates the generated issues after the AI step and before the Bitbucket reporting step.
 
 ---
 
@@ -38,13 +38,13 @@ These goals are intentionally practical. The system is designed to reduce obviou
 
 ## Position of Validation in the Workflow
 
-Validation happens after Gemini has returned a list of proposed issues and before those issues are synchronized back to Bitbucket.
+Validation happens after AI has returned a list of proposed issues and before those issues are synchronized back to Bitbucket.
 
 The simplified order is:
 
 1. SonarQube findings are retrieved.
-2. Findings are grouped and sent to Gemini.
-3. Gemini returns proposed issues.
+2. Findings are grouped and sent to AI.
+3. AI returns proposed issues.
 4. The agent normalizes the generated issues.
 5. The agent validates the issues.
 6. Only the surviving issues are turned into inline comments.
@@ -187,7 +187,7 @@ The function `filter_valid_issues()` applies `validate_issue()` to all generated
 
 This means validation is not only a local helper; it directly affects the final output of the system.
 
-In practice, after Gemini returns its proposals, the final list of issues may become smaller because some of them are filtered out during validation. This is expected behaviour. In fact, it is one of the indicators that the system is behaving conservatively instead of blindly trusting the model.
+In practice, after AI returns its proposals, the final list of issues may become smaller because some of them are filtered out during validation. This is expected behaviour. In fact, it is one of the indicators that the system is behaving conservatively instead of blindly trusting the model.
 
 ---
 

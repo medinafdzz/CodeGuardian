@@ -43,7 +43,7 @@ This means the system supports both:
 - machine-readable monitoring through Prometheus and Grafana,
 - and human-readable inspection through Jenkins logs.
 
-The metrics part is implemented inside `analyze_code_with_gemini()`, while the logging summaries are distributed across the analysis, validation and synchronization stages.
+The metrics part is implemented inside `analyze_code_with_AI()`, while the logging summaries are distributed across the analysis, validation and synchronization stages.
 
 ---
 
@@ -55,7 +55,7 @@ The agent uses the `prometheus_client` library and pushes data to **Prometheus P
 - `Gauge`
 - `push_to_gateway`
 
-The metrics are pushed at the end of the Gemini analysis step, once the model interaction has completed and the token counters are available.
+The metrics are pushed at the end of the AI analysis step, once the model interaction has completed and the token counters are available.
 
 ### Why Pushgateway is used
 
@@ -71,7 +71,7 @@ The current implementation defines four main metric families.
 
 ### 1. `codeguardian_analysis_latency_seconds`
 
-This metric stores the total response time of the Gemini analysis stage, measured in seconds. It is created as a `Gauge` and is set using the difference between the current time and the start time recorded before batch processing begins.
+This metric stores the total response time of the AI analysis stage, measured in seconds. It is created as a `Gauge` and is set using the difference between the current time and the start time recorded before batch processing begins.
 
 ### Why it matters
 
@@ -99,7 +99,7 @@ This metric is useful for operational visibility. It helps answer simple questio
 
 ### 3. `codeguardian_analysis_prompt_tokens`
 
-This metric stores the number of prompt tokens used during the Gemini analysis phase. The value is accumulated across batch executions.
+This metric stores the number of prompt tokens used during the AI analysis phase. The value is accumulated across batch executions.
 
 ### Why it matters
 
@@ -125,7 +125,7 @@ Response token count helps understand how large the model outputs are in practic
 
 ### 5. `codeguardian_analysis_total_tokens`
 
-This metric stores the total number of tokens used during the Gemini analysis phase. It is the broadest token metric and combines the overall token consumption of the interaction.
+This metric stores the total number of tokens used during the AI analysis phase. It is the broadest token metric and combines the overall token consumption of the interaction.
 
 ### Why it matters
 
@@ -138,7 +138,7 @@ This is the most direct metric for measuring model usage at execution level. It 
 
 ## How Metrics Are Calculated
 
-The metric calculation happens inside `analyze_code_with_gemini()`.
+The metric calculation happens inside `analyze_code_with_AI()`.
 
 ### Latency timing
 
@@ -146,7 +146,7 @@ At the beginning of the function, the agent stores:
 
 - `start_time = time.time()`
 
-Later, once all Gemini batches have been processed, it computes:
+Later, once all AI batches have been processed, it computes:
 
 - `duration = time.time() - start_time`
 
@@ -211,7 +211,7 @@ They also make historical comparisons easier when analyzing multiple runs.
 
 Even though batch cache hits and misses are not currently exported as Prometheus metrics, they are still recorded in the logs.
 
-At the end of the Gemini analysis step, the agent logs:
+At the end of the AI analysis step, the agent logs:
 
 - number of produced issues,
 - total cached tokens, when available,
@@ -239,7 +239,7 @@ The agent also logs several summaries outside the Prometheus section.
 
 ### Patch validation summary
 
-After Gemini returns its issues and the normalization step is applied, the agent validates the proposed patches. Invalid issues are dropped and logged individually with the reason.
+After AI returns its issues and the normalization step is applied, the agent validates the proposed patches. Invalid issues are dropped and logged individually with the reason.
 
 Then, the execution summary includes:
 

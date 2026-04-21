@@ -18,7 +18,7 @@ The architecture is based on five main building blocks:
 2. **Jenkins**, which orchestrates the pipeline execution.
 3. **SonarQube**, which provides the static analysis findings.
 4. **The CodeGuardian agent**, implemented in Python, which contains the orchestration and decision logic.
-5. **Gemini**, which generates fix proposals from the selected findings.
+5. **AI**, which generates fix proposals from the selected findings.
 
 In addition to these main elements, the system also uses:
 - **Atlassian Rovo MCP**, to read pull request comments from Bitbucket.
@@ -49,9 +49,9 @@ The Python agent connects to SonarQube through the MCP server and retrieves unre
 
 One of the key architectural decisions in CodeGuardian is that findings are not handled only by line proximity. Instead, the agent tries to resolve the surrounding scope of each finding, such as a function or method, and then groups findings accordingly. This makes the generated suggestions more coherent, because the model can reason about a complete scope instead of isolated lines. The current agent includes scope detection logic for Python and several brace-based languages such as Java, JavaScript, TypeScript, Go, C#, C/C++, PHP, Rust, Kotlin and Swift.
 
-### 5. Generation of fixes with Gemini
+### 5. Generation of fixes with AI
 
-After batching, the agent sends the selected findings to Gemini. The prompt is strongly constrained: the model must return valid JSON, keep the original SonarQube key, propose only real code modifications, preserve concrete types when needed, avoid unsafe shorthand refactors, and return no issue at all if the replacement is not safe enough. The current implementation also supports prompt caching and batch-level caching to reduce repeated requests and lower execution cost.
+After batching, the agent sends the selected findings to AI. The prompt is strongly constrained: the model must return valid JSON, keep the original SonarQube key, propose only real code modifications, preserve concrete types when needed, avoid unsafe shorthand refactors, and return no issue at all if the replacement is not safe enough. The current implementation also supports prompt caching and batch-level caching to reduce repeated requests and lower execution cost.
 
 ### 6. Validation of generated patches
 
@@ -91,16 +91,16 @@ The Python agent is the core of the system. It is responsible for:
 - enriching them with context,
 - resolving scope,
 - grouping issues,
-- calling Gemini,
+- calling AI,
 - validating generated patches,
 - synchronizing comments with Bitbucket,
 - and exporting metrics.
 
 This means the agent is the real decision layer of the architecture. It connects all the other components and adds the control logic needed to make the workflow reliable.
 
-## Gemini
+## AI
 
-Gemini is used as the proposal engine, not as the source of truth. In other words, the model does not decide what is wrong in the code by itself. Instead, it receives findings already detected by SonarQube and is asked to suggest small, concrete replacements. This distinction is important, because it keeps the architecture grounded and reduces hallucinations.
+AI is used as the proposal engine, not as the source of truth. In other words, the model does not decide what is wrong in the code by itself. Instead, it receives findings already detected by SonarQube and is asked to suggest small, concrete replacements. This distinction is important, because it keeps the architecture grounded and reduces hallucinations.
 
 ## Bitbucket
 
@@ -112,7 +112,7 @@ Bitbucket is both the source repository and the final interaction point for deve
 
 ## 1. Detection and generation are separated
 
-The system separates issue detection from fix generation. SonarQube detects issues, while Gemini only proposes possible fixes for those issues. This reduces the search space for the model and improves control over the output.
+The system separates issue detection from fix generation. SonarQube detects issues, while AI only proposes possible fixes for those issues. This reduces the search space for the model and improves control over the output.
 
 ## 2. Scope-based grouping instead of simple proximity
 
