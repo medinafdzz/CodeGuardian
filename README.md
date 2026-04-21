@@ -127,12 +127,7 @@ working MCP/REST integrations, and a repository context that matches the provide
 4. Run the agent entry point.
 
 ## Workflow diagram
-
-
-<picture>
-  <source srcset="docs/workflow.svg" type="image/svg+xml">
-  <img src="docs/workflow.png" alt="CodeGuardian workflow diagram">
-</picture>
+<img src="docs/workflow.png" alt="CodeGuardian workflow diagram" width="800">
 
 ## Technical documentation
 
