@@ -149,12 +149,16 @@ Return ONLY valid JSON with this shape:
   ]
 }
 """
+
+# Cache configuration
 CACHE_METADATA_PATH = os.getenv(
     "CACHE_METADATA_PATH",
     "/var/jenkins_home/codeguardian/gemini_prompt_cache.json",
 ).strip()
 CACHE_MODEL = "gemini-2.5-flash"
-CACHE_MODE = os.getenv("CACHE_MODE", "implicit").strip().lower()
+CACHE_MODE = os.getenv("CACHE_MODE", "explicit").strip().lower()
+if CACHE_MODE not in {"implicit", "explicit"}:
+    CACHE_MODE = "explicit"
 CACHE_TTL = os.getenv("CACHE_TTL", "3600s").strip()
 BATCH_CACHE_PATH = os.getenv(
     "BATCH_CACHE_PATH",
@@ -1066,6 +1070,8 @@ def batch_signature(project_key: str, batch: list[dict]) -> str:
 
 def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
+
+    logger.info("Gemini prompt cache mode: %s", CACHE_MODE)
 
     model_issues: list[Issue] = []
     total_prompt_tokens = 0
