@@ -14,6 +14,7 @@ import urllib.request
 import urllib.error
 import httpx
 import hashlib
+import ast
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -561,6 +562,78 @@ def build_group_key(issue: Issue) -> tuple[str, str, str]:
         normalize_code_block(clean_replacement_text(issue.original_code or "")),
         normalize_code_block(clean_replacement_text(issue.proposed_code or "")),
     )
+
+
+# Validation blocks to ensure code changes
+def build_patched_file_content(issue: Issue) -> str | None:
+    if not issue.file or not os.path.exists(issue.file):
+        return None
+
+    try:
+        lines = read_file_lines(issue.file)
+    except Exception:
+        return None
+
+    start_line = int(issue.original_start_line or issue.line or 0)
+    end_line = int(issue.original_end_line or issue.line or 0)
+
+    if start_line < 1 or end_line < start_line or end_line > len(lines):
+        return None
+
+    original_slice = "".join(lines[start_line - 1:end_line])
+    normalized_file_block = normalize_code_block(original_slice)
+    normalized_issue_block = normalize_code_block(issue.original_code)
+
+    if not normalized_issue_block or normalized_file_block != normalized_issue_block:
+        return None
+
+    replacement = issue.proposed_code or ""
+
+    if original_slice.endswith("\n") and replacement and not replacement.endswith("\n"):
+        replacement += "\n"
+
+    patched_content = ("".join(lines[:start_line - 1]) + replacement + "".join(lines[end_line:]))
+
+    return patched_content
+
+
+def validate_issue_patch(issue: Issue) -> tuple[bool, str]:
+    patched_content = build_patched_file_content(issue)
+    if patched_content is None:
+        return False, "original_code does not match the current file content in the expected line range"
+
+    language = detect_language(issue.file)
+
+    if language == "python":
+        try:
+            ast.parse(patched_content)
+        except SyntaxError as e:
+            return False, f"python syntax validation failed: {e}"
+
+    return True, ""
+
+
+def validate_generated_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
+    validated_issues: list[Issue] = []
+    dropped_issues = 0
+
+    for issue in issues:
+        is_valid, reason = validate_issue_patch(issue)
+
+        if not is_valid:
+            dropped_issues += 1
+            logger.info(
+                "Dropped issue %s for file %s line %s after patch validation: %s",
+                issue.sonar_key,
+                issue.file,
+                issue.line,
+                reason,
+            )
+            continue
+
+        validated_issues.append(issue)
+
+    return validated_issues, dropped_issues
 
 
 # Comment formatting and hidden tracking metadata helpers
@@ -1740,14 +1813,20 @@ async def main() -> None:
 
     logger.info(f"Relevant issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
 
+    has_blocking_findings = any(str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"} for issue in issues)
+
     decision = analyze_code_with_gemini(project_key, issues)
 
     decision.issues, dropped_invalid_issues = normalize_and_deduplicate_issues(decision.issues)
+    decision.issues, dropped_patch_validation_issues = validate_generated_issues(decision.issues)
 
-    decision.decline_pr = any(issue.severity in {"BLOCKER", "CRITICAL"} for issue in decision.issues)
+    decision.decline_pr = has_blocking_findings
 
     if dropped_invalid_issues:
         logger.info("Dropped %s invalid issues", dropped_invalid_issues)
+
+    if dropped_patch_validation_issues:
+        logger.info("Dropped %s issues after patch validation", dropped_patch_validation_issues)
 
     await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
 
