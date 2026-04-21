@@ -70,7 +70,6 @@ class Issue(BaseModel):
 class Decision(BaseModel):
     decline_pr: bool
     issues: list[Issue]
-    comment: str
 
 
 @dataclass(frozen=True)
@@ -1287,7 +1286,6 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     return Decision(
         decline_pr=False,
         issues=model_issues,
-        comment=f"Generated fixes for {len(model_issues)} Sonar findings.",
     )
 
 
@@ -1400,8 +1398,6 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
             line_to = int(inline_data.get("to") or inline_data.get("from") or 0)
 
             active_inline_comments[comment_id] = {
-                "comment_id": comment_id,
-                "inline": inline_data,
                 "issue_keys": set(issue_keys),
                 "file_path": file_path,
                 "line_to": line_to,
@@ -1857,9 +1853,7 @@ async def main() -> None:
         auto_decision = Decision(
             decline_pr=False,
             issues=[],
-            comment=
-            "CodeGuardian analyzed this pull request and did not detect any relevant issues in the modified code.",
-        )
+            )
 
         await report_to_bitbucket(pr_id, repo_slug, workspace, auto_decision)
         return
