@@ -565,36 +565,47 @@ def build_group_key(issue: Issue) -> tuple[str, str, str]:
 
 
 # Validation blocks to ensure code changes
-def build_patched_file_content(issue: Issue) -> str | None:
-    if not issue.file or not os.path.exists(issue.file):
-        return None
+def build_batch_signature(project_key: str, batch: list[dict]) -> str:
+    normalized_batch = []
 
-    try:
-        lines = read_file_lines(issue.file)
-    except Exception:
-        return None
+    for issue in batch:
+        scope_start_line = int(issue.get("scope_start_line", issue.get("line", 0)) or 0)
+        scope_end_line = int(issue.get("scope_end_line", issue.get("line", 0)) or 0)
+        file_path = issue.get("file", "")
 
-    start_line = int(issue.original_start_line or issue.line or 0)
-    end_line = int(issue.original_end_line or issue.line or 0)
+        scope_content_hash = ""
+        if file_path and os.path.exists(file_path) and scope_start_line > 0 and scope_end_line >= scope_start_line:
+            try:
+                lines = read_file_lines(file_path)
+                if scope_end_line <= len(lines):
+                    scope_content = "".join(lines[scope_start_line - 1:scope_end_line])
+                    scope_content_hash = hashlib.sha256(scope_content.encode("utf-8")).hexdigest()
+            except Exception:
+                scope_content_hash = ""
 
-    if start_line < 1 or end_line < start_line or end_line > len(lines):
-        return None
+        normalized_batch.append({
+            "sonar_key": issue.get("sonar_key", "NO_KEY"),
+            "file": file_path,
+            "line": int(issue.get("line", 0) or 0),
+            "severity": issue.get("severity", ""),
+            "message": issue.get("message", ""),
+            "code_context": issue.get("code_context", ""),
+            "scope_kind": issue.get("scope_kind", "global"),
+            "scope_name": issue.get("scope_name", ""),
+            "scope_start_line": scope_start_line,
+            "scope_end_line": scope_end_line,
+            "scope_content_hash": scope_content_hash,
+        })
 
-    original_slice = "".join(lines[start_line - 1:end_line])
-    normalized_file_block = normalize_code_block(original_slice)
-    normalized_issue_block = normalize_code_block(issue.original_code)
+    payload = {
+        "project_key": project_key,
+        "model": CACHE_MODEL,
+        "rules_hash": rules_hash(),
+        "batch": normalized_batch,
+    }
 
-    if not normalized_issue_block or normalized_file_block != normalized_issue_block:
-        return None
-
-    replacement = issue.proposed_code or ""
-
-    if original_slice.endswith("\n") and replacement and not replacement.endswith("\n"):
-        replacement += "\n"
-
-    patched_content = ("".join(lines[:start_line - 1]) + replacement + "".join(lines[end_line:]))
-
-    return patched_content
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def validate_issue_patch(issue: Issue) -> tuple[bool, str]:
@@ -1399,6 +1410,7 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
                 "raw_text": raw_text,
                 "file_path": file_path,
                 "line_to": line_to,
+                "content_hash": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
             }
 
         return active_inline_comments
@@ -1487,8 +1499,24 @@ async def create_inline_comment_by_rest(
     except urllib.error.HTTPError as e:
         if e.code in (200, 201):
             return True
+        logger.error(
+            "Failed to create inline comment by REST: status=%s repo=%s pr=%s file=%s line=%s",
+            e.code,
+            repo_slug,
+            pr_id,
+            file_path,
+            line_to,
+        )
         return False
-    except Exception:
+    except Exception as e:
+        logger.error(
+            "Unexpected error creating inline comment by REST: repo=%s pr=%s file=%s line=%s error=%s",
+            repo_slug,
+            pr_id,
+            file_path,
+            line_to,
+            e,
+        )
         return False
 
 
@@ -1519,8 +1547,22 @@ async def delete_inline_comment_by_rest(
     except urllib.error.HTTPError as e:
         if e.code in (200, 204):
             return True
+        logger.error(
+            "Failed to delete inline comment by REST: status=%s repo=%s pr=%s comment_id=%s",
+            e.code,
+            repo_slug,
+            pr_id,
+            comment_id,
+        )
         return False
-    except Exception:
+    except Exception as e:
+        logger.error(
+            "Unexpected error deleting inline comment by REST: repo=%s pr=%s comment_id=%s error=%s",
+            repo_slug,
+            pr_id,
+            comment_id,
+            e,
+        )
         return False
 
 
@@ -1687,11 +1729,14 @@ async def synchronize_inline_comments(
         line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issue_group)
 
         issue_keys = tuple(sorted(build_issue_key(i) for i in issue_group))
+        content = build_comment_content(issue_group)
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         signature = (
             base_issue.file,
             line_end,
             issue_keys,
+            content_hash,
         )
 
         if signature in seen_desired_signatures:
@@ -1710,8 +1755,9 @@ async def synchronize_inline_comments(
         file_path = (comment_data.get("file_path") or "").strip()
         line_to = int(comment_data.get("line_to") or 0)
         issue_keys = tuple(sorted(comment_data.get("issue_keys") or []))
+        content_hash = comment_data.get("content_hash", "")
 
-        if not file_path or not line_to or not issue_keys:
+        if not file_path or not line_to or not issue_keys or not content_hash:
             comment_ids_to_delete.add(comment_id)
             continue
 
@@ -1719,6 +1765,7 @@ async def synchronize_inline_comments(
             file_path,
             line_to,
             issue_keys,
+            content_hash,
         )
 
         if signature in existing_by_signature:
@@ -1746,6 +1793,17 @@ async def synchronize_inline_comments(
         if created:
             created_comments += 1
         await asyncio.sleep(0.2)
+
+    reused_comments = len(desired_comments) - created_comments
+    deleted_comments = len(comment_ids_to_delete)
+
+    logger.info(
+        "Inline synchronization summary: desired=%s created=%s reused=%s deleted=%s",
+        len(desired_comments),
+        created_comments,
+        reused_comments,
+        deleted_comments,
+    )
 
     return created_comments
 
@@ -1827,6 +1885,16 @@ async def main() -> None:
 
     if dropped_patch_validation_issues:
         logger.info("Dropped %s issues after patch validation", dropped_patch_validation_issues)
+
+    logger.info(
+        "Execution summary: sonar_findings=%s generated_issues=%s dropped_invalid=%s dropped_patch_validation=%s final_issues=%s blocking_findings=%s",
+        len(issues),
+        len(decision.issues) + dropped_invalid_issues + dropped_patch_validation_issues,
+        dropped_invalid_issues,
+        dropped_patch_validation_issues,
+        len(decision.issues),
+        has_blocking_findings,
+    )
 
     await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
 
