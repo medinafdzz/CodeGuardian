@@ -1,92 +1,825 @@
+# Standard imports, third-party dependencies and logging configuration
 import argparse
 import json
 import asyncio
 import os
 import sys
+from functools import lru_cache
 import google.genai as genai
 import logging
 import time
+import re
+import base64
+import urllib.request
+import urllib.error
+import httpx
+import hashlib
+import ast
+from pathlib import Path
+from datetime import datetime, timezone
+from dataclasses import dataclass
 from mcp.types import CallToolResult  # Library to manage the results of the MCP tools
+from contextlib import asynccontextmanager
+from mcp.client.streamable_http import streamable_http_client
 from google.genai import (
-    types,
-)  # Library to manage the configuration and types for the Gemini model API
+    types,)  # Library to manage the configuration and types for the Gemini model API
 from mcp import (
     ClientSession,
     StdioServerParameters,
 )  # Library to manage the client session with the MCP tools
 from mcp.client.stdio import (
-    stdio_client,
-)  # Library to interact with the MCP tools using standard input/output
-from pydantic import BaseModel  # Library for json formating and validation
+    stdio_client,)  # Library to interact with the MCP tools using standard input/output
+from pydantic import BaseModel, Field  # Library for json formating and validation
 from prometheus_client import (
     CollectorRegistry,
     Gauge,
     push_to_gateway,
-)  # Libraries for Prometheus metrics
-
-
-# Configure logging to show timestamps and log levels for better debugging and monitoring
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    stream=sys.stdout,  # added because avoid the 2> dev/null in Jenkins to show the logs
 )
 
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    stream=sys.stdout,
+)
+
+logger = logging.getLogger("codeguardian")
+logger.setLevel(logging.INFO)
 
 logging.getLogger("google").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
-# -- DATA MODELS --
+# Core models, custom exceptions and global constants used by the agent
 class Issue(BaseModel):
+    sonar_key: str
     file: str
     target_type: str
     target_name: str
     line: int
+    original_start_line: int | None = None
+    original_end_line: int | None = None
     problem: str
     severity: str
     solution: str
+    original_code: str
     proposed_code: str
+    required_imports: list[str] = Field(default_factory=list)
 
 
 class Decision(BaseModel):
     decline_pr: bool
     issues: list[Issue]
-    comment: str
 
 
-# -- CLEANING AND EXTRACTING FUNCTIONS --
-# Function that loads the json file received from webhook and extract the context
-def load_webhook_data(filepath: str) -> tuple[str, str]:
-    # Load the JSON file
+@dataclass(frozen=True)
+class ScopeInfo:
+    kind: str
+    name: str
+    start_line: int
+    end_line: int
+
+
+class IssueBatchDecision(BaseModel):
+    issues: list[Issue]
+
+
+class AgentExecutionError(Exception):
+    """Raised when the agent cannot complete a required execution step."""
+
+
+CODEGUARDIAN_SUMMARY_TITLE = "**CodeGuardian Analysis Summary**"
+CODEGUARDIAN_AGENT_MARKER = "<!-- CodeGuardian-Agent -->"
+ATLASSIAN_ROVO_MCP_URL = "https://mcp.atlassian.com/v1/mcp"
+REVIEW_RULES = """
+You are reviewing SonarQube findings and must return only valid JSON.
+
+Rules:
+- Keep the exact sonar_key from the input.
+- proposed_code must directly replace original_code.
+- Use the smallest valid replacement that compiles or parses in place.
+- Do not invent APIs, symbols, imports, or variables unless strictly required.
+- Keep formatting and indentation consistent with the code context.
+- original_code must be the full replaceable block if a larger block is needed.
+- Use real multiline code, not literal '\\n'.
+- If the code is already correct, already handled, already uses the proper construct, or no code change is required, return no issue for that finding.
+- Never return an issue when original_code and proposed_code would be identical.
+- Do not emit issues for false positives, already-fixed code, or findings that only justify an explanation without a code change.
+- Only return issues that require a real code modification.
+- proposed_code must contain only the replacement block for original_code.
+- Do not prepend or append import statements to proposed_code unless original_code itself includes the import section.
+- If the fix requires new imports outside the replaceable block, list them in required_imports.
+- required_imports must contain only concrete import lines exactly as they should appear in the file.
+- If no additional imports are required, return an empty required_imports array.
+- Prefer the most explicit safe form over shorthand syntax when type inference may be ambiguous.
+- Do not use constructor references, method references, or abbreviated syntax unless the replacement is unquestionably type-safe in the given code.
+- Preserve existing concrete generic types exactly.
+- If there is any risk that the proposed replacement may not compile, return no issue for that finding.
+- Never replace working code with a stylistic refactor unless the replacement is clearly safer and compile-safe.
+
+For function or method batches:
+- return exactly one combined issue object only if a real code change is needed
+- summarize all covered findings inside "problem" as bullet points
+- summarize all applied changes inside "solution" as bullet points
+- set original_start_line and original_end_line to cover the full scope
+- set original_code to the full scope before changes
+- set proposed_code to the full scope after applying all fixes
+- use the sonar_key of the first covered finding in the batch
+- merge and deduplicate all needed imports into required_imports
+- if no real fix is needed, return an empty issues list
+
+Return ONLY valid JSON with this shape:
+{
+  "issues": [
+    {
+      "sonar_key": "...",
+      "file": "...",
+      "target_type": "...",
+      "target_name": "...",
+      "line": 0,
+      "original_start_line": 0,
+      "original_end_line": 0,
+      "problem": "...",
+      "severity": "...",
+      "solution": "...",
+      "original_code": "...",
+      "proposed_code": "...",
+      "required_imports": []
+    }
+  ]
+}
+"""
+CACHE_METADATA_PATH = os.getenv(
+    "CACHE_METADATA_PATH",
+    "/var/jenkins_home/codeguardian/gemini_prompt_cache.json",
+).strip()
+CACHE_MODEL = "gemini-2.5-flash"
+CACHE_MODE = os.getenv("CACHE_MODE", "implicit").strip().lower()
+CACHE_TTL = os.getenv("CACHE_TTL", "3600s").strip()
+BATCH_CACHE_PATH = os.getenv(
+    "BATCH_CACHE_PATH",
+    "/var/jenkins_home/codeguardian/gemini_batch_cache.json",
+).strip()
+BATCH_CACHE_MAX_AGE_SECONDS = int(os.getenv("BATCH_CACHE_MAX_AGE_SECONDS", "86400"))  # 1 day cache for batch results
+
+
+# Gemini cache persistence helpers for prompt reuse across executions
+def rules_hash() -> str:
+    return hashlib.sha256(REVIEW_RULES.encode("utf-8")).hexdigest()
+
+
+def load_cache_metadata() -> dict | None:
+    path = Path(CACHE_METADATA_PATH)
+
+    if not path.exists():
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def save_cache_metadata(data: dict) -> None:
+    path = Path(CACHE_METADATA_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def cache_meta_valid(metadata: dict | None) -> bool:
+    if not metadata:
+        return False
+
+    if metadata.get("model") != CACHE_MODEL:
+        return False
+
+    if metadata.get("ttl") != CACHE_TTL:
+        return False
+
+    if metadata.get("rules_hash") != rules_hash():
+        return False
+
+    expire_time = metadata.get("expire_time")
+    if not expire_time:
+        return False
+
+    try:
+        expires_at = datetime.fromisoformat(expire_time.replace("Z", "+00:00"))
+    except Exception:
+        return False
+
+    return expires_at > datetime.now(timezone.utc)
+
+
+def load_batch_cache() -> dict:
+    path = Path(BATCH_CACHE_PATH)
+
+    if not path.exists():
+        return {}
+
+    try:
+        file_age_seconds = time.time() - path.stat().st_mtime
+        if file_age_seconds > BATCH_CACHE_MAX_AGE_SECONDS:
+            path.unlink(missing_ok=True)
+            logger.info("Deleted expired Gemini batch cache")
+            return {}
+    except Exception:
+        return {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_batch_cache(data: dict) -> None:
+    path = Path(BATCH_CACHE_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# Atlassian Rovo MCP connection helpers using an authenticated HTTP client
+def get_atlassian_mcp_url() -> str:
+    return (os.getenv("ATLASSIAN_MCP_URL") or ATLASSIAN_ROVO_MCP_URL).strip()
+
+
+def get_atlassian_mcp_auth() -> httpx.Auth:
+    auth_header = (os.getenv("ATLASSIAN_MCP_AUTH_HEADER") or "").strip()
+
+    if not auth_header:
+        raise AgentExecutionError("Missing ATLASSIAN_MCP_AUTH_HEADER for Atlassian Rovo MCP")
+
+    if auth_header.startswith("Basic "):
+        token = auth_header[len("Basic "):].strip()
+        try:
+            decoded = base64.b64decode(token).decode("utf-8")
+            username, password = decoded.split(":", 1)
+        except Exception as e:
+            raise AgentExecutionError("Invalid Basic auth format in ATLASSIAN_MCP_AUTH_HEADER") from e
+
+        return httpx.BasicAuth(username, password)
+
+    if auth_header.startswith("Bearer "):
+        token = auth_header[len("Bearer "):].strip()
+
+        class BearerAuth(httpx.Auth):
+
+            def auth_flow(self, request):
+                request.headers["Authorization"] = f"Bearer {token}"
+                yield request
+
+        return BearerAuth()
+
+    raise AgentExecutionError("Unsupported ATLASSIAN_MCP_AUTH_HEADER scheme")
+
+
+@asynccontextmanager
+async def atlassian_rovo_session():
+    async with httpx.AsyncClient(
+            auth=get_atlassian_mcp_auth(),
+            follow_redirects=True,
+    ) as custom_client:
+        async with streamable_http_client(
+                get_atlassian_mcp_url(),
+                http_client=custom_client,
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
+
+
+# Generic file reading and text normalization helpers
+@lru_cache(maxsize=256)
+def read_file_lines(filepath: str) -> list[str]:
+    if not os.path.exists(filepath):
+        raise FileNotFoundError("File not found.")
+    with open(filepath, "r", encoding="utf-8") as file:
+        return file.readlines()
+
+
+def clean_replacement_text(value: str) -> str:
+    return value.replace('\\n', '\n').strip('`').strip()
+
+
+def normalize_code_block(text: str) -> str:
+    if not text:
+        return ""
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").strip().splitlines()).strip()
+
+
+# Source code structure helpers to detect language and affected scope
+def detect_language(filepath: str) -> str:
+    ext = os.path.splitext(filepath)[1].lower()
+    mapping = {
+        ".py": "python",
+        ".java": "java",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".go": "go",
+        ".cs": "csharp",
+        ".cpp": "cpp",
+        ".cxx": "cpp",
+        ".cc": "cpp",
+        ".c": "c",
+        ".php": "php",
+        ".rb": "ruby",
+        ".rs": "rust",
+        ".kt": "kotlin",
+        ".swift": "swift",
+    }
+    return mapping.get(ext, "unknown")
+
+
+def resolve_scope_with_parser(filepath: str, line_number: int, language: str) -> ScopeInfo:
+
+    lines = read_file_lines(filepath)
+
+    if not lines:
+        return ScopeInfo("global", "", line_number, line_number)
+
+    line_number = max(1, min(line_number, len(lines)))
+
+    if language == "python":
+        for start_idx in range(line_number - 1, -1, -1):
+            match = re.match(
+                r"^([ \t]*)(?:async\s+def|def)\s+([A-Za-z_]\w*)\s*\(",
+                lines[start_idx],
+            )
+            if not match:
+                continue
+
+            base_indent = len(match.group(1).replace("\t", "    "))
+            end_line = len(lines)
+
+            for end_idx in range(start_idx + 1, len(lines)):
+                candidate = lines[end_idx]
+                stripped = candidate.strip()
+
+                if not stripped:
+                    continue
+
+                candidate_indent = len(candidate[:len(candidate) - len(candidate.lstrip(" \t"))].replace("\t", "    "))
+
+                if candidate_indent <= base_indent:
+                    end_line = end_idx
+                    break
+
+            if start_idx + 1 <= line_number <= end_line:
+                return ScopeInfo("function", match.group(2), start_idx + 1, end_line)
+
+        return ScopeInfo("global", "", line_number, line_number)
+
+    if language not in {
+            "java",
+            "javascript",
+            "typescript",
+            "go",
+            "csharp",
+            "cpp",
+            "c",
+            "php",
+            "rust",
+            "kotlin",
+            "swift",
+    }:
+        return ScopeInfo("global", "", line_number, line_number)
+
+    scope_kind = "method" if language in {"java", "csharp", "kotlin", "swift", "php"} else "function"
+
+    for start_idx in range(line_number - 1, -1, -1):
+        signature_parts = []
+        open_brace_line = None
+
+        for cursor in range(start_idx, min(len(lines), start_idx + 6)):
+            stripped = lines[cursor].strip()
+
+            if not stripped and not signature_parts:
+                break
+
+            signature_parts.append(stripped)
+
+            if "{" in stripped:
+                open_brace_line = cursor
+                break
+
+            if ";" in stripped:
+                break
+
+        if open_brace_line is None:
+            continue
+
+        signature_text = " ".join(signature_parts).strip()
+
+        if "(" not in signature_text or ")" not in signature_text:
+            continue
+
+        if re.match(
+                r"^(if|for|foreach|while|switch|catch|else|do|try|using|lock|with|synchronized)\b",
+                signature_text,
+        ):
+            continue
+
+        if re.search(r"\bnew\s+[A-Za-z_][\w$]*\s*\([^()]*\)\s*\{", signature_text):
+            continue
+
+        name_match = re.search(
+            r"([A-Za-z_][\w$]*)\s*\([^()]*\)\s*(?:throws\b[^{}]*)?\{",
+            signature_text,
+        )
+
+        if not name_match and language in {"javascript", "typescript"}:
+            name_match = re.search(
+                r"([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{",
+                signature_text,
+            )
+
+        if not name_match:
+            continue
+
+        scope_name = name_match.group(1)
+        if scope_name in {
+                "if",
+                "for",
+                "foreach",
+                "while",
+                "switch",
+                "catch",
+                "else",
+                "do",
+                "try",
+                "using",
+                "lock",
+                "with",
+                "synchronized",
+        }:
+            continue
+
+        brace_depth = 0
+        entered_scope = False
+        end_line = None
+
+        for end_idx in range(open_brace_line, len(lines)):
+            brace_depth += lines[end_idx].count("{")
+            brace_depth -= lines[end_idx].count("}")
+
+            if end_idx + 1 >= line_number and brace_depth > 0:
+                entered_scope = True
+
+            if brace_depth == 0:
+                end_line = end_idx + 1
+                break
+
+        if entered_scope and end_line is not None and start_idx + 1 <= line_number <= end_line:
+            return ScopeInfo(scope_kind, scope_name, start_idx + 1, end_line)
+
+    return ScopeInfo("global", "", line_number, line_number)
+
+
+def resolve_scope(filepath: str, line_number: int) -> ScopeInfo:
+    language = detect_language(filepath)
+
+    try:
+        if language == "unknown":
+            return ScopeInfo("global", "", line_number, line_number)
+
+        return resolve_scope_with_parser(filepath, line_number, language)
+
+    except Exception:
+        return ScopeInfo("global", "", line_number, line_number)
+
+
+# Issue normalization, grouping and deduplication helpers
+def issue_key(issue: Issue) -> str:
+    if issue.sonar_key and issue.sonar_key != "NO_KEY":
+        return issue.sonar_key
+    return f"{issue.file}:{issue.line}:{issue.target_name}:{issue.severity}"
+
+
+def normalize_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
+    prepared_issues = []
+    dropped_invalid_issues = 0
+    seen_sonar_keys = set()
+
+    for issue in issues:
+        issue.file = (issue.file or "").strip()
+        issue.target_type = (issue.target_type or "").strip()
+        issue.target_name = (issue.target_name or "").strip()
+        issue.problem = re.sub(r"\s*-\s+", "\n- ", (issue.problem or "").strip()).lstrip("\n")
+        issue.severity = (issue.severity or "").strip().upper()
+        issue.solution = re.sub(r"\s*-\s+", "\n- ", (issue.solution or "").strip()).lstrip("\n")
+        issue.original_code = clean_replacement_text(issue.original_code or "")
+        issue.proposed_code = clean_replacement_text(issue.proposed_code or "")
+
+        normalized_original_code = normalize_code_block(issue.original_code)
+        normalized_proposed_code = normalize_code_block(issue.proposed_code)
+
+        if (not normalized_original_code or not normalized_proposed_code or
+                normalized_original_code == normalized_proposed_code):
+            dropped_invalid_issues += 1
+            continue
+
+        if issue.original_start_line is None:
+            issue.original_start_line = issue.line
+
+        if issue.original_end_line is None:
+            issue.original_end_line = issue.line
+
+        if issue.line < 1:
+            issue.line = 1
+
+        if issue.original_start_line is not None and issue.original_start_line < 1:
+            issue.original_start_line = 1
+
+        if issue.original_end_line is not None and issue.original_end_line < 1:
+            issue.original_end_line = 1
+
+        if issue.original_start_line and issue.original_end_line:
+            if issue.original_end_line < issue.original_start_line:
+                issue.original_start_line, issue.original_end_line = issue.original_end_line, issue.original_start_line
+
+        if not issue.file or not issue.problem or not issue.solution or not issue.severity:
+            dropped_invalid_issues += 1
+            continue
+
+        sonar_issue_key = issue_key(issue)
+
+        if issue.sonar_key and issue.sonar_key != "NO_KEY":
+            if sonar_issue_key in seen_sonar_keys:
+                continue
+            seen_sonar_keys.add(sonar_issue_key)
+
+        prepared_issues.append(issue)
+
+    return prepared_issues, dropped_invalid_issues
+
+
+def group_key(issue: Issue) -> tuple[str, str, str]:
+    return (
+        issue.file,
+        normalize_code_block(clean_replacement_text(issue.original_code or "")),
+        normalize_code_block(clean_replacement_text(issue.proposed_code or "")),
+    )
+
+
+# Validation blocks to ensure code changes
+def patched_file_content(issue: Issue) -> str | None:
+    if not issue.file or not os.path.exists(issue.file):
+        return None
+
+    try:
+        lines = read_file_lines(issue.file)
+    except Exception:
+        return None
+
+    start_line = int(issue.original_start_line or issue.line or 0)
+    end_line = int(issue.original_end_line or issue.line or 0)
+
+    if start_line < 1 or end_line < start_line or end_line > len(lines):
+        return None
+
+    original_slice = "".join(lines[start_line - 1:end_line])
+    normalized_file_block = normalize_code_block(original_slice)
+    normalized_issue_block = normalize_code_block(issue.original_code)
+
+    if not normalized_issue_block or normalized_file_block != normalized_issue_block:
+        return None
+
+    replacement = issue.proposed_code or ""
+
+    if original_slice.endswith("\n") and replacement and not replacement.endswith("\n"):
+        replacement += "\n"
+
+    patched_content = "".join(lines[:start_line - 1]) + replacement + "".join(lines[end_line:])
+    return patched_content
+
+
+def validate_issue(issue: Issue) -> tuple[bool, str]:
+    patched_content = patched_file_content(issue)
+    if patched_content is None:
+        return False, "original_code does not match the current file content in the expected line range"
+
+    language = detect_language(issue.file)
+
+    if language == "python":
+        try:
+            ast.parse(patched_content)
+        except SyntaxError as e:
+            return False, f"python syntax validation failed: {e}"
+
+    return True, ""
+
+
+def filter_valid_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
+    valid_issues: list[Issue] = []
+    dropped_issues = 0
+
+    for issue in issues:
+        is_valid, reason = validate_issue(issue)
+
+        if not is_valid:
+            dropped_issues += 1
+            logger.info(
+                "Dropped issue %s for file %s line %s after patch validation: %s",
+                issue.sonar_key,
+                issue.file,
+                issue.line,
+                reason,
+            )
+            continue
+
+        valid_issues.append(issue)
+
+    return valid_issues, dropped_issues
+
+
+# Comment formatting and hidden tracking metadata helpers
+def extract_issue_key(comment_text: str) -> list[str]:
+    keys = set()
+
+    # 1) Search for ID format
+    blocks = re.findall(r"<!--\s*CodeGuardian-IDs?:\s*([\s\S]*?)-->", comment_text, flags=re.IGNORECASE)
+
+    # 2) Extract keys from the founded blocks of IDs
+    for block in blocks:
+        for key in re.findall(r"\bID\s*:\s*([^\s<,]+)", block, flags=re.IGNORECASE):
+            keys.add(key.strip())
+
+        # 3) Separte the ids by comma
+        for legacy in re.split(r"[, \n\r\t]+", block):
+            legacy = legacy.strip()
+            if legacy and not legacy.upper().startswith("ID:"):
+                keys.add(legacy)
+
+    return list(keys)
+
+
+def hidden_ids(issue_keys: list[str]) -> str:
+    unique_keys = list(dict.fromkeys(k.strip() for k in issue_keys if k and k.strip()))
+    if not unique_keys:
+        return ""
+    ids_lines = "\n".join(f"ID: {k}" for k in unique_keys)
+    return f"<!-- CodeGuardian-IDs:\n{ids_lines}\n-->"
+
+
+def wrap_agent_comment(body: str) -> str:
+    return f"{CODEGUARDIAN_AGENT_MARKER}\n{body}"
+
+
+def is_agent_comment(comment_text: str) -> bool:
+    return CODEGUARDIAN_AGENT_MARKER in (comment_text or "")
+
+
+def comment_content(issues: list[Issue]) -> str:
+    if not issues:
+        return ""
+
+    issues = sorted(
+        issues,
+        key=lambda i: (
+            int(getattr(i, "original_start_line", i.line) or i.line),
+            int(getattr(i, "original_end_line", i.line) or i.line),
+            i.severity,
+            i.problem,
+        ),
+    )
+
+    base_issue = max(
+        issues,
+        key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
+            getattr(i, "original_start_line", i.line) or i.line),
+    )
+
+    min_line = min(int(getattr(i, "original_start_line", i.line) or i.line) for i in issues)
+    max_line = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
+
+    file_extension = base_issue.file.split(".")[-1] if "." in base_issue.file else "txt"
+    clean_orig = clean_replacement_text(base_issue.original_code)
+    clean_prop = clean_replacement_text(base_issue.proposed_code)
+
+    issue_keys = list(dict.fromkeys(issue_key(i) for i in issues))
+
+    all_required_imports = []
+    seen_required_imports = set()
+
+    for issue in issues:
+        for required_import in getattr(issue, "required_imports", []) or []:
+            normalized_required_import = (required_import or "").strip()
+            if not normalized_required_import:
+                continue
+            if normalized_required_import in seen_required_imports:
+                continue
+            seen_required_imports.add(normalized_required_import)
+            all_required_imports.append(normalized_required_import)
+
+    imports_block = ""
+    if all_required_imports:
+        imports_block = ("**Additional required imports:**\n"
+                         f"```{file_extension}\n" +
+                         "\n".join(required_import for required_import in all_required_imports) + "\n```\n\n")
+
+    if len(issues) == 1:
+        issue = issues[0]
+        body = (f"### Code Issue\n\n"
+                f"**File:** {issue.file}\n\n"
+                f"**Lines:** {min_line}-{max_line}\n\n"
+                f"**Severity:** {issue.severity}\n\n"
+                f"**Problems:**\n\n{issue.problem}\n\n"
+                f"**Solutions:**\n\n{issue.solution}\n\n"
+                f"{imports_block}"
+                f"**Block to substitute:**\n"
+                f"```{file_extension}\n"
+                f"{clean_orig}\n"
+                f"```\n\n"
+                f"**Proposed Code:**\n"
+                f"```{file_extension}\n"
+                f"{clean_prop}\n"
+                f"```\n\n"
+                f"{hidden_ids(issue_keys)}")
+        return wrap_agent_comment(body)
+
+    seen_problem_lines = set()
+    problem_lines = []
+
+    for issue in issues:
+        problem_line = f"- Line {issue.line} ({issue.severity}): {issue.problem}"
+        normalized_problem_line = problem_line.strip().lower()
+
+        if normalized_problem_line in seen_problem_lines:
+            continue
+
+        seen_problem_lines.add(normalized_problem_line)
+        problem_lines.append(problem_line)
+
+    combined_problems = "\n".join(problem_lines)
+
+    unique_solutions = []
+    seen_solutions = set()
+
+    for issue in issues:
+        normalized_solution = (issue.solution or "").strip().lower()
+        if normalized_solution in seen_solutions:
+            continue
+        seen_solutions.add(normalized_solution)
+        unique_solutions.append(issue.solution.strip())
+
+    if len(unique_solutions) == 1:
+        solution_block = f"**Suggested solution:**\n{unique_solutions[0]}\n\n"
+    else:
+        solution_block = "**Suggested actions:**\n\n" + "\n".join(
+            f"- {solution}" for solution in unique_solutions) + "\n\n"
+
+    body = (f"### Code Issues\n\n"
+            f"**File:** {base_issue.file}\n\n"
+            f"**Lines:** {min_line}-{max_line}\n\n"
+            f"**Detected problems:**\n\n"
+            f"{combined_problems}\n\n"
+            f"{solution_block}"
+            f"{imports_block}"
+            f"**Block to substitute:**\n"
+            f"```{file_extension}\n"
+            f"{clean_orig}\n"
+            f"```\n\n"
+            f"**Proposed Code:**\n"
+            f"```{file_extension}\n"
+            f"{clean_prop}\n"
+            f"```\n\n"
+            f"{hidden_ids(issue_keys)}")
+
+    return wrap_agent_comment(body)
+
+
+# Webhook payload and repository context helpers
+def load_webhook_data(filepath: str) -> tuple[str, str, str, str]:
     with open(filepath, "r") as file:
         data = json.load(file)
 
-    # Extract the pull request ID and project key from the JSON data
-    pr_id = data.get("pr_id") or os.getenv(
-        "CHANGE_ID"
-    )  # Try to get the pr_id from the JSON, if not found, try to get it from the environment variable (for Jenkins compatibility)
     project_key = data.get("project_key")
-    project_key = project_key.replace(".git", "").split("/")[-1].lower()
+    pr_id = data.get("pr_id")
+    repo_slug = data.get("repo_slug")
+    workspace = data.get("workspace", "medinafdzz")
 
-    return pr_id, project_key
+    if not project_key:
+        logger.error("Project key not found in the JSON file.")
+        return "", "", "", ""
+
+    if not pr_id:
+        logger.error("Pull request ID not found in the JSON file.")
+        return "", "", "", ""
+
+    if not repo_slug:
+        logger.error("Repository slug not found in the JSON file.")
+        return "", "", "", ""
+
+    return project_key, str(pr_id), str(repo_slug), str(workspace)
 
 
-# Function that extract the specific code block affected by the issue
-def get_code_context(filepath: str, line_number: int, context_window: int = 15) -> str:
+def get_code_context(filepath: str, line_number: int, context_window: int = 20) -> str:
     try:
-        if not os.path.exists(
-            filepath
-        ):  # TODO: if I keep this, it is necessary to put the agent.py in all projects
-            return "File not found."
-        with open(filepath, "r", encoding="utf-8") as file:
-            lines = file.readlines()
+        lines = read_file_lines(filepath)
 
         # Calculate the start and end lines for the code snippet
-        start_line = max(
-            0, line_number - context_window - 1
-        )  # -1 because line numbers are typically 1-indexed
+        start_line = max(0, line_number - context_window - 1)  # -1 because line numbers are typically 1-indexed
         end_line = min(len(lines), line_number + context_window)
 
         snippet = []
@@ -100,44 +833,28 @@ def get_code_context(filepath: str, line_number: int, context_window: int = 15) 
         return f"Error reading code context: {e}"
 
 
-# Function to save tokens and clean the json format of the SonarQube results
+# SonarQube integration helpers
 def clean_sonar_results(raw_results: CallToolResult) -> list[dict]:
-    try:
-        # Extract the content text from the raw results and parse it as JSON
-        content_text = raw_results.content[0].text
-        issues_data = json.loads(content_text)
+    content_text = raw_results.content[0].text
+    issues_data = json.loads(content_text)
 
-        # If issues_data is a dict with an "issues" key, take the value of that key, otherwise we assume it's already a list of issues
-        issues_list = (
-            issues_data.get("issues", [])
-            if isinstance(issues_data, dict)
-            else issues_data
-        )
+    issues_list = issues_data.get("issues", []) if isinstance(issues_data, dict) else issues_data
+    if not isinstance(issues_list, list):
+        raise ValueError("Unexpected SonarQube issues format")
 
-        cleaned = []
-        # Verify that the issues are pass as a list, if not, return an empty list
-        if isinstance(issues_list, list):
-            for issue in issues_list:
-                cleaned.append(
-                    {
-                        "severity": issue.get("severity"),
-                        "component": issue.get("component"),
-                        "message": issue.get("message"),
-                        "line": issue.get("textRange", {}).get(
-                            "startLine", 0
-                        ),  # Default to 0 if line number is not available
-                        "project": issue.get("project"),
-                        "file": issue.get("component", "").split(":")[-1],
-                    }
-                )
-        return cleaned
-    except Exception as e:
-        logger.error(f"Error cleaning SonarQube results: {e}")
-        return []
+    cleaned = []
+    for issue in issues_list:
+        cleaned.append({
+            "sonar_key": issue.get("key", "NO_KEY"),
+            "severity": issue.get("severity"),
+            "message": issue.get("message"),
+            "line": issue.get("textRange", {}).get("startLine", 0),
+            "file": issue.get("component", "").split(":")[-1],
+        })
+
+    return cleaned
 
 
-# -- TOOL INTERACTION FUNCTIONS (MCP AND LLM API) --
-# Function that search for SonarQube issues using the MCP tool
 async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
     # Configure the SonarQube parameters
@@ -148,11 +865,11 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
             "-i",
             "--rm",
             "--init",
-            "--pull=always",
+            "--pull=missing",
             "--network",
             "services-net",
             "-e",
-            f"SONARQUBE_URL=http://sonarqube-server:9000",
+            "SONARQUBE_URL=http://sonarqube-server:9000",
             "-e",
             f"SONARQUBE_TOKEN={os.getenv('SONARQUBE_AUTH_TOKEN')}",
             "mcp/sonarqube",
@@ -163,6 +880,7 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
 
     # Start the SonarQube client session using mcp tools
     results = None
+
     try:
         async with stdio_client(sonar_parameters) as (read, write):
             async with ClientSession(read, write) as session:
@@ -173,108 +891,344 @@ async def fetch_sonar_issues(project_key: str) -> list[dict]:
                     arguments={
                         "project_key": project_key,
                         "resolved": "false",  # Only analyze unresolved issues to avoid noise in the analysis
-                        "inNewCodePeriod": "true",  # Necessary bc it analyzes only the code changed in the pull request (or push), no added issues from the other branch
+                        "inNewCodePeriod":
+                            "true",  # Necessary bc it analyzes only the code changed in the pull request, no added issues from the other branch
                     },
                 )
                 if results:
-                    logger.info(
-                        f"SonarQube analysis completed successfully for project {project_key}."
-                    )
-                await asyncio.sleep(
-                    10
-                )  # Wait a moment to ensure the SonarQube container has finished its process and released the resources
+                    logger.info(f"SonarQube analysis completed successfully for project {project_key}.")
+
     except Exception as e:
-        logger.error(f"Failed to connect to SonarQube {e}")
-        sys.exit(
-            1
-        )  # If SonarQube fails, stop the build to avoid false positives in the pull request analysis
+        logger.error(f"Failed to connect to SonarQube: {e}")
+        raise AgentExecutionError("SonarQube connection failed") from e
+
     # Clean the SonarQube results to save tokens and optimize the prompt by the most critical issues
-    all_issues = clean_sonar_results(results)
-    severities = ["BLOCKER", "CRITICAL"]
-    cleaned_issues = [issue for issue in all_issues if issue["severity"] in severities]
+    try:
+        all_issues = clean_sonar_results(results)
+    except Exception as e:
+        logger.error(f"Failed to parse SonarQube results: {e}")
+        raise AgentExecutionError("Failed to parse SonarQube results") from e
 
-    if not cleaned_issues:
-        cleaned_issues = []
+    severity_order = {
+        "BLOCKER": 0,
+        "CRITICAL": 1,
+        "HIGH": 1,
+        "MAJOR": 2,
+        "MEDIUM": 2,
+        "MINOR": 3,
+        "LOW": 3,
+        "INFO": 4,
+    }
 
-    top_issues = cleaned_issues[:10]  # Limit to the 10 most critical issues
+    filtered_issues = [
+        issue for issue in all_issues
+        if issue.get("severity") in severity_order and os.path.exists(issue.get("file", ""))
+    ]
+
+    filtered_issues.sort(key=lambda issue: (
+        severity_order.get(issue.get("severity"), 99),
+        issue.get("file", ""),
+        issue.get("line", 0),
+    ))
+
+    max_issues = int(os.getenv("CODEGUARDIAN_MAX_ISSUES", "35"))
+    top_issues = filtered_issues[:max_issues]  # Limit the number of issues sent to the AI after sorting by severity
 
     for issue in top_issues:
         issue["code_context"] = get_code_context(issue["file"], issue["line"])
 
+        scope = resolve_scope(issue["file"], issue["line"])
+        issue["scope_kind"] = scope.kind
+        issue["scope_name"] = scope.name
+        issue["scope_start_line"] = scope.start_line
+        issue["scope_end_line"] = scope.end_line
+
     return top_issues
 
 
-# Function that sends the SonarQube issues to the Gemini model for analysis and receives the decision
-def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
-    # Configure the Gemini model parameters
-    client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
-    # Prompt for the model to analyze the SonarQube issues
-    prompt = f"""
-        Act as a Senior Software Architect and Security Lead. 
-        Analyze the following SonarQube technical findings for the project: '{project_key}'.
+# AI analysis and batching logic for model-generated fixes
+def ensure_prompt_cache(client: genai.Client) -> str:
+    metadata = load_cache_metadata()
 
-        ### RULES FOR 'proposed_code':
-        - Return ONLY the specific code block that replaces the problematic part.
-        - DO NOT include 'import' statements unless they are absolutely new and necessary.
-        - DO NOT redefine the entire function if only one or two lines change.
-        - Match the indentation and style of the provided 'code_context'.
-        - Ensure the code is production-ready and fixes the specific SonarQube finding.
-        - MUST use physical line breaks (hard returns) for multiple lines. DO NOT use literal '\n' characters.
+    if cache_meta_valid(metadata):
+        cache_name = metadata["name"]
 
-        ### TASK:
-        1. Identify the 10 most critical issues (if existing) based on severity and technical debt.
-        2. For each issue, analyze the 'code_context' snippet to understand the exact code, then provide:
-           - 'file': The exact filename/path.
-           - 'line': The specific line number.
-           - 'target_type': The type of the affected code structure (e.g., "Variable", "Method", "Class", "Interface").
-           - 'target_name': The exact name of the affected target (e.g., "conn", "procesar()"). Do NOT invent names.
-           - 'problem': A technical explanation of WHY this is a risk based on reading the actual code snippet.
-           - 'solution': Clear instruction on how to fix it. Use actual variable names from the snippet. Do NOT invent code.
-           - 'proposed_code': The clean code snippet fixing the issue. Keep it concise.
-        3. 'comment': A 2-sentence high-level executive summary for the lead developer.
-        4. 'decline_pr': Set to 'true' ONLY if there are findings with 'BLOCKER' or 'CRITICAL' severity.
+        try:
+            cache = client.caches.get(name=cache_name)
+            return cache.name
+        except Exception:
+            pass
 
-        ### OUTPUT FORMAT:
-        Return ONLY a strictly valid JSON object that matches the provided schema. 
-        Do not include markdown wrappers like ```json.
-
-        ### SONARQUBE DATA:
-        {json.dumps(issues)}
-        """
-
-    # Start of intrumentation to measure latency and token usage of the Gemini model
-    start_time = time.time()
-
-    # Generate the answer using the Gemini model
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=Decision,
+    cache = client.caches.create(
+        model=CACHE_MODEL,
+        config=types.CreateCachedContentConfig(
+            system_instruction=REVIEW_RULES,
+            display_name="codeguardian-review-rules",
+            ttl=CACHE_TTL,
         ),
     )
 
-    # Calculate duration of the response
+    expire_time = getattr(cache, "expire_time", None)
+    if expire_time is not None:
+        expire_time = str(expire_time)
+
+    save_cache_metadata({
+        "name": cache.name,
+        "model": CACHE_MODEL,
+        "ttl": CACHE_TTL,
+        "rules_hash": rules_hash(),
+        "expire_time": expire_time,
+    })
+
+    return cache.name
+
+
+def build_scope_batches(issues: list[dict]) -> list[list[dict]]:
+    grouped: dict[tuple, list[dict]] = {}
+    ordered_keys: list[tuple] = []
+
+    for issue in sorted(
+            issues,
+            key=lambda item: (
+                item.get("file", ""),
+                int(item.get("scope_start_line", item.get("line", 0)) or 0),
+                int(item.get("line", 0) or 0),
+            ),
+    ):
+        scope_kind = issue.get("scope_kind", "global")
+        scope_name = issue.get("scope_name", "")
+        scope_start = int(issue.get("scope_start_line", issue.get("line", 0)) or issue.get("line", 0))
+        scope_end = int(issue.get("scope_end_line", issue.get("line", 0)) or issue.get("line", 0))
+
+        if scope_kind in {"function", "method"}:
+            key = (issue.get("file", ""), scope_kind, scope_name, scope_start, scope_end)
+        else:
+            # Los problemas fuera de función van solos
+            key = (
+                issue.get("file", ""),
+                "global",
+                f"global:{issue.get('sonar_key', 'NO_KEY')}:{issue.get('line', 0)}",
+                int(issue.get("line", 0) or 0),
+                int(issue.get("line", 0) or 0),
+            )
+
+        if key not in grouped:
+            grouped[key] = []
+            ordered_keys.append(key)
+
+        grouped[key].append(issue)
+
+    return [grouped[key] for key in ordered_keys]
+
+
+def batch_signature(project_key: str, batch: list[dict]) -> str:
+    normalized_batch = []
+
+    for issue in batch:
+        scope_start_line = int(issue.get("scope_start_line", issue.get("line", 0)) or 0)
+        scope_end_line = int(issue.get("scope_end_line", issue.get("line", 0)) or 0)
+        file_path = issue.get("file", "")
+
+        scope_content_hash = ""
+        if file_path and os.path.exists(file_path) and scope_start_line > 0 and scope_end_line >= scope_start_line:
+            try:
+                lines = read_file_lines(file_path)
+                if scope_end_line <= len(lines):
+                    scope_content = "".join(lines[scope_start_line - 1:scope_end_line])
+                    scope_content_hash = hashlib.sha256(scope_content.encode("utf-8")).hexdigest()
+            except Exception:
+                scope_content_hash = ""
+
+        normalized_batch.append({
+            "sonar_key": issue.get("sonar_key", "NO_KEY"),
+            "file": file_path,
+            "line": int(issue.get("line", 0) or 0),
+            "severity": issue.get("severity", ""),
+            "message": issue.get("message", ""),
+            "code_context": issue.get("code_context", ""),
+            "scope_kind": issue.get("scope_kind", "global"),
+            "scope_name": issue.get("scope_name", ""),
+            "scope_start_line": scope_start_line,
+            "scope_end_line": scope_end_line,
+            "scope_content_hash": scope_content_hash,
+        })
+
+    payload = {
+        "project_key": project_key,
+        "model": CACHE_MODEL,
+        "rules_hash": rules_hash(),
+        "batch": normalized_batch,
+    }
+
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
+    client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
+
+    model_issues: list[Issue] = []
+    total_prompt_tokens = 0
+    total_response_tokens = 0
+    total_tokens = 0
+    total_cached_tokens = 0
+    start_time = time.time()
+    batch_cache = load_batch_cache()
+    batch_cache_hits = 0
+    batch_cache_misses = 0
+    batch_cache_changed = False
+
+    batches = build_scope_batches(issues)
+
+    cached_name = None
+    if CACHE_MODE == "explicit":
+        cached_name = ensure_prompt_cache(client)
+
+    for batch in batches:
+
+        batch_scope_kind = batch[0].get("scope_kind", "global")
+        batch_scope_name = batch[0].get("scope_name", "")
+        batch_scope_start = int(batch[0].get("scope_start_line", batch[0].get("line", 0)) or batch[0].get("line", 0))
+        batch_scope_end = int(batch[0].get("scope_end_line", batch[0].get("line", 0)) or batch[0].get("line", 0))
+
+        if batch_scope_kind in {"function", "method"}:
+            scope_instruction = f"""
+            All findings in this batch belong to the same {batch_scope_kind}: '{batch_scope_name}'.
+            This scope starts at line {batch_scope_start} and ends at line {batch_scope_end}.
+
+            If a real code change is needed, return exactly one issue object for this whole scope.
+            Consolidate all findings in the batch into one single refactor proposal when applicable.
+            Use one original_code block and one proposed_code block covering the full scope when needed.
+            Do not return multiple issue objects for the same function or method.
+            If no real fix is needed, return an empty issues list.
+            """
+        else:
+            scope_instruction = """
+            This finding is outside any function or method.
+            Treat it as a global or top-level issue.
+            Return one issue object for this finding only.
+            Do not merge it with any other scope.
+            """
+
+        if CACHE_MODE == "explicit":
+            prompt = f"""
+                Project:
+                {project_key}
+
+                Scope instructions:
+                {scope_instruction}
+
+                SONARQUBE DATA:
+                {json.dumps(batch)}
+            """
+        else:
+            prompt = f"""
+                {REVIEW_RULES}
+
+                Project:
+                {project_key}
+
+                Scope instructions:
+                {scope_instruction}
+
+                SONARQUBE DATA:
+                {json.dumps(batch)}
+            """
+
+        cache_key = batch_signature(project_key, batch)
+        cached_response_text = batch_cache.get(cache_key)
+
+        response_text = None
+
+        if cached_response_text:
+            try:
+                partial_decision = IssueBatchDecision.model_validate_json(cached_response_text)
+                batch_cache_hits += 1
+            except Exception:
+                partial_decision = None
+        else:
+            partial_decision = None
+
+        if partial_decision is None:
+            batch_cache_misses += 1
+
+            generate_config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=IssueBatchDecision,
+                temperature=0,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            )
+
+            if CACHE_MODE == "explicit":
+                generate_config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=IssueBatchDecision,
+                    temperature=0,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                    cached_content=cached_name,
+                )
+
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=generate_config,
+            )
+
+            try:
+                total_prompt_tokens += int(response.usage_metadata.prompt_token_count)
+                total_response_tokens += int(response.usage_metadata.candidates_token_count)
+                total_tokens += int(response.usage_metadata.total_token_count)
+                total_cached_tokens += int(getattr(response.usage_metadata, "cached_content_token_count", 0) or 0)
+            except Exception:
+                pass
+
+            response_text = response.text
+
+            try:
+                partial_decision = IssueBatchDecision.model_validate_json(response_text)
+            except Exception as e:
+                logger.error(
+                    "Failed to parse Gemini batch response for sonar keys %s: %s",
+                    [issue.get("sonar_key", "NO_KEY") for issue in batch],
+                    e,
+                )
+                logger.error("The response from the model was: %s", response_text)
+                continue
+
+            batch_cache[cache_key] = response_text
+            batch_cache_changed = True
+
+        expected_sonar_keys = {
+            issue.get("sonar_key", "NO_KEY") for issue in batch if issue.get("sonar_key", "NO_KEY") != "NO_KEY"
+        }
+
+        kept_batch_issues: dict[str, Issue] = {}
+
+        for issue in partial_decision.issues:
+            if not issue.sonar_key or issue.sonar_key == "NO_KEY":
+                continue
+            if issue.sonar_key not in expected_sonar_keys:
+                continue
+            if issue.sonar_key in kept_batch_issues:
+                continue
+            kept_batch_issues[issue.sonar_key] = issue
+
+        model_issues.extend(kept_batch_issues.values())
+
     duration = time.time() - start_time
+    current_timestamp = time.time()
 
-    # Extract the token usage
-    try:
-        metric_prompt = int(response.usage_metadata.prompt_token_count)
-        metric_response = int(response.usage_metadata.candidates_token_count)
-        metric_total_tokens = int(response.usage_metadata.total_token_count)
-    except Exception as e:
-        metric_prompt, metric_response, metric_total_tokens = 0, 0, 0
-        logger.warning(f"Could not retrieve token usage: {e}")
-
-    # Registry and metrics for Prometheus
     registry = CollectorRegistry()
     latency = Gauge(
         "codeguardian_analysis_latency_seconds",
         "Response time of Gemini model (s)",
         registry=registry,
     )
-
+    execution_time = Gauge(
+        "codeguardian_last_execution_timestamp",
+        "Timestamp of the last agent execution",
+        registry=registry,
+    )
     prompt_tokens = Gauge(
         "codeguardian_analysis_prompt_tokens",
         "Tokens used in the prompt sent to Gemini model",
@@ -285,30 +1239,22 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         "Tokens used in the response received",
         registry=registry,
     )
-    total_tokens = Gauge(
+    total_tokens_metric = Gauge(
         "codeguardian_analysis_total_tokens",
         "Total tokens used in the Gemini model response",
         registry=registry,
     )
 
     latency.set(duration)
-    prompt_tokens.set(metric_prompt)
-    response_tokens.set(metric_response)
-    total_tokens.set(metric_total_tokens)
+    execution_time.set(current_timestamp)
+    prompt_tokens.set(total_prompt_tokens)
+    response_tokens.set(total_response_tokens)
+    total_tokens_metric.set(total_tokens)
 
-    logging.info("Sending metrics to Prometheus Pushgateway")
-
-    # Send the metrics to Prometheus Pushgateway
     try:
-        # To set a tag in grafana
-        pr_id = os.getenv("CHANGE_ID")
         build_id = os.getenv("BUILD_NUMBER", "local_build")
-        if pr_id:
-            event_type = "pull_request"
-            display_label = f"PR-{pr_id}"
-        else:
-            event_type = "push"
-            display_label = f"Push-{build_id}"
+        event_type = "pull_request"
+        display_label = f"{project_key}-PR-{build_id}"
 
         push_to_gateway(
             "pushgateway:9091",
@@ -318,282 +1264,636 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
                 "event_type": event_type,
                 "display_id": display_label,
                 "repository": project_key,
+                "exec_timestamp": str(int(current_timestamp)),
             },
             registry=registry,
         )
-        logger.info(
-            f"Metrics pushed to Prometheus Pushgateway: event_type={event_type}, build_number={build_id}, latency={duration:.2f}s, prompt_tokens={metric_prompt}, response_tokens={metric_response}, total_tokens={metric_total_tokens}"
-        )
+
     except Exception as metric_error:
-        logger.error(
-            f"Failed to push metrics to Prometheus Pushgateway: {metric_error}"
-        )
+        logger.error(f"Failed to push metrics to Prometheus Pushgateway: {metric_error}")
 
-    try:
-        # Parse the model's response as JSON and validate it against the Decision model
-        decision = Decision.model_validate_json(response.text)
-        return decision
+    logger.info("Gemini produced %s issues", len(model_issues))
 
-    except Exception as e:
-        logger.error(f"Critical error of Pydantic to parse the JSON: {e}")
-        logger.error(f"The response from the model was: {response.text}")
-        sys.exit(1)  # If the AI fails, stop the build
+    if total_cached_tokens:
+        logger.info("Gemini total cached tokens: %s", total_cached_tokens)
+
+    if batch_cache_changed:
+        save_batch_cache(batch_cache)
+
+    logger.info("Gemini batch cache hits: %s", batch_cache_hits)
+    logger.info("Gemini batch cache misses: %s", batch_cache_misses)
+
+    return Decision(
+        decline_pr=False,
+        issues=model_issues,
+    )
 
 
-# Function to post comment on Bitbucketusing the MCP tool
-async def post_comment(
+# Pull request comment readers using Atlassian Rovo MCP
+async def get_pull_request_comments(
     session: ClientSession,
     pr_id: str,
-    project_key: str,
-    comment: list[str],
+    repo_slug: str,
     workspace: str,
-) -> None:
-    for text_chunk in comment:
-        try:
-            await session.call_tool(
-                name="addPullRequestComment",
+) -> list[dict]:
+    try:
+        all_comments = []
+        page = 1
+
+        while True:
+            results = await session.call_tool(
+                name="bitbucketPullRequest",
                 arguments={
-                    "workspace": workspace,
-                    "pull_request_id": int(pr_id),
-                    "repo_slug": project_key,
-                    "content": text_chunk,
+                    "action": "comments",
+                    "workspaceId": workspace,
+                    "repoId": repo_slug,
+                    "prId": int(pr_id),
+                    "pagelen": 100,
+                    "page": page,
+                    "sort": "-created_on",
                 },
             )
-            logger.info(f"Comment added successfully to the pull request {pr_id}")
-            await asyncio.sleep(1)
-        except Exception as e:
-            logger.error(f"Failed to add comment: {e}")
 
+            comments_data = json.loads(results.content[0].text)
 
-# Function to decline the pull request on Bitbucket using the MCP tool
-async def decline_pull_request(
-    session: ClientSession, pr_id: str, project_key: str, workspace: str
-) -> None:
-    try:
-        await session.call_tool(
-            name="declinePullRequest",
-            arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": project_key,
-                "message": "Pull request declined by CodeGuardian. Found CRITICAL/BLOCKER issues.",
-            },
-        )
-        logger.info(f"Pull request {pr_id} declined successfully.")
+            if isinstance(comments_data, dict):
+                if isinstance(comments_data.get("values"), list):
+                    page_comments = comments_data.get("values", [])
+                elif isinstance(comments_data.get("comments"), list):
+                    page_comments = comments_data.get("comments", [])
+                else:
+                    page_comments = []
+            elif isinstance(comments_data, list):
+                page_comments = comments_data
+            else:
+                page_comments = []
+
+            if not page_comments:
+                break
+
+            all_comments.extend(page_comments)
+
+            if len(page_comments) < 100:
+                break
+
+            page += 1
+
+        return all_comments
+
     except Exception as e:
-        logger.error(f"Failed to decline PR: {e}")
+        logger.error(f"Failed to retrieve pull request comments: {e}")
+        raise
 
 
-# Function to post inline comments on specfic lines of the pull request on BitBucket using MCP tool
-async def post_inline_comment(
-    session: ClientSession, pr_id: str, project_key: str, issue: Issue, workspace: str
-) -> None:
+def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
+    summary_comment_ids: set[int] = set()
+
+    for comment in comments:
+        if comment.get("deleted", False):
+            continue
+
+        if comment.get("parent"):
+            continue
+
+        raw_text = (comment.get("content", {}) or {}).get("raw", "") or comment.get("content", "")
+        normalized_text = raw_text.replace(CODEGUARDIAN_AGENT_MARKER, "", 1).strip()
+
+        if (is_agent_comment(raw_text) or normalized_text.startswith(CODEGUARDIAN_SUMMARY_TITLE) or
+                raw_text.strip().startswith(CODEGUARDIAN_SUMMARY_TITLE)):
+            if normalized_text.startswith(CODEGUARDIAN_SUMMARY_TITLE) or raw_text.strip().startswith(
+                    CODEGUARDIAN_SUMMARY_TITLE):
+                comment_id = comment.get("id")
+                if comment_id is not None:
+                    summary_comment_ids.add(int(comment_id))
+
+    return summary_comment_ids
+
+
+async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
     try:
-        # Extract the file extension to color in bitbucket
-        file_extension = issue.file.split(".")[-1] if "." in issue.file else "txt"
-        content = (
-            f"**File:** `{issue.file}`\n\n"
-            f"**Type:** `{issue.target_type}()` | **Name:** `{issue.target_name}`\n\n"
-            f"**Line:** `{issue.line}`\n\n"
-            f"**Problem (`{issue.severity}`):** {issue.problem}\n\n"
-            f"**Proposed solution:** {issue.solution}\n\n"
-            f"**Proposed code:**\n\n"
-            f"```{file_extension}\n"
-            f"{issue.proposed_code.replace('\\n', '\n')}\n"
-            f"```"
-        )
-        await session.call_tool(
-            name="addPullRequestComment",
-            arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": project_key,
-                "content": content,
-                "inline": {
-                    "path": issue.file,
-                    "to": int(issue.line),
-                },
+        comments = await get_pull_request_comments(session, pr_id, repo_slug, workspace)
+
+        active_inline_comments = {}
+
+        for comment in comments:
+            if comment.get("deleted", False):
+                continue
+
+            if comment.get("parent"):
+                continue
+
+            if not comment.get("inline"):
+                continue
+
+            raw_text = (comment.get("content", {}) or {}).get("raw", "") or comment.get("content", "")
+            comment_id = int(comment.get("id"))
+
+            if not is_agent_comment(raw_text):
+                continue
+
+            issue_keys = extract_issue_key(raw_text)
+
+            inline_data = comment.get("inline") or {}
+            file_path = (inline_data.get("path") or "").strip()
+            line_to = int(inline_data.get("to") or inline_data.get("from") or 0)
+
+            active_inline_comments[comment_id] = {
+                "issue_keys": set(issue_keys),
+                "file_path": file_path,
+                "line_to": line_to,
+                "content_hash": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+            }
+
+        return active_inline_comments
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve inline comments: {e}")
+        raise
+
+
+# Bitbucket REST helpers for inline comment creation and deletion
+def get_bitbucket_basic_auth_headers() -> dict[str, str] | None:
+    bitbucket_username = (os.getenv("BITBUCKET_EMAIL") or os.getenv("BITBUCKET_USERNAME") or "").strip()
+    bitbucket_password = (os.getenv("BITBUCKET_API_TOKEN") or os.getenv("BITBUCKET_APP_TOKEN") or "").strip()
+
+    if not bitbucket_username or not bitbucket_password:
+        return None
+
+    auth_raw = f"{bitbucket_username}:{bitbucket_password}".encode("utf-8")
+    auth_b64 = base64.b64encode(auth_raw).decode("ascii")
+
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Basic {auth_b64}",
+    }
+
+
+def ensure_bitbucket_rest_auth() -> None:
+    if not get_bitbucket_basic_auth_headers():
+        raise AgentExecutionError("Missing BITBUCKET_EMAIL/BITBUCKET_API_TOKEN for Bitbucket REST inline comments")
+
+
+def get_bitbucket_api_base_url() -> str:
+    return os.getenv("BITBUCKET_URL", "https://api.bitbucket.org/2.0").rstrip("/")
+
+
+def build_pullrequest_comment_url(
+    pr_id: str,
+    repo_slug: str,
+    comment_id: str,
+    workspace: str,
+) -> str:
+    base_url = get_bitbucket_api_base_url()
+    return (f"{base_url}/repositories/{workspace}/{repo_slug}"
+            f"/pullrequests/{pr_id}/comments/{comment_id}")
+
+
+async def create_inline_comment_by_rest(
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+    file_path: str,
+    line_to: int,
+    content: str,
+) -> bool:
+    headers = get_bitbucket_basic_auth_headers()
+    if not headers:
+        return False
+
+    create_url = f"{get_bitbucket_api_base_url()}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/comments"
+
+    payload = json.dumps({
+        "content": {
+            "raw": content,
+        },
+        "inline": {
+            "path": file_path,
+            "to": line_to,
+        },
+    }).encode("utf-8")
+
+    def _create_comment() -> int:
+        req = urllib.request.Request(
+            url=create_url,
+            data=payload,
+            headers={
+                **headers, "Content-Type": "application/json"
             },
+            method="POST",
         )
-        logger.info(f"Inline comment added successfully to the pull request {pr_id}")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return int(resp.status)
+
+    try:
+        status = await asyncio.to_thread(_create_comment)
+        return status in (200, 201)
+    except urllib.error.HTTPError as e:
+        if e.code in (200, 201):
+            return True
+        logger.error(
+            "Failed to create inline comment by REST: status=%s repo=%s pr=%s file=%s line=%s",
+            e.code,
+            repo_slug,
+            pr_id,
+            file_path,
+            line_to,
+        )
+        return False
+    except Exception as e:
+        logger.error(
+            "Unexpected error creating inline comment by REST: repo=%s pr=%s file=%s line=%s error=%s",
+            repo_slug,
+            pr_id,
+            file_path,
+            line_to,
+            e,
+        )
+        return False
+
+
+async def delete_inline_comment_by_rest(
+    pr_id: str,
+    repo_slug: str,
+    comment_id: str,
+    workspace: str,
+) -> bool:
+    headers = get_bitbucket_basic_auth_headers()
+    if not headers:
+        return False
+
+    delete_url = build_pullrequest_comment_url(pr_id, repo_slug, comment_id, workspace)
+
+    def _delete_comment() -> int:
+        req = urllib.request.Request(
+            url=delete_url,
+            headers=headers,
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return int(resp.status)
+
+    try:
+        status = await asyncio.to_thread(_delete_comment)
+        return status in (200, 204)
+    except urllib.error.HTTPError as e:
+        if e.code in (200, 204):
+            return True
+        logger.error(
+            "Failed to delete inline comment by REST: status=%s repo=%s pr=%s comment_id=%s",
+            e.code,
+            repo_slug,
+            pr_id,
+            comment_id,
+        )
+        return False
+    except Exception as e:
+        logger.error(
+            "Unexpected error deleting inline comment by REST: repo=%s pr=%s comment_id=%s error=%s",
+            repo_slug,
+            pr_id,
+            comment_id,
+            e,
+        )
+        return False
+
+
+async def delete_comment_ids(
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+    comment_ids: set[int],
+) -> tuple[set[int], set[int]]:
+    deleted_comment_ids: set[int] = set()
+    failed_comment_ids: set[int] = set()
+
+    for comment_id in sorted(comment_ids):
+        deleted = await delete_inline_comment_by_rest(
+            pr_id,
+            repo_slug,
+            str(comment_id),
+            workspace,
+        )
+        if deleted:
+            deleted_comment_ids.add(comment_id)
+            logger.info("Inline comment removed: %s", comment_id)
+            await asyncio.sleep(0.2)
+        else:
+            failed_comment_ids.add(comment_id)
+            logger.info("Comment %s could not be deleted", comment_id)
+
+    return deleted_comment_ids, failed_comment_ids
+
+
+# Pull request synchronization and final reporting workflow
+async def post_issue_group_comment(
+    pr_id: str,
+    repo_slug: str,
+    issues: list[Issue],
+    workspace: str,
+) -> bool:
+    try:
+        if not issues:
+            return False
+
+        base_issue = max(
+            issues,
+            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
+                getattr(i, "original_start_line", i.line) or i.line),
+        )
+
+        if not os.path.exists(base_issue.file):
+            logger.info("Skipping inline comment for missing file: %s", base_issue.file)
+            return False
+
+        line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issues)
+        content = comment_content(issues)
+
+        created = await create_inline_comment_by_rest(
+            pr_id=pr_id,
+            repo_slug=repo_slug,
+            workspace=workspace,
+            file_path=base_issue.file,
+            line_to=line_end,
+            content=content,
+        )
+
+        if created:
+            if len(issues) == 1:
+                logger.info("Inline comment added")
+            else:
+                logger.info("Inline comment added with %s issues", len(issues))
+
+        return created
     except Exception as e:
         logger.error(f"Failed to add inline comment: {e}")
+        raise
 
 
-# Function to approve the pull request on Bitbucket using the MCP tool
-async def approve_pull_request(
-    session: ClientSession, pr_id: str, project_key: str, workspace: str
-) -> None:
-    try:
-        await session.call_tool(
-            name="approvePullRequest",
-            arguments={
-                "workspace": workspace,
-                "pull_request_id": int(pr_id),
-                "repo_slug": project_key,
-                "message": "Pull request approved by CodeGuardian. No critical issues found.",
-            },
+async def delete_agent_summary_comments(
+    session: ClientSession,
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+) -> int:
+    comments = await get_pull_request_comments(session, pr_id, repo_slug, workspace)
+    summary_comment_ids = get_agent_summary_comment_ids(comments)
+
+    if not summary_comment_ids:
+        return 0
+
+    deleted_comment_ids, _failed_comment_ids = await delete_comment_ids(
+        pr_id,
+        repo_slug,
+        workspace,
+        summary_comment_ids,
+    )
+
+    if deleted_comment_ids:
+        logger.info(
+            "Deleted %s legacy summary comments from PR %s",
+            len(deleted_comment_ids),
+            pr_id,
         )
-        logger.info(f"Pull request {pr_id} approved successfully.")
-    except Exception as e:
-        logger.error(f"Failed to approve PR: {e}")
+
+    return len(deleted_comment_ids)
 
 
-# Function to report the analysis results to Bitbucket
-async def report_to_bitbucket(pr_id: str, project_key: str, decision: Decision) -> None:
-    # Configure the Bitbucket tool parameters
-    bitbucket_env = os.environ.copy()  # Need this bc need to inherit the PATH
-    bitbucket_env.update(
-        {
-            "BITBUCKET_URL": os.getenv(
-                "BITBUCKET_URL", "https://api.bitbucket.org/2.0"
-            ),
-            "BITBUCKET_WORKSPACE": os.getenv("BITBUCKET_WORKSPACE", "medinafdzz"),
-            "BITBUCKET_USERNAME": os.getenv("BITBUCKET_USERNAME"),
-            "BITBUCKET_PASSWORD": os.getenv("BITBUCKET_APP_TOKEN"),
-        }
+async def synchronize_inline_comments(
+    session: ClientSession,
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+    issues: list[Issue],
+) -> int:
+    active_inline_comments = await get_inline_comments(session, pr_id, repo_slug, workspace)
+
+    valid_issues = [issue for issue in issues if issue.file and issue.solution and issue.problem]
+
+    valid_issues.sort(key=lambda i: (
+        i.file,
+        int(getattr(i, "original_start_line", i.line) or i.line),
+        int(getattr(i, "original_end_line", i.line) or i.line),
+    ))
+
+    merge_gap = int(os.getenv("CODEGUARDIAN_GROUP_LINE_GAP", "8"))
+
+    grouped_issues: list[list[Issue]] = []
+    current_group: list[Issue] = []
+
+    for issue in valid_issues:
+        issue_start = int(getattr(issue, "original_start_line", issue.line) or issue.line)
+
+        if not current_group:
+            current_group = [issue]
+            continue
+
+        last_issue = current_group[-1]
+        last_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in current_group)
+
+        same_group = (group_key(issue) == group_key(last_issue) and issue_start <= last_end + merge_gap)
+
+        if same_group:
+            current_group.append(issue)
+        else:
+            grouped_issues.append(current_group)
+            current_group = [issue]
+
+    if current_group:
+        grouped_issues.append(current_group)
+
+    desired_comments = []
+    seen_desired_signatures = set()
+
+    for issue_group in reversed(grouped_issues):
+        if not issue_group:
+            continue
+
+        base_issue = max(
+            issue_group,
+            key=lambda i: int(getattr(i, "original_end_line", i.line) or i.line) - int(
+                getattr(i, "original_start_line", i.line) or i.line),
+        )
+
+        if not os.path.exists(base_issue.file):
+            continue
+
+        line_end = max(int(getattr(i, "original_end_line", i.line) or i.line) for i in issue_group)
+
+        issue_keys = tuple(sorted(issue_key(i) for i in issue_group))
+        content = comment_content(issue_group)
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        signature = (
+            base_issue.file,
+            line_end,
+            issue_keys,
+            content_hash,
+        )
+
+        if signature in seen_desired_signatures:
+            continue
+
+        seen_desired_signatures.add(signature)
+        desired_comments.append({
+            "signature": signature,
+            "issues": issue_group,
+        })
+
+    existing: dict[tuple, int] = {}
+    to_delete: set[int] = set()
+
+    for comment_id, comment_data in active_inline_comments.items():
+        file_path = (comment_data.get("file_path") or "").strip()
+        line_to = int(comment_data.get("line_to") or 0)
+        issue_keys = tuple(sorted(comment_data.get("issue_keys") or []))
+        content_hash = comment_data.get("content_hash", "")
+
+        if not file_path or not line_to or not issue_keys or not content_hash:
+            to_delete.add(comment_id)
+            continue
+
+        signature = (
+            file_path,
+            line_to,
+            issue_keys,
+            content_hash,
+        )
+
+        if signature in existing:
+            to_delete.add(comment_id)
+            continue
+
+        existing[signature] = comment_id
+
+    desired_signatures = {item["signature"] for item in desired_comments}
+
+    for signature, comment_id in existing.items():
+        if signature not in desired_signatures:
+            to_delete.add(comment_id)
+
+    if to_delete:
+        await delete_comment_ids(pr_id, repo_slug, workspace, to_delete)
+
+    created_comments = 0
+
+    for desired in desired_comments:
+        if desired["signature"] in existing:
+            continue
+
+        created = await post_issue_group_comment(pr_id, repo_slug, desired["issues"], workspace)
+        if created:
+            created_comments += 1
+        await asyncio.sleep(0.2)
+
+    reused_comments = len(desired_comments) - created_comments
+    deleted_comments = len(to_delete)
+
+    logger.info(
+        "Inline synchronization summary: desired=%s created=%s reused=%s deleted=%s",
+        len(desired_comments),
+        created_comments,
+        reused_comments,
+        deleted_comments,
     )
 
-    workspace = os.getenv("BITBUCKET_WORKSPACE", "medinafdzz")
-    decline = decision.decline_pr
-    # Flag to detect if the build should stop (I put this to avoid all the tracebacks)
-    should_exit = False
+    return created_comments
+
+
+async def report_to_bitbucket(
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+    decision: Decision,
+) -> None:
+    if not pr_id or str(pr_id).lower() == "null":
+        logger.error("No valid pull request ID was provided.")
+        raise AgentExecutionError("Missing pull request ID")
+
+    ensure_bitbucket_rest_auth()
 
     try:
-        # Start the MCP client session for Bitbucket
-        async with stdio_client(
-            StdioServerParameters(
-                command="npx",
-                args=["-y", "--quiet", "bitbucket-mcp@latest"],
-                env=bitbucket_env,
+        async with atlassian_rovo_session() as session_bb:
+            await delete_agent_summary_comments(
+                session_bb,
+                pr_id,
+                repo_slug,
+                workspace,
             )
-        ) as (read, write):
-            async with ClientSession(read, write) as session_bb:
-                await session_bb.initialize()
 
-                # Check if there is a pr_id and is valid
-                is_pr = pr_id and str(pr_id).lower() != "null"
+            await synchronize_inline_comments(
+                session_bb,
+                pr_id,
+                repo_slug,
+                workspace,
+                decision.issues,
+            )
 
-                # Manage the pull request and push cases based on the model's decision
-                # CASE 1: PULL REQUEST EVENT
-                if is_pr:
-                    logger.info(f"\n--- PULL REQUEST DETECTED - {pr_id} ---")
-                    summary_comment = [
-                        f"**CodeGuardian Analysis Summary**\n\n{decision.comment}\n\n"
-                    ]  # between [] bc post_commend need a list of strings
-                    await post_comment(
-                        session_bb, pr_id, project_key, summary_comment, workspace
-                    )
+            logger.info("Comments synchronized")
 
-                    # Sugestion inline comments for each issue
-                    if decision.issues:
-                        logger.info(
-                            f"\n--- INLINE COMMENTS FOR THE MOST CRITICAL ISSUES ---"
-                        )
-                        for issue in decision.issues:
-                            await post_inline_comment(
-                                session_bb, pr_id, project_key, issue, workspace
-                            )
-                            await asyncio.sleep(
-                                1
-                            )  # Sleep to avoid hitting rate limits when posting multiple inline comments
-                    # CASE 1.1: If the AI detects critical issues, decline the PR and stop the build
-                    if decline:
-                        await decline_pull_request(
-                            session_bb, pr_id, project_key, workspace
-                        )
-                        should_exit = True  # Set the flag to stop the build after reporting to Bitbucket
-                    # CASE 1.2: LOW/MEDIUM issues, approve by the agent
-                    else:
-                        # Approve no merge, bc the merge is function of the developer
-                        await approve_pull_request(
-                            session_bb, pr_id, project_key, workspace
-                        )
-                        logger.info(
-                            "Build approved based on the analysis results. No critical issues found."
-                        )
-                # CASE 2: PUSH EVENT
-                else:
-                    # Show the report on Jenkins logs
-                    logger.info("\n--- PUSH EVENT ---")
-                    logger.info(
-                        f"CodeGuardian analysis summary for the push in project '{project_key}':\n\n{decision.comment}\n\n"
-                    )
-
-                    if decision.issues:
-                        for index, issue in enumerate(decision.issues):
-                            logger.info(
-                                f"**- Problem {index+1} ({issue.severity}) ({issue.file} :{issue.line}):** {issue.problem}"
-                            )
-                            logger.info(f"  **Proposed fix:** {issue.solution}\n")
-                    # CASE 2.1: Push with critical issues
-                    if decline:
-                        should_exit = True  # Set the flag to stop the build after reporting to Bitbucket
-                    else:
-                        # CASE 2.2 Push with low/medium issues, just show the comment on the logs without declining the build
-                        logger.info(
-                            "No critical issues found in the push. Build can proceed."
-                        )
-
-                await asyncio.sleep(
-                    5
-                )  # Wait a moment to ensure all the comments are posted before closing the session
     except Exception as e:
-        logger.error(f"Failed to connect to Bitbucket {e}")
-        sys.exit(1)
-
-    if should_exit:
-        logger.error("Build stopped due to critical issues detected by the AI agent.")
-        sys.exit(1)
+        logger.error(f"Failed to report analysis results to Bitbucket: {e}")
+        raise AgentExecutionError("Bitbucket reporting failed") from e
 
 
-# -- PRINCIPAL FUNCTION TO ORCHESTRATE THE STEPS --
+# Main orchestration entry point
 async def main() -> None:
-    # Parse the command-line arguments to get the path to the JSON file
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--file", required=True, help="Path to the JSON file to analyze"
-    )
+    parser.add_argument("--file", required=True, help="Path to the JSON file to analyze")
     args = parser.parse_args()
 
-    # First step: load the context
-    pr_id, project_key = load_webhook_data(args.file)
-    if not project_key:
-        logger.error(
-            "Project key not found in the JSON file. Please provide a valid project key."
-        )
-        sys.exit(1)
+    project_key, pr_id, repo_slug, workspace = load_webhook_data(args.file)
+    if not project_key or not pr_id or not repo_slug:
+        logger.error("Project key, pull request ID or repo slug not found in the JSON file.")
+        raise AgentExecutionError("Webhook payload is missing required fields")
 
-    # Extract and clean the SonarQube data
     issues = await fetch_sonar_issues(project_key)
 
     if not issues:
-        logger.info(
-            "No critical issues found by SonarQube. Approving the pull request without AI analysis."
-        )
-
+        logger.info("No relevant issues found by SonarQube. Reporting clean analysis state to the pull request.")
         auto_decision = Decision(
             decline_pr=False,
             issues=[],
-            comment="CodeGuardian has automatically approved this Pull Request. SonarQube did not detect any CRITICAL or BLOCKER issues in the modified code.",
-        )
+            )
 
-        await report_to_bitbucket(pr_id, project_key, auto_decision)
+        await report_to_bitbucket(pr_id, repo_slug, workspace, auto_decision)
         return
 
-    logger.info(
-        f"CRITICAL or BLOCKER issues found by SonarQube: {len(issues)}. Proceeding with AI analysis."
-    )
-    # Analyze the code with the AI
+    logger.info(f"Relevant issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
+
+    has_blocking_findings = any(str(issue.get("severity", "")).upper() in {"BLOCKER", "CRITICAL"} for issue in issues)
+
     decision = analyze_code_with_gemini(project_key, issues)
 
+    decision.issues, invalid_count = normalize_issues(decision.issues)
+    decision.issues, patch_invalid_count = filter_valid_issues(decision.issues)
+
+    decision.decline_pr = has_blocking_findings
+
+    if invalid_count:
+        logger.info("Dropped %s invalid issues", invalid_count)
+
+    if patch_invalid_count:
+        logger.info("Dropped %s issues after patch validation", patch_invalid_count)
+
     logger.info(
-        "AI analysis completed, reporting the results to Bitbucket. You can also check the detailed metrics of the analysis in Prometheus or Grafana."
+        "Execution summary: sonar_findings=%s generated_issues=%s dropped_invalid=%s dropped_patch_validation=%s final_issues=%s blocking_findings=%s",
+        len(issues),
+        len(decision.issues) + invalid_count + patch_invalid_count,
+        invalid_count,
+        patch_invalid_count,
+        len(decision.issues),
+        has_blocking_findings,
     )
 
-    # Report and act in SOnarQube based on the AI decision
-    await report_to_bitbucket(pr_id, project_key, decision)
+    await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except AgentExecutionError as e:
+        logger.error(f"Agent execution failed: {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.exception(f"Unexpected unhandled error: {e}")
+        sys.exit(1)
