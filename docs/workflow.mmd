@@ -1,0 +1,94 @@
+---
+config:
+  theme: base
+  themeVariables:
+    fontFamily: ''
+    fontSize: 18px
+    primaryTextColor: '#0B2239'
+    lineColor: '#4B5563'
+  flowchart:
+    curve: linear
+    nodeSpacing: 74
+    rankSpacing: 70
+    padding: 28
+    htmlLabels: true
+---
+flowchart TB
+  subgraph CI[" "]
+    direction TB
+    A["Pull request event"]
+    B["Jenkins pipeline"]
+    C["SonarQube analysis"]
+    D["Generate data.json with PR metadata"]
+  end
+
+  E["Agent execution"]
+
+  subgraph AG[" "]
+    direction TB
+    F["Read SonarQube issues via MCP"]
+    G["Add code context and resolve scope"]
+    H["Generate proposals with AI"]
+    I["Normalize and validate suggestions"]
+  end
+
+  subgraph RP[" "]
+    direction TB
+    J["Prepare Bitbucket sync"]
+    K["Read PR comments via Atlassian MCP"]
+    L["Compare current and desired comment state"]
+    M["Update inline comments via Bitbucket REST"]
+  end
+
+  subgraph OB[" "]
+    direction TB
+    N["Send metrics to Pushgateway"]
+    O["Prometheus scrapes Pushgateway"]
+    P["Grafana dashboards"]
+  end
+
+  A --> B
+  B --> C
+  C --> D
+  D --> E
+
+  E --> F
+  F --> G
+  G --> H
+  H --> I
+
+  I --> J
+  J --> K
+  K --> L
+  L --> M
+
+  E --> N
+  N --> O
+  O --> P
+
+     A:::pipeline
+     B:::pipeline
+     C:::pipeline
+     D:::pipeline
+     E:::agentExec
+     F:::agent
+     G:::agent
+     H:::agent
+     I:::agent
+     J:::reporting
+     K:::reporting
+     L:::reporting
+     M:::reporting
+     N:::observability
+     O:::observability
+     P:::observability
+    classDef pipeline fill:#DCEBFF,stroke:#1D4ED8,stroke-width:2px,color:#0B2239
+    classDef agentExec fill:#FFE4E6,stroke:#DC2626,stroke-width:3px,color:#7F1D1D
+    classDef agent fill:#E6F8EA,stroke:#16A34A,stroke-width:2px,color:#123524
+    classDef reporting fill:#FFF1DB,stroke:#F59E0B,stroke-width:2px,color:#5F3B00
+    classDef observability fill:#F1E8FF,stroke:#7C3AED,stroke-width:2px,color:#3B1D66
+    style E fill:#FEE2E2,stroke:#DC2626,stroke-width:3px,color:#7F1D1D
+    style CI fill:#EAF2FF,stroke:#1D4ED8,stroke-width:2px
+    style AG fill:#EAFBF1,stroke:#16A34A,stroke-width:2px
+    style RP fill:#FFF8ED,stroke:#F59E0B,stroke-width:2px
+    style OB fill:#F7F0FF,stroke:#7C3AED,stroke-width:2px
