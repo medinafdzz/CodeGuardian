@@ -2,6 +2,6 @@ flowchart LR
     A[PR event] --> B[Analyze PR:<br/>checkout + SonarQube]
     B --> C[Prepare agent:<br/>credentials + metadata]
     C --> D[Run agent.py]
-    D --> E[Enrich + batch<br/>findings to AI]
+    D --> E[Process + batch<br/>findings to AI]
     E --> F[Validate +<br/>sync comments]
     F --> G[Export metrics<br/>+ cleanup]
