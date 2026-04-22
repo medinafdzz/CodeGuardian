@@ -35,7 +35,7 @@ The full execution flow can be summarized as follows:
 
 ### 1. Pull request event
 
-A pull request event triggers the Jenkins pipeline. The pipeline checks out the source branch together with the target branch context, so the analysis is performed on the effective pull request state.
+A pull request event triggers the Jenkins pipeline. The pipeline checks out the pull request workspace, ensuring the analysis is performed on the effective state of the code being reviewed.
 
 ### 2. Repository analysis
 
@@ -47,11 +47,11 @@ The Python agent connects to SonarQube through the MCP server and retrieves unre
 
 ### 4. Scope resolution and batching
 
-One of the key architectural decisions in CodeGuardian is that findings are not handled only by line proximity. Instead, the agent tries to resolve the surrounding scope of each finding, such as a function or method, and then groups findings accordingly. This makes the generated suggestions more coherent, because the model can reason about a complete scope instead of isolated lines. The current agent includes scope detection logic for Python and several brace-based languages such as Java, JavaScript, TypeScript, Go, C#, C/C++, PHP, Rust, Kotlin and Swift.
+One of the key architectural decisions in CodeGuardian is that findings are not handled only by line proximity. Instead, the agent tries to resolve the surrounding scope of each finding, such as a function or method, and then groups findings accordingly. This makes the generated suggestions more coherent, because the model can reason about a complete scope instead of isolated lines. The current agent includes scope detection logic for Python and several brace-based languages such as Java, JavaScript, TypeScript, Go, C#, C/C++, PHP, Ruby, Rust, Kotlin and Swift.
 
 ### 5. Generation of fixes with AI
 
-After batching, the agent sends the selected findings to AI. The prompt is strongly constrained: the model must return valid JSON, keep the original SonarQube key, propose only real code modifications, preserve concrete types when needed, avoid unsafe shorthand refactors, and return no issue at all if the replacement is not safe enough. The current implementation also supports prompt caching and batch-level caching to reduce repeated requests and lower execution cost.
+After batching, the agent sends the selected findings to the AI model. The prompt is strongly constrained: the model must return valid JSON, keep the original SonarQube key, propose only real code modifications, preserve concrete types when needed, avoid unsafe shorthand refactors, and return no issue at all if the replacement is not safe enough. The current implementation also supports prompt caching and batch-level caching to reduce repeated requests and lower execution cost.
 
 ### 6. Validation of generated patches
 
@@ -112,7 +112,7 @@ Bitbucket is both the source repository and the final interaction point for deve
 
 ## 1. Detection and generation are separated
 
-The system separates issue detection from fix generation. SonarQube detects issues, while AI only proposes possible fixes for those issues. This reduces the search space for the model and improves control over the output.
+The system separates issue detection from fix generation. SonarQube detects issues, while the AI model only proposes possible fixes for those issues. This reduces the search space for the model and improves control over the output.
 
 ## 2. Scope-based grouping instead of simple proximity
 

@@ -178,14 +178,11 @@ This avoids trying to build comments from incomplete issue objects.
 
 ### Grouping before publication
 
-The valid issues are sorted and then grouped according to:
-- file,
-- original start and end lines,
-- and `group_key()` comparison.
+The valid issues are sorted by file and line range, then grouped and merged based on:
+- matching signatures from `group_key()` (file path, original code, proposed code),
+- proximity within a configurable merge gap (`CODEGUARDIAN_GROUP_LINE_GAP`, default 8 lines).
 
-The grouping logic also uses a configurable merge gap (`CODEGUARDIAN_GROUP_LINE_GAP`) so that related issues with matching code replacements can be published as one inline comment instead of multiple fragmented ones.
-
-This keeps the review cleaner and more readable.
+Issues that share the same signature and fall within the merge gap are merged into a single comment, reducing fragmentation and keeping the review cleaner.
 
 ### Building the comment content
 

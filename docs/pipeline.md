@@ -380,35 +380,6 @@ In that sense, the pipeline is a key part of the project because it turns the ag
 
 ---
 
-## Execution Flow Diagram
+## Resumed Execution Flow Diagram
 
-```mermaid
-flowchart TD
-    A[Pull request build triggered] --> B[Analyze PR stage]
-    B --> C[Checkout SCM]
-    C --> D[Extract repository name and project key]
-    D --> E[Detect project type]
-
-    E --> F1[Maven build and SonarQube scan]
-    E --> F2[Gradle build and SonarQube scan]
-    E --> F3[Node SonarQube scan]
-    E --> F4[Python SonarQube scan]
-    E --> F5[C or C++ SonarQube scan with compile_commands.json]
-    E --> F6[Generic SonarQube scan]
-    E --> F7[Fail if C or C++ project has no compile_commands.json]
-
-    F1 --> G[Run agent stage]
-    F2 --> G
-    F3 --> G
-    F4 --> G
-    F5 --> G
-    F6 --> G
-
-    G --> H[Load Jenkins credentials]
-    H --> I[Create data.json with PR metadata]
-    I --> J[Clone external CodeGuardian agent repository]
-    J --> K[Run agent.py]
-    K --> L[Agent fetches SonarQube findings]
-    L --> M[Agent generates and validates suggestions]
-    M --> N[Agent synchronizes inline comments in Bitbucket]
-    N --> O[Post action cleanup]
+![Pipeline execution flow diagram](Diagrams/pipeline/Pipeline.png)

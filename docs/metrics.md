@@ -67,7 +67,7 @@ Pushgateway solves that problem by allowing the agent to push its metrics at the
 
 ## Metrics Collected
 
-The current implementation defines four main metric families.
+The current implementation defines five main metric families.
 
 ### 1. `codeguardian_analysis_latency_seconds`
 
