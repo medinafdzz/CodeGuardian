@@ -382,4 +382,4 @@ In that sense, the pipeline is a key part of the project because it turns the ag
 
 ## Resumed Execution Flow Diagram
 
-![Pipeline execution flow diagram](Diagrams/pipeline/Pipeline.png)
+![Pipeline execution flow diagram](Diagrams/pipeline/pipeline.png)
