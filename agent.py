@@ -68,7 +68,6 @@ class Issue(BaseModel):
 
 
 class Decision(BaseModel):
-    decline_pr: bool
     issues: list[Issue]
 
 
@@ -1201,8 +1200,6 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         cache_key = batch_signature(project_key, batch)
         cached_response_text = batch_cache.get(cache_key)
 
-        response_text = None
-
         if cached_response_text:
             try:
                 partial_decision = IssueBatchDecision.model_validate_json(cached_response_text)
@@ -1347,7 +1344,6 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
     logger.info("Gemini batch cache misses: %s", batch_cache_misses)
 
     return Decision(
-        decline_pr=False,
         issues=model_issues,
     )
 
@@ -1913,12 +1909,7 @@ async def main() -> None:
 
     if not issues:
         logger.info("No relevant issues found by SonarQube. Reporting clean analysis state to the pull request.")
-        auto_decision = Decision(
-            decline_pr=False,
-            issues=[],
-            )
-
-        await report_to_bitbucket(pr_id, repo_slug, workspace, auto_decision)
+        await report_to_bitbucket(pr_id, repo_slug, workspace, Decision(issues=[]))
         return
 
     logger.info(f"Relevant issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
@@ -1929,8 +1920,6 @@ async def main() -> None:
 
     decision.issues, invalid_count = normalize_issues(decision.issues)
     decision.issues, patch_invalid_count = filter_valid_issues(decision.issues)
-
-    decision.decline_pr = has_blocking_findings
 
     if invalid_count:
         logger.info("Dropped %s invalid issues", invalid_count)
