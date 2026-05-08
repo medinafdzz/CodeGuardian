@@ -7,6 +7,7 @@ from mcp.client.streamable_http import streamable_http_client
 from codeguardian.config import get_atlassian_mcp_auth, get_atlassian_mcp_url
 
 
+@asynccontextmanager
 async def atlassian_rovo_session():
     async with httpx.AsyncClient(
             auth=get_atlassian_mcp_auth(),
