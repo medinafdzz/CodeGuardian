@@ -23,6 +23,7 @@ class Decision(BaseModel):
     issues: list[Issue]
 
 
+@dataclass(frozen=True)
 class ScopeInfo:
     kind: str
     name: str
