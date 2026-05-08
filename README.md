@@ -34,7 +34,18 @@ For this reason, the core logic and the current unit tests are designed to be ge
 
 | Path | Purpose |
 | --- | --- |
-| `agent.py` | Main execution and orchestration logic |
+| `agent.py` | Compatibility entrypoint used by Jenkins and local executions |
+| `codeguardian/runtime.py` | Runtime implementation of the agent |
+| `codeguardian/models.py` | Data models and custom exceptions |
+| `codeguardian/config.py` | Constants, environment configuration and cache helpers |
+| `codeguardian/text.py` | File reading, text normalization, language detection and scope helpers |
+| `codeguardian/validation.py` | Issue normalization and patch validation helpers |
+| `codeguardian/comments.py` | Comment formatting and hidden metadata helpers |
+| `codeguardian/input_contract.py` | Pipeline input JSON parsing |
+| `codeguardian/sonarqube.py` | SonarQube result parsing and retrieval helpers |
+| `codeguardian/ai.py` | AI batching, cache and generation helpers |
+| `codeguardian/bitbucket.py` | Bitbucket REST and comment synchronization helpers |
+| `codeguardian/cli.py` | Command-line entrypoint helper |
 | `docs/` | Architecture, pipeline, validation, synchronization and metrics documentation |
 | `requirements.txt` | Python dependencies for runtime and testing |
 | `tests/` | Unit tests for internal agent behaviour |
@@ -43,7 +54,7 @@ For this reason, the core logic and the current unit tests are designed to be ge
 
 ### codeguardian-core
 
-This repository contains the Python agent that orchestrates the review process.
+This repository contains the Python agent that orchestrates the review process. The root `agent.py` file is kept as a stable entrypoint, while the code is exposed through the `codeguardian/` package to make the project easier to understand and evolve.
 
 Its main responsibilities are:
 
