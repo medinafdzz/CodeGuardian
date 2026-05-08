@@ -282,6 +282,10 @@ Recommended sequence for the demo:
 8. Check that the agent publishes inline comments in Bitbucket.
 9. Review metrics in Prometheus or Grafana.
 
+The complete repeatable demo guide is available in:
+
+- [docs/end-to-end-demo.md](docs/end-to-end-demo.md)
+
 ## Relevant Pipeline Variables
 
 The `Jenkinsfile` of the demo repository defines variables like:
