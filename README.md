@@ -261,6 +261,19 @@ The provisioned dashboard includes panels for:
 - Bitbucket comment synchronization,
 - blocking finding indicator.
 
+The dashboard uses approximate colour thresholds for the demo:
+
+| Panel | Green | Yellow | Red |
+| --- | --- | --- | --- |
+| Analysis latency | `< 120 s` | `120-300 s` | `> 300 s` |
+| Token usage | `< 50k` | `50k-150k` | `> 150k` |
+| Final issues | `0-5` | `5-15` | `> 15` |
+| Blocking findings | `0` | - | `>= 1` |
+| Comment synchronization | `< 10` | `10-30` | `> 30` |
+| Batch cache activity | `< 10` | `10-30` | `> 30` |
+
+These thresholds are not strict production limits. They are practical limits for the TFG demo, used to identify executions that are normal, heavy or potentially problematic.
+
 Recommended metrics for future iterations:
 
 - errors by external system,
@@ -352,6 +365,14 @@ docker compose restart grafana
 If the dashboard appears but panels are empty, execute a Jenkins build first. The agent must push metrics to Pushgateway before Grafana can show data.
 
 If a data source is configured manually, do not use `localhost:9090`. Grafana runs inside a container, so it must use the internal service name `http://prometheus:9090`.
+
+If the dashboard shows too many duplicated series, clear old Pushgateway groups and execute the Jenkins build again:
+
+```bash
+curl -X DELETE http://localhost:9091/metrics/job/codeguardian_agent
+```
+
+This can happen after changing the metric labels, because Pushgateway keeps old pushed series until they are deleted.
 
 ### SonarQube Takes Time To Start
 

@@ -38,6 +38,14 @@
               {
                 "color": "green",
                 "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 120
+              },
+              {
+                "color": "red",
+                "value": 300
               }
             ]
           },
@@ -68,13 +76,14 @@
       },
       "targets": [
         {
-          "expr": "codeguardian_analysis_latency_seconds",
-          "legendFormat": "{{repository}}",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_latency_seconds{repository=\"$repository\"})",
+          "legendFormat": "$repository",
           "refId": "A"
         }
       ],
       "title": "Analysis Latency",
-      "type": "stat"
+      "type": "stat",
+      "description": "Green: under 2 minutes. Yellow: 2 to 5 minutes. Red: over 5 minutes."
     },
     {
       "datasource": {
@@ -84,9 +93,26 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
-          "unit": "short"
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50000
+              },
+              {
+                "color": "red",
+                "value": 150000
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -117,23 +143,24 @@
       },
       "targets": [
         {
-          "expr": "codeguardian_analysis_prompt_tokens",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_prompt_tokens{repository=\"$repository\"})",
           "legendFormat": "prompt",
           "refId": "A"
         },
         {
-          "expr": "codeguardian_analysis_response_tokens",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_response_tokens{repository=\"$repository\"})",
           "legendFormat": "response",
           "refId": "B"
         },
         {
-          "expr": "codeguardian_analysis_cached_tokens",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_cached_tokens{repository=\"$repository\"})",
           "legendFormat": "cached",
           "refId": "C"
         }
       ],
       "title": "Token Usage",
-      "type": "bargauge"
+      "type": "bargauge",
+      "description": "Green: under 50k tokens. Yellow: 50k to 150k tokens. Red: over 150k tokens."
     },
     {
       "datasource": {
@@ -151,6 +178,14 @@
               {
                 "color": "green",
                 "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 15
               }
             ]
           },
@@ -181,13 +216,14 @@
       },
       "targets": [
         {
-          "expr": "codeguardian_final_issues_total",
-          "legendFormat": "{{repository}}",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_final_issues_total{repository=\"$repository\"})",
+          "legendFormat": "$repository",
           "refId": "A"
         }
       ],
       "title": "Final Issues",
-      "type": "stat"
+      "type": "stat",
+      "description": "Green: 0 to 5 final issues. Yellow: 5 to 15. Red: more than 15."
     },
     {
       "datasource": {
@@ -239,13 +275,14 @@
       },
       "targets": [
         {
-          "expr": "codeguardian_blocking_findings",
-          "legendFormat": "{{repository}}",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_blocking_findings{repository=\"$repository\"})",
+          "legendFormat": "$repository",
           "refId": "A"
         }
       ],
       "title": "Blocking Findings",
-      "type": "stat"
+      "type": "stat",
+      "description": "Green: no blocker or critical findings. Red: at least one blocker or critical finding."
     },
     {
       "datasource": {
@@ -255,9 +292,26 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
-          "unit": "short"
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 15
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -284,33 +338,34 @@
       },
       "targets": [
         {
-          "expr": "codeguardian_sonar_findings_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_sonar_findings_total{repository=\"$repository\"})",
           "legendFormat": "sonar findings",
           "refId": "A"
         },
         {
-          "expr": "codeguardian_generated_issues_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_generated_issues_total{repository=\"$repository\"})",
           "legendFormat": "generated",
           "refId": "B"
         },
         {
-          "expr": "codeguardian_invalid_issues_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_invalid_issues_total{repository=\"$repository\"})",
           "legendFormat": "invalid",
           "refId": "C"
         },
         {
-          "expr": "codeguardian_patch_invalid_issues_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_patch_invalid_issues_total{repository=\"$repository\"})",
           "legendFormat": "patch invalid",
           "refId": "D"
         },
         {
-          "expr": "codeguardian_final_issues_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_final_issues_total{repository=\"$repository\"})",
           "legendFormat": "final",
           "refId": "E"
         }
       ],
       "title": "Issue Flow",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Green/yellow/red thresholds help identify large issue volumes during one execution."
     },
     {
       "datasource": {
@@ -320,9 +375,26 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
-          "unit": "short"
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -349,28 +421,29 @@
       },
       "targets": [
         {
-          "expr": "codeguardian_comments_desired_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_desired_total{repository=\"$repository\"})",
           "legendFormat": "desired",
           "refId": "A"
         },
         {
-          "expr": "codeguardian_comments_created_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_created_total{repository=\"$repository\"})",
           "legendFormat": "created",
           "refId": "B"
         },
         {
-          "expr": "codeguardian_comments_reused_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_reused_total{repository=\"$repository\"})",
           "legendFormat": "reused",
           "refId": "C"
         },
         {
-          "expr": "codeguardian_comments_deleted_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_deleted_total{repository=\"$repository\"})",
           "legendFormat": "deleted",
           "refId": "D"
         }
       ],
       "title": "Bitbucket Comment Synchronization",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Green/yellow/red thresholds help detect unusually high comment churn."
     },
     {
       "datasource": {
@@ -380,9 +453,26 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
-          "unit": "short"
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -409,18 +499,19 @@
       },
       "targets": [
         {
-          "expr": "codeguardian_batch_cache_hits_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_batch_cache_hits_total{repository=\"$repository\"})",
           "legendFormat": "hits",
           "refId": "A"
         },
         {
-          "expr": "codeguardian_batch_cache_misses_total",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_batch_cache_misses_total{repository=\"$repository\"})",
           "legendFormat": "misses",
           "refId": "B"
         }
       ],
       "title": "Batch Cache",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Green/yellow/red thresholds help detect unusually high cache activity or misses."
     },
     {
       "datasource": {
@@ -430,9 +521,26 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
-          "unit": "short"
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50000
+              },
+              {
+                "color": "red",
+                "value": 150000
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -459,28 +567,29 @@
       },
       "targets": [
         {
-          "expr": "codeguardian_analysis_total_tokens",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_total_tokens{repository=\"$repository\"})",
           "legendFormat": "total",
           "refId": "A"
         },
         {
-          "expr": "codeguardian_analysis_prompt_tokens",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_prompt_tokens{repository=\"$repository\"})",
           "legendFormat": "prompt",
           "refId": "B"
         },
         {
-          "expr": "codeguardian_analysis_response_tokens",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_response_tokens{repository=\"$repository\"})",
           "legendFormat": "response",
           "refId": "C"
         },
         {
-          "expr": "codeguardian_analysis_cached_tokens",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_cached_tokens{repository=\"$repository\"})",
           "legendFormat": "cached",
           "refId": "D"
         }
       ],
       "title": "Token Usage Over Time",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Green: under 50k tokens. Yellow: 50k to 150k tokens. Red: over 150k tokens."
     }
   ],
   "refresh": "10s",
@@ -491,7 +600,35 @@
     "tfg"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "demo-java",
+          "value": "demo-java"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(codeguardian_analysis_latency_seconds, repository)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Repository",
+        "multi": false,
+        "name": "repository",
+        "options": [],
+        "query": {
+          "query": "label_values(codeguardian_analysis_latency_seconds, repository)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-6h",
