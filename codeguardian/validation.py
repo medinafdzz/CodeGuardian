@@ -1,9 +1,11 @@
 import ast
 import os
 import re
+import subprocess
+from pathlib import Path
 
 from codeguardian.logging_utils import logger
-from codeguardian.models import Issue
+from codeguardian.models import AgentExecutionError, BuildValidationResult, Issue
 from codeguardian.text import clean_replacement_text, detect_language, normalize_code_block, read_file_lines
 
 
@@ -147,3 +149,32 @@ def filter_valid_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
         valid_issues.append(issue)
 
     return valid_issues, dropped_issues
+
+
+def validate_maven_compile(workspace: str | os.PathLike[str] = ".") -> BuildValidationResult:
+    workspace_path = Path(workspace)
+    pom_path = workspace_path / "pom.xml"
+
+    if not pom_path.exists():
+        logger.info("Maven compile validation skipped: pom.xml not found")
+        return BuildValidationResult(executed=False, success=True, reason="pom.xml not found")
+
+    command = ["mvn", "-B", "-q", "-ntp", "-DskipTests", "compile"]
+    logger.info("Running Maven compile validation")
+
+    result = subprocess.run(
+        command,
+        cwd=workspace_path,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+    if result.returncode != 0:
+        output = "\n".join(part for part in [result.stdout, result.stderr] if part).strip()
+        if output:
+            logger.error("Maven compile validation failed:\n%s", output[-4000:])
+        raise AgentExecutionError("Maven compile validation failed")
+
+    logger.info("Maven compile validation completed successfully")
+    return BuildValidationResult(executed=True, success=True)

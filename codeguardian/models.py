@@ -31,6 +31,13 @@ class ScopeInfo:
     end_line: int
 
 
+@dataclass(frozen=True)
+class BuildValidationResult:
+    executed: bool
+    success: bool
+    reason: str = ""
+
+
 class IssueBatchDecision(BaseModel):
     issues: list[Issue]
 

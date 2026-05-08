@@ -6,7 +6,7 @@ from codeguardian.input_contract import load_webhook_data
 from codeguardian.logging_utils import logger
 from codeguardian.models import AgentExecutionError, Decision
 from codeguardian.sonarqube import fetch_sonar_issues
-from codeguardian.validation import filter_valid_issues, normalize_issues
+from codeguardian.validation import filter_valid_issues, normalize_issues, validate_maven_compile
 
 
 async def main() -> None:
@@ -40,6 +40,8 @@ async def main() -> None:
 
     if patch_invalid_count:
         logger.info("Dropped %s issues after patch validation", patch_invalid_count)
+
+    validate_maven_compile()
 
     logger.info(
         "Execution summary: sonar_findings=%s generated_issues=%s dropped_invalid=%s dropped_patch_validation=%s final_issues=%s blocking_findings=%s",
