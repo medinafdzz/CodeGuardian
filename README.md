@@ -1,80 +1,165 @@
-# CodeGuardian Core
+# CodeGuardian
 
-## Summary
+CodeGuardian is the system developed for the final degree project. Its objective is to combine static analysis, CI/CD automation and AI assistance in the pull request review process.
 
-CodeGuardian is an automated pull request review assistant designed for CI/CD environments.
-SonarQube performs issue detection, the agent transforms and validates findings, and AI proposes concrete code fixes.
-Its goal is to transform static analysis findings into safe code-fix suggestions and publish them as inline comments in Bitbucket.
+The system does not use the AI model as the only source of truth. First, SonarQube detects issues in the target repository. After that, the CodeGuardian agent reads those findings, prepares the code context, asks the AI model for possible fixes, validates the generated suggestions and publishes the final feedback as inline comments in Bitbucket.
 
-This repository contains the main agent logic in `agent.py` and the technical documentation in the `docs/` folder.
+This repository, `codeguardian-core`, contains the main agent logic. At the same time, its README acts as the global entry point for the whole project because the agent is the central element of the system.
 
-## Repository structure
+## Project Repositories
 
-- `agent.py`: main execution and orchestration logic.
-- `docs/`: architecture, pipeline, validation, synchronization, and metrics documentation.
-- `requirements.txt`: Python dependencies for the agent runtime.
-- `tests/`: unit tests for the main internal logic of the agent.
+The project is divided into three repositories:
 
-## Core design
+| Repository | Responsibility |
+| --- | --- |
+| `codeguardian-core` | Main Python agent and technical documentation |
+| `codeguardian-infra` | Local infrastructure for Jenkins, SonarQube, Prometheus, Pushgateway and Grafana |
+| `app-demo` | Demo repository used to show the workflow with a controlled target project |
 
-The system clearly separates detection, generation, and publication:
+## Important Clarification About app-demo
+
+`app-demo` is not the only intended target of CodeGuardian. It is only a controlled repository used for demonstration, testing and presentation.
+
+The real goal of CodeGuardian is to analyse different repositories in a CI/CD environment, as long as the required execution context is available:
+
+- a pull request in Bitbucket,
+- a Jenkins pipeline,
+- SonarQube analysis,
+- repository access from the agent,
+- the expected PR metadata JSON contract.
+
+For this reason, the core logic and the current unit tests are designed to be generic and not coupled to `app-demo`.
+
+## Repository Structure
+
+| Path | Purpose |
+| --- | --- |
+| `agent.py` | Main execution and orchestration logic |
+| `docs/` | Architecture, pipeline, validation, synchronization and metrics documentation |
+| `requirements.txt` | Python dependencies for runtime and testing |
+| `tests/` | Unit tests for internal agent behaviour |
+
+## How The Three Repositories Work Together
+
+### codeguardian-core
+
+This repository contains the Python agent that orchestrates the review process.
+
+Its main responsibilities are:
+
+- reading pull request metadata from Jenkins,
+- retrieving SonarQube issues,
+- filtering and normalising findings,
+- resolving code scope,
+- grouping findings before sending them to the model,
+- validating generated code replacements,
+- synchronising inline comments in Bitbucket,
+- exporting execution metrics.
+
+### codeguardian-infra
+
+This repository provides the Docker-based local environment used to run the system end to end.
+
+It includes:
+
+- Jenkins with Blue Ocean,
+- SonarQube Community,
+- Prometheus,
+- Pushgateway,
+- Grafana,
+- a custom Jenkins image with Java, Python, Node and analysis tools.
+
+Its purpose is to make the project reproducible and demonstrable.
+
+### app-demo
+
+This repository is a Java project used as a demonstration target.
+
+It intentionally contains different quality problems so that SonarQube can detect findings and CodeGuardian can publish comments in a realistic pull request workflow.
+
+Even if `app-demo` is useful for the demo, the system is not limited to this repository. Another repository can be analysed if it can be processed by the same CI/CD and SonarQube pipeline model.
+
+## Global Execution Flow
+
+The expected end-to-end flow is:
+
+```text
+1. A developer opens a pull request in a target repository.
+2. Bitbucket triggers the Jenkins pipeline.
+3. Jenkins checks out the pull request code.
+4. Jenkins runs SonarQube analysis.
+5. Jenkins creates a JSON file with pull request metadata.
+6. Jenkins executes the CodeGuardian agent.
+7. The agent retrieves SonarQube issues.
+8. The agent prepares code context and groups findings.
+9. The AI model generates possible fix suggestions.
+10. The agent validates the generated replacements.
+11. Valid suggestions are published as inline comments in Bitbucket.
+12. Execution metrics are pushed to Pushgateway.
+13. Prometheus and Grafana expose the metrics.
+```
+
+## Core Design
+
+The system clearly separates detection, generation and publication:
 
 - SonarQube detects problems.
-- The agent decides what to process, validates results, and orchestrates the workflow.
+- The agent decides what to process and validates the results.
 - AI proposes concrete code changes.
 - Bitbucket displays the final feedback inside the pull request.
 
-This separation reduces operational risk compared to direct "LLM-only" approaches without validation barriers.
+This separation reduces operational risk compared to a direct LLM-only approach without validation barriers.
 
-## End-to-end flow
+## JSON Contracts
 
-1. A pull request triggers the Jenkins pipeline.
-2. Jenkins runs SonarQube analysis on the repository under review.
-3. Jenkins builds a PR-context JSON file and executes `agent.py`.
-4. The agent queries SonarQube through MCP and receives findings in JSON format.
-5. The agent filters, enriches, and groups findings by code scope.
-6. AI generates fix proposals per batch.
-7. The agent normalizes and validates each proposal.
-8. Valid proposals are synchronized as inline comments in Bitbucket.
-9. Execution metrics are exported to Prometheus Pushgateway.
+CodeGuardian uses two different JSON contracts.
 
-## JSON contracts in the system
+### 1. Pipeline input JSON
 
-CodeGuardian uses two different JSON contracts:
+This JSON is created by Jenkins and consumed by the agent.
 
-1. Pipeline input JSON (Jenkins -> agent)
+Required fields:
 
-- PR metadata JSON with:
-  - `project_key`
-  - `pr_id`
-  - `repo_slug`
-  - `workspace`
-- It is consumed by the agent execution using the PR metadata input contract.
+- `project_key`
+- `pr_id`
+- `repo_slug`
+- `workspace`
 
-2. SonarQube findings JSON (SonarQube MCP -> agent)
+Example:
 
-- The agent invokes the SonarQube MCP tool.
-- SonarQube returns findings in a JSON payload.
-- The agent parses, cleans, and prioritizes that JSON before calling the model.
+```json
+{
+  "project_key": "my-project",
+  "pr_id": "123",
+  "repo_slug": "my-repo",
+  "workspace": "my-workspace"
+}
+```
 
-## Bitbucket integration architecture
+### 2. SonarQube findings JSON
+
+The agent invokes the SonarQube MCP tool and receives findings as JSON. The agent then parses, cleans and prioritises that payload before calling the model.
+
+## Bitbucket Integration
 
 Bitbucket integration is split by responsibility:
 
-- Pull request comment reading: Atlassian Rovo MCP.
-- Inline comment creation and deletion: Bitbucket REST API.
+- pull request comment reading: Atlassian Rovo MCP,
+- inline comment creation and deletion: Bitbucket REST API.
 
-This mixed model is intentionally chosen to maximize control and reliability over the inline comment lifecycle.
+This mixed model is used to keep better control over the inline comment lifecycle.
 
-## Reliability mechanisms
+## Reliability Mechanisms
 
 The agent includes safety barriers before publishing suggestions:
 
-- Strict prompt and response-format rules.
-- Issue normalization and deduplication.
-- Applicability check: `original_code` must match real repository content.
-- Python syntax validation with `ast.parse()`.
-- Incremental comment synchronization (create, reuse, delete) using content signatures.
+- strict prompt and response-format rules,
+- issue normalization and deduplication,
+- applicability check: `original_code` must match the real repository content,
+- Python syntax validation with `ast.parse()`,
+- incremental comment synchronization using content signatures.
+
+These mechanisms do not guarantee perfect correctness, but they reduce the probability of publishing invalid suggestions.
 
 ## Observability
 
@@ -88,13 +173,13 @@ Analysis metrics are exported to Pushgateway, including:
 
 In addition, the agent logs:
 
-- cache behavior,
+- cache behaviour,
 - validation summary,
 - inline synchronization summary.
 
-This makes the execution easier to monitor, evaluate, and troubleshoot across builds.
+This makes the execution easier to monitor, evaluate and troubleshoot across builds.
 
-## Runtime requirements
+## Runtime Requirements
 
 Main environment variables:
 
@@ -104,32 +189,20 @@ Main environment variables:
 - `BITBUCKET_API_TOKEN`
 - `ATLASSIAN_MCP_AUTH_HEADER`
 
-Additional optional variables are available for cache configuration, endpoints, and grouping behavior.
+Additional optional variables are available for cache configuration, endpoints and grouping behaviour.
 
-## Minimal agent invocation
+## Minimal Agent Invocation
 
-This is a minimal invocation example, not a full local quickstart.
-Successful execution still depends on valid credentials, reachable SonarQube and Bitbucket services,
-working MCP/REST integrations, and a repository context that matches the provided PR metadata.
+This is a minimal invocation example, not a full local quickstart. Successful execution still depends on valid credentials, reachable SonarQube and Bitbucket services, working MCP and REST integrations, and a repository context that matches the provided PR metadata.
 
 1. Install dependencies from `requirements.txt`.
 2. Configure required environment variables.
-3. Create a pull-request input JSON (this is not the SonarQube findings JSON), for example:
-
-```json
-{
-  "project_key": "my-project",
-  "pr_id": "123",
-  "repo_slug": "my-repo",
-  "workspace": "my-workspace"
-}
-```
-
+3. Create the pull request input JSON.
 4. Run the agent entry point.
 
 ## Tests
 
-The repository includes a first unit test suite focused on the internal behaviour of the agent. These tests do not depend on Jenkins, Bitbucket, SonarQube or a specific demo repository. Their purpose is to protect the current logic before future refactoring of `agent.py`.
+The repository includes a first unit test suite focused on the internal behaviour of the agent. These tests do not depend on Jenkins, Bitbucket, SonarQube or a specific demo repository.
 
 Run the tests with:
 
@@ -150,11 +223,11 @@ Current test coverage:
 
 The current suite is mainly a characterization suite. It captures the present behaviour of the core agent so that internal refactoring can be done with lower regression risk.
 
-## Workflow diagram
+## Workflow Diagram
 
 <img src="docs/Diagrams/workflow/workflow.png" alt="CodeGuardian workflow diagram" width="800">
 
-## Technical documentation
+## Technical Documentation
 
 - [docs/architecture.md](docs/architecture.md)
 - [docs/agent.md](docs/agent.md)
@@ -163,12 +236,13 @@ The current suite is mainly a characterization suite. It captures the present be
 - [docs/pipeline.md](docs/pipeline.md)
 - [docs/metrics.md](docs/metrics.md)
 
-## Current scope and limitations
+## Current Scope and Limitations
 
-- The strongest validation is currently implemented for Python (syntax parsing).
-- For other ecosystems, applicability validation is used, without compilation or tests by default.
+- The strongest validation is currently implemented for Python.
+- For other ecosystems, applicability validation is used without compilation or tests by default.
 - Part of scope detection in brace-based languages is heuristic.
+- The current automated tests focus on internal core logic, not on full external-service integration.
 
 ## Status
 
-The repository provides a stable baseline for automated pull request review in CI/CD environments, with an emphasis on safe publication, traceability, and incremental synchronization.
+The repository provides a stable baseline for automated pull request review in CI/CD environments, with emphasis on safe publication, traceability, observability and future extensibility to different target repositories.
