@@ -168,6 +168,7 @@ The agent includes safety barriers before publishing suggestions:
 - issue normalization and deduplication,
 - applicability check: `original_code` must match the real repository content,
 - Python syntax validation with `ast.parse()`,
+- Maven compile validation with `mvn compile` when a `pom.xml` file exists,
 - incremental comment synchronization using content signatures.
 
 These mechanisms do not guarantee perfect correctness, but they reduce the probability of publishing invalid suggestions.
@@ -228,6 +229,7 @@ Current test coverage:
 - `tests/test_input_contract.py`: checks the Jenkins-to-agent JSON input contract and default workspace handling.
 - `tests/test_issue_normalization.py`: checks issue cleanup, severity normalization, line-range correction, deduplication and fallback issue keys.
 - `tests/test_patch_validation.py`: checks patch application against real temporary files, `original_code` matching, Python syntax validation and dropping of invalid issues.
+- `tests/test_build_validation.py`: checks Maven compile validation, including skipped execution when no `pom.xml` exists and failure when Maven compilation fails.
 - `tests/test_comments.py`: checks hidden issue identifiers, CodeGuardian comment markers and generated inline comment content.
 - `tests/test_scope_batching.py`: checks grouping of findings by function or global scope before sending them to the model.
 - `tests/test_sonar_results.py`: checks parsing of SonarQube JSON responses into the internal simplified format.
@@ -249,8 +251,9 @@ The current suite is mainly a characterization suite. It captures the present be
 
 ## Current Scope and Limitations
 
-- The strongest validation is currently implemented for Python.
-- For other ecosystems, applicability validation is used without compilation or tests by default.
+- The strongest per-file syntax validation is currently implemented for Python.
+- Java projects with Maven are also validated at project level with `mvn compile` when `pom.xml` is present.
+- Other ecosystems still use applicability validation without compilation or tests by default.
 - Part of scope detection in brace-based languages is heuristic.
 - The current automated tests focus on internal core logic, not on full external-service integration.
 

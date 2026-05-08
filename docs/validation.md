@@ -25,12 +25,13 @@ This means that a system that directly publishes model output would be too fragi
 
 ## Validation Goals
 
-The current validation strategy has four main goals:
+The current validation strategy has five main goals:
 
 1. Ensure that the proposed replacement still matches the current version of the file.
 2. Reject malformed or trivial model outputs.
 3. Add at least one language-specific syntax barrier where it is inexpensive and reliable.
 4. Prevent invalid suggestions from reaching the pull request comments.
+5. Check Maven compilation for Java projects when the repository contains a `pom.xml`.
 
 These goals are intentionally practical. The system is designed to reduce obvious bad suggestions without turning the validation stage into a full build system or language server.
 
@@ -55,13 +56,16 @@ This means the model is allowed to propose fixes, but the agent still decides wh
 
 ## Validation Stages
 
-The current validation strategy is composed of two main stages:
+The current validation strategy is composed of two main issue-level stages:
 
 - normalization and structural filtering,
 - patch applicability validation.
 
 In Python, a third stage is added:
 - syntax validation with `ast.parse()`.
+
+At project level, a Maven validation stage is also executed when the workspace contains a `pom.xml` file:
+- Maven compile validation with `mvn -B -q -ntp -DskipTests compile`.
 
 ---
 
@@ -181,6 +185,31 @@ This design is useful because it allows the caller to log why the issue was reje
 
 ---
 
+## 4. Maven Compile Validation
+
+For Java projects that use Maven, CodeGuardian now adds a project-level compilation check before publishing the final comments.
+
+This logic is implemented in `validate_maven_compile()`.
+
+The behaviour is simple:
+
+1. The agent checks if the current workspace contains a `pom.xml` file.
+2. If no `pom.xml` exists, the Maven validation is skipped.
+3. If `pom.xml` exists, the agent runs:
+
+```bash
+mvn -B -q -ntp -DskipTests compile
+```
+
+4. If Maven returns a non-zero exit code, the agent stops with an explicit error.
+5. If Maven succeeds, the normal Bitbucket synchronization continues.
+
+This validation is intentionally project-level. It checks that the pull request workspace can compile as a Maven project. It does not apply every proposed AI replacement into the repository and compile each generated patch one by one, because that would make the agent much slower and more complex.
+
+Even with this limitation, it is useful because Java repositories that are already broken at compilation level are detected before publishing review feedback.
+
+---
+
 ## Filtering Invalid Proposals
 
 The function `filter_valid_issues()` applies `validate_issue()` to all generated issues and keeps only the valid ones. Invalid issues are counted and logged with the corresponding reason.
@@ -199,9 +228,10 @@ The current strategy helps prevent several common failure cases, including:
 - suggestions pointing to invalid or inconsistent line ranges,
 - duplicated or empty generated issues,
 - no-op replacements where nothing really changes,
-- and syntax-breaking Python replacements.
+- syntax-breaking Python replacements,
+- and Maven projects that do not compile.
 
-This makes the system more reliable than a pure prompt-based solution, even though it still remains lighter than a full compiler or test-based validation pipeline.
+This makes the system more reliable than a pure prompt-based solution, even though it still remains lighter than a full test-based validation pipeline.
 
 ---
 
@@ -212,7 +242,7 @@ It is important to state clearly what this validation strategy does **not** solv
 The current approach does not guarantee:
 
 - semantic correctness of the fix,
-- successful compilation for Java, C, C++, or other compiled languages,
+- successful compilation for non-Maven Java, C, C++, or other compiled languages,
 - project-level dependency correctness,
 - test success,
 - or absence of behavioural regressions.
@@ -284,7 +314,7 @@ The current validation strategy is a good baseline, but it could be extended in 
 
 Possible improvements include:
 
-- Java validation through Maven or Gradle compilation,
+- Gradle validation for Java projects that do not use Maven,
 - TypeScript validation through `tsc --noEmit`,
 - C/C++ validation through compiler metadata such as `compile_commands.json`,
 - validation of required imports,
