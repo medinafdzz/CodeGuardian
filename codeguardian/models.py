@@ -21,6 +21,7 @@ class Issue(BaseModel):
 
 class Decision(BaseModel):
     issues: list[Issue]
+    metrics: "AnalysisMetrics" = Field(default_factory=lambda: AnalysisMetrics())
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,35 @@ class BuildValidationResult:
     executed: bool
     success: bool
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class AnalysisMetrics:
+    latency_seconds: float = 0.0
+    prompt_tokens: int = 0
+    response_tokens: int = 0
+    total_tokens: int = 0
+    cached_tokens: int = 0
+    batch_cache_hits: int = 0
+    batch_cache_misses: int = 0
+
+
+@dataclass(frozen=True)
+class ExecutionMetrics:
+    sonar_findings: int = 0
+    generated_issues: int = 0
+    invalid_issues: int = 0
+    patch_invalid_issues: int = 0
+    final_issues: int = 0
+    blocking_findings: bool = False
+
+
+@dataclass(frozen=True)
+class CommentSyncResult:
+    desired: int = 0
+    created: int = 0
+    reused: int = 0
+    deleted: int = 0
 
 
 class IssueBatchDecision(BaseModel):

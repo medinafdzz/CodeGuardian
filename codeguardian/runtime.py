@@ -4,7 +4,8 @@ from codeguardian.ai import analyze_code_with_gemini
 from codeguardian.bitbucket import report_to_bitbucket
 from codeguardian.input_contract import load_webhook_data
 from codeguardian.logging_utils import logger
-from codeguardian.models import AgentExecutionError, Decision
+from codeguardian.metrics import push_execution_metrics
+from codeguardian.models import AgentExecutionError, AnalysisMetrics, Decision, ExecutionMetrics
 from codeguardian.sonarqube import fetch_sonar_issues
 from codeguardian.validation import filter_valid_issues, normalize_issues, validate_maven_compile
 
@@ -23,7 +24,14 @@ async def main() -> None:
 
     if not issues:
         logger.info("No relevant issues found by SonarQube. Reporting clean analysis state to the pull request.")
-        await report_to_bitbucket(pr_id, repo_slug, workspace, Decision(issues=[]))
+        decision = Decision(issues=[])
+        comments = await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
+        push_execution_metrics(
+            project_key,
+            AnalysisMetrics(),
+            ExecutionMetrics(),
+            comments,
+        )
         return
 
     logger.info(f"Relevant issues found by SonarQube: {len(issues)}. Proceeding with AI analysis.")
@@ -53,4 +61,17 @@ async def main() -> None:
         has_blocking_findings,
     )
 
-    await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
+    comments = await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
+    push_execution_metrics(
+        project_key,
+        decision.metrics,
+        ExecutionMetrics(
+            sonar_findings=len(issues),
+            generated_issues=len(decision.issues) + invalid_count + patch_invalid_count,
+            invalid_issues=invalid_count,
+            patch_invalid_issues=patch_invalid_count,
+            final_issues=len(decision.issues),
+            blocking_findings=has_blocking_findings,
+        ),
+        comments,
+    )

@@ -12,7 +12,7 @@ from codeguardian.atlassian import atlassian_rovo_session
 from codeguardian.comments import comment_content, extract_issue_key, is_agent_comment
 from codeguardian.config import CODEGUARDIAN_AGENT_MARKER, CODEGUARDIAN_SUMMARY_TITLE
 from codeguardian.logging_utils import logger
-from codeguardian.models import AgentExecutionError, Decision, Issue
+from codeguardian.models import AgentExecutionError, CommentSyncResult, Decision, Issue
 from codeguardian.validation import group_key, issue_key
 
 
@@ -388,7 +388,7 @@ async def synchronize_inline_comments(
     repo_slug: str,
     workspace: str,
     issues: list[Issue],
-) -> int:
+) -> CommentSyncResult:
     active_inline_comments = await get_inline_comments(session, pr_id, repo_slug, workspace)
 
     valid_issues = [issue for issue in issues if issue.file and issue.solution and issue.problem]
@@ -520,7 +520,12 @@ async def synchronize_inline_comments(
         deleted_comments,
     )
 
-    return created_comments
+    return CommentSyncResult(
+        desired=len(desired_comments),
+        created=created_comments,
+        reused=reused_comments,
+        deleted=deleted_comments,
+    )
 
 
 async def report_to_bitbucket(
@@ -528,7 +533,7 @@ async def report_to_bitbucket(
     repo_slug: str,
     workspace: str,
     decision: Decision,
-) -> None:
+) -> CommentSyncResult:
     if not pr_id or str(pr_id).lower() == "null":
         logger.error("No valid pull request ID was provided.")
         raise AgentExecutionError("Missing pull request ID")
@@ -544,7 +549,7 @@ async def report_to_bitbucket(
                 workspace,
             )
 
-            await synchronize_inline_comments(
+            sync_result = await synchronize_inline_comments(
                 session_bb,
                 pr_id,
                 repo_slug,
@@ -553,6 +558,7 @@ async def report_to_bitbucket(
             )
 
             logger.info("Comments synchronized")
+            return sync_result
 
     except Exception as e:
         logger.error(f"Failed to report analysis results to Bitbucket: {e}")

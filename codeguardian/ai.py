@@ -5,7 +5,6 @@ import time
 
 import google.genai as genai
 from google.genai import types
-from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 from codeguardian.config import (
     CACHE_MODE,
@@ -20,7 +19,7 @@ from codeguardian.config import (
     save_cache_metadata,
 )
 from codeguardian.logging_utils import logger
-from codeguardian.models import Decision, Issue, IssueBatchDecision
+from codeguardian.models import AnalysisMetrics, Decision, Issue, IssueBatchDecision
 from codeguardian.text import read_file_lines
 
 
@@ -293,62 +292,6 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
         model_issues.extend(kept_batch_issues.values())
 
     duration = time.time() - start_time
-    current_timestamp = time.time()
-
-    registry = CollectorRegistry()
-    latency = Gauge(
-        "codeguardian_analysis_latency_seconds",
-        "Response time of Gemini model (s)",
-        registry=registry,
-    )
-    execution_time = Gauge(
-        "codeguardian_last_execution_timestamp",
-        "Timestamp of the last agent execution",
-        registry=registry,
-    )
-    prompt_tokens = Gauge(
-        "codeguardian_analysis_prompt_tokens",
-        "Tokens used in the prompt sent to Gemini model",
-        registry=registry,
-    )
-    response_tokens = Gauge(
-        "codeguardian_analysis_response_tokens",
-        "Tokens used in the response received",
-        registry=registry,
-    )
-    total_tokens_metric = Gauge(
-        "codeguardian_analysis_total_tokens",
-        "Total tokens used in the Gemini model response",
-        registry=registry,
-    )
-
-    latency.set(duration)
-    execution_time.set(current_timestamp)
-    prompt_tokens.set(total_prompt_tokens)
-    response_tokens.set(total_response_tokens)
-    total_tokens_metric.set(total_tokens)
-
-    try:
-        build_id = os.getenv("BUILD_NUMBER", "local_build")
-        event_type = "pull_request"
-        display_label = f"{project_key}-PR-{build_id}"
-
-        push_to_gateway(
-            "pushgateway:9091",
-            job="codeguardian_agent",
-            grouping_key={
-                "build_number": build_id,
-                "event_type": event_type,
-                "display_id": display_label,
-                "repository": project_key,
-                "exec_timestamp": str(int(current_timestamp)),
-            },
-            registry=registry,
-        )
-
-    except Exception as metric_error:
-        logger.error(f"Failed to push metrics to Prometheus Pushgateway: {metric_error}")
-
     logger.info("Gemini produced %s issues", len(model_issues))
 
     if total_cached_tokens:
@@ -362,4 +305,13 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
 
     return Decision(
         issues=model_issues,
+        metrics=AnalysisMetrics(
+            latency_seconds=duration,
+            prompt_tokens=total_prompt_tokens,
+            response_tokens=total_response_tokens,
+            total_tokens=total_tokens,
+            cached_tokens=total_cached_tokens,
+            batch_cache_hits=batch_cache_hits,
+            batch_cache_misses=batch_cache_misses,
+        ),
     )
