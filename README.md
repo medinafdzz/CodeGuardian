@@ -13,6 +13,7 @@ This repository contains the main agent logic in `agent.py` and the technical do
 - `agent.py`: main execution and orchestration logic.
 - `docs/`: architecture, pipeline, validation, synchronization, and metrics documentation.
 - `requirements.txt`: Python dependencies for the agent runtime.
+- `tests/`: unit tests for the main internal logic of the agent.
 
 ## Core design
 
@@ -125,6 +126,29 @@ working MCP/REST integrations, and a repository context that matches the provide
 ```
 
 4. Run the agent entry point.
+
+## Tests
+
+The repository includes a first unit test suite focused on the internal behaviour of the agent. These tests do not depend on Jenkins, Bitbucket, SonarQube or a specific demo repository. Their purpose is to protect the current logic before future refactoring of `agent.py`.
+
+Run the tests with:
+
+```bash
+pytest -q
+```
+
+Current test coverage:
+
+- `tests/test_language_detection.py`: checks language detection from file extensions for different ecosystems.
+- `tests/test_text_normalization.py`: checks cleanup of generated code text and normalization of code blocks before comparison.
+- `tests/test_input_contract.py`: checks the Jenkins-to-agent JSON input contract and default workspace handling.
+- `tests/test_issue_normalization.py`: checks issue cleanup, severity normalization, line-range correction, deduplication and fallback issue keys.
+- `tests/test_patch_validation.py`: checks patch application against real temporary files, `original_code` matching, Python syntax validation and dropping of invalid issues.
+- `tests/test_comments.py`: checks hidden issue identifiers, CodeGuardian comment markers and generated inline comment content.
+- `tests/test_scope_batching.py`: checks grouping of findings by function or global scope before sending them to the model.
+- `tests/test_sonar_results.py`: checks parsing of SonarQube JSON responses into the internal simplified format.
+
+The current suite is mainly a characterization suite. It captures the present behaviour of the core agent so that internal refactoring can be done with lower regression risk.
 
 ## Workflow diagram
 
