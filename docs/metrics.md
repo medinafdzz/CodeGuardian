@@ -43,7 +43,7 @@ This means the system supports both:
 - machine-readable monitoring through Prometheus and Grafana,
 - and human-readable inspection through Jenkins logs.
 
-The metrics part is implemented inside `analyze_code_with_AI()`, while the logging summaries are distributed across the analysis, validation and synchronization stages.
+The metric values are collected across the analysis, validation and synchronization stages. The final push to Pushgateway is centralized in `codeguardian/metrics.py`.
 
 ---
 
@@ -55,7 +55,7 @@ The agent uses the `prometheus_client` library and pushes data to **Prometheus P
 - `Gauge`
 - `push_to_gateway`
 
-The metrics are pushed at the end of the AI analysis step, once the model interaction has completed and the token counters are available.
+The metrics are pushed near the end of the agent execution, once the model interaction, validation and Bitbucket synchronization have completed.
 
 ### Why Pushgateway is used
 
@@ -67,7 +67,7 @@ Pushgateway solves that problem by allowing the agent to push its metrics at the
 
 ## Metrics Collected
 
-The current implementation defines five main metric families.
+The current implementation defines several metric families.
 
 ### 1. `codeguardian_analysis_latency_seconds`
 
@@ -136,9 +136,49 @@ This is the most direct metric for measuring model usage at execution level. It 
 
 ---
 
+### 6. Cache metrics
+
+The agent exports:
+
+- `codeguardian_analysis_cached_tokens`
+- `codeguardian_batch_cache_hits_total`
+- `codeguardian_batch_cache_misses_total`
+
+These metrics show how much cache reuse happened during an execution. This is useful because cache behaviour has a direct effect on latency and token usage.
+
+---
+
+### 7. Issue flow metrics
+
+The agent exports:
+
+- `codeguardian_sonar_findings_total`
+- `codeguardian_generated_issues_total`
+- `codeguardian_invalid_issues_total`
+- `codeguardian_patch_invalid_issues_total`
+- `codeguardian_final_issues_total`
+- `codeguardian_blocking_findings`
+
+These values make the validation effect visible in Prometheus. They show how many findings entered the agent, how many suggestions were generated, how many were discarded and how many survived.
+
+---
+
+### 8. Bitbucket comment metrics
+
+The agent exports:
+
+- `codeguardian_comments_desired_total`
+- `codeguardian_comments_created_total`
+- `codeguardian_comments_reused_total`
+- `codeguardian_comments_deleted_total`
+
+These metrics show how the inline comment synchronization behaved in the pull request.
+
+---
+
 ## How Metrics Are Calculated
 
-The metric calculation happens inside `analyze_code_with_AI()`.
+The AI-related metric calculation happens inside `analyze_code_with_gemini()`. The final registry creation and Pushgateway export happen inside `codeguardian/metrics.py`.
 
 ### Latency timing
 
@@ -209,7 +249,7 @@ They also make historical comparisons easier when analyzing multiple runs.
 
 ## Cache-Related Observability
 
-Even though batch cache hits and misses are not currently exported as Prometheus metrics, they are still recorded in the logs.
+Batch cache hits and misses are exported as Prometheus metrics and are also recorded in the logs.
 
 At the end of the AI analysis step, the agent logs:
 
@@ -229,7 +269,7 @@ For example:
 - a cold run with many cache misses will normally be slower and consume more tokens,
 - while a warm run with reused cached results should be faster and cheaper.
 
-So even though this data is not yet pushed as Prometheus metrics, it is still a valuable part of the current observability model.
+This data is useful in dashboards and also in Jenkins logs when debugging one specific execution.
 
 ---
 
@@ -321,14 +361,7 @@ The current observability model is useful, but it still has limitations.
 
 ### 1. Some useful data remains only in logs
 
-At the moment, values such as:
-- cache hits,
-- cache misses,
-- dropped invalid issues,
-- dropped patch validation issues,
-- created or deleted comments
-
-are not exported as Prometheus metrics. They are available only in the logs.
+Most execution-level values are now exported as Prometheus metrics. Some lower-level details, such as individual rejection reasons or per-batch failures, are still available only in logs.
 
 ### 2. No per-batch metrics
 
@@ -348,12 +381,10 @@ The agent pushes execution-level metrics, but it does not implement its own hist
 
 Several extensions could make the metrics system stronger in later iterations:
 
-- exporting cache hits and misses as Prometheus metrics,
-- exporting dropped issue counts as metrics,
 - adding counters for REST failures and MCP failures,
 - adding repository-level quality indicators,
-- tracking the number of comments created, reused and deleted as metrics,
-- and adding dashboards that combine latency, token usage and validation drop rate.
+- exporting per-batch latency and token usage,
+- and adding long-term aggregate panels by repository.
 
 These improvements would be especially useful in a more production-oriented deployment.
 

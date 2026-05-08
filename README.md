@@ -181,6 +181,11 @@ Analysis metrics are exported to Pushgateway, including:
 - prompt tokens,
 - response tokens,
 - total tokens,
+- cached tokens,
+- cache hits and misses,
+- SonarQube findings,
+- generated, dropped and final issues,
+- Bitbucket comments created, reused and deleted,
 - last execution timestamp.
 
 In addition, the agent logs:
