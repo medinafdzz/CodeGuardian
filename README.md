@@ -223,23 +223,50 @@ Metrics flow:
 agent.py -> Pushgateway -> Prometheus -> Grafana
 ```
 
+Grafana is provisioned automatically from the files under:
+
+```text
+grafana/provisioning/
+grafana/dashboards/
+```
+
+This means the Prometheus data source and the `CodeGuardian Overview` dashboard are created when the Grafana container starts. They do not need to be created manually from the web interface.
+
 Current expected metrics:
 
 - analysis latency,
 - last execution timestamp,
 - prompt tokens,
 - response tokens,
-- total tokens.
+- total tokens,
+- cached tokens,
+- batch cache hits and misses,
+- SonarQube findings,
+- generated issues,
+- invalid generated issues,
+- patch validation drops,
+- final issues,
+- blocking findings,
+- desired comments,
+- created comments,
+- reused comments,
+- deleted comments.
+
+The provisioned dashboard includes panels for:
+
+- analysis latency,
+- token usage,
+- issue flow,
+- batch cache behaviour,
+- Bitbucket comment synchronization,
+- blocking finding indicator.
 
 Recommended metrics for future iterations:
 
-- issues received from SonarQube,
-- issues sent to the model,
-- generated suggestions,
-- suggestions discarded by validation,
-- comments created, reused and deleted,
-- cache hits and cache misses,
-- errors by external system.
+- errors by external system,
+- per-batch latency,
+- per-batch token usage,
+- repository-level historical aggregates.
 
 ## End-To-End Execution
 
@@ -306,13 +333,21 @@ http://localhost:9090/targets
 
 ### Grafana Does Not Show Data
 
-Configure Prometheus as data source:
+Prometheus is provisioned automatically as the default data source:
 
 ```text
 URL: http://prometheus:9090
 ```
 
-If `localhost:9090` is configured from the browser, Grafana will try to resolve it from inside the container and not from the host machine.
+If the dashboard does not appear, restart Grafana:
+
+```bash
+docker compose restart grafana
+```
+
+If the dashboard appears but panels are empty, execute a Jenkins build first. The agent must push metrics to Pushgateway before Grafana can show data.
+
+If a data source is configured manually, do not use `localhost:9090`. Grafana runs inside a container, so it must use the internal service name `http://prometheus:9090`.
 
 ### SonarQube Takes Time To Start
 
