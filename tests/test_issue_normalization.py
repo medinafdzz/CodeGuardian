@@ -1,4 +1,5 @@
-from agent import Issue, group_key, issue_key, normalize_issues
+from codeguardian.models import Issue
+from codeguardian.validation import group_key, issue_key, normalize_issues
 
 
 def make_issue(**overrides):

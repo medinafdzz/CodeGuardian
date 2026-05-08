@@ -1,12 +1,12 @@
-from agent import (
-    CODEGUARDIAN_AGENT_MARKER,
-    Issue,
+from codeguardian.comments import (
     comment_content,
     extract_issue_key,
     hidden_ids,
     is_agent_comment,
     wrap_agent_comment,
 )
+from codeguardian.config import CODEGUARDIAN_AGENT_MARKER
+from codeguardian.models import Issue
 
 
 def make_issue(**overrides):

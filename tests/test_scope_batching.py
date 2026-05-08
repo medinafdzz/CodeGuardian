@@ -1,4 +1,4 @@
-from agent import build_scope_batches
+from codeguardian.ai import build_scope_batches
 
 
 def test_build_scope_batches_groups_issues_from_same_function_scope():

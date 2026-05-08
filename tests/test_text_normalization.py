@@ -1,4 +1,4 @@
-from agent import clean_replacement_text, normalize_code_block
+from codeguardian.text import clean_replacement_text, normalize_code_block
 
 
 def test_clean_replacement_text_converts_literal_newlines_and_removes_fences():

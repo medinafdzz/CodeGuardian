@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent import clean_sonar_results
+from codeguardian.sonarqube import clean_sonar_results
 
 
 def make_raw_results(payload):

@@ -1,6 +1,6 @@
 import pytest
 
-from agent import detect_language
+from codeguardian.text import detect_language
 
 
 @pytest.mark.parametrize(

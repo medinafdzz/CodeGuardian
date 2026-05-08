@@ -1,6 +1,6 @@
 import json
 
-from agent import load_webhook_data
+from codeguardian.input_contract import load_webhook_data
 
 
 def test_load_webhook_data_returns_required_pull_request_context(tmp_path):

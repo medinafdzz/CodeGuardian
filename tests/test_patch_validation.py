@@ -1,4 +1,6 @@
-from agent import Issue, filter_valid_issues, patched_file_content, read_file_lines, validate_issue
+from codeguardian.models import Issue
+from codeguardian.text import read_file_lines
+from codeguardian.validation import filter_valid_issues, patched_file_content, validate_issue
 
 
 def make_issue(file_path, **overrides):
