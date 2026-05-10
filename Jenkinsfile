@@ -8,6 +8,8 @@ pipeline {
         BITBUCKET_WORKSPACE  = 'medinafdzz'
         CACHE_MODE           = 'explicit'
         CACHE_TTL            = '3600s'
+        CODEGUARDIAN_ENABLE_IMPROVEMENTS = 'true'
+        CODEGUARDIAN_MAX_IMPROVEMENTS    = '3'
     }
 
     options {
