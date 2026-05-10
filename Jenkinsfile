@@ -37,7 +37,7 @@ pipeline {
 
                     def findFiles = { String pattern ->
                         sh(
-                            script: "find . -path '*/.git' -prune -o -path '*/node_modules' -prune -o -path '*/target' -prune -o -path '*/build' -prune -o -path '*/.venv' -prune -o -path '*/venv' -prune -o -name '${pattern}' -print | sed 's#^./##'",
+                            script: "find . -path '*/.git' -prune -o -path '*/node_modules' -prune -o -path '*/target' -prune -o -path '*/build' -prune -o -path '*/.venv' -prune -o -path '*/venv' -prune -o -path '*/.codeguardian-venv' -prune -o -name '${pattern}' -print | sed 's#^./##'",
                             returnStdout: true
                         ).trim().split('\n').findAll { it }
                     }
@@ -193,7 +193,7 @@ pipeline {
                             )
 
                             def hasPythonTests = sh(
-                                script: "find . -path '*/.venv' -prune -o -path '*/venv' -prune -o -path '*/__pycache__' -prune -o -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) | grep -q .",
+                                script: "find . -path '*/.venv' -prune -o -path '*/venv' -prune -o -path '*/.codeguardian-venv' -prune -o -path '*/__pycache__' -prune -o -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) | grep -q .",
                                 returnStatus: true
                             ) == 0
 
