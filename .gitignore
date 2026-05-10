@@ -1,0 +1,9 @@
+target/
+build/
+*.class
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.log
+
