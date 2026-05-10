@@ -193,7 +193,7 @@ pipeline {
                             )
 
                             def hasPythonTests = sh(
-                                script: "find . -path '*/.venv' -prune -o -path '*/venv' -prune -o -path '*/.codeguardian-venv' -prune -o -path '*/__pycache__' -prune -o -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) | grep -q .",
+                                script: "find . -path '*/.venv' -prune -o -path '*/venv' -prune -o -path '*/.codeguardian-venv' -prune -o -path '*/__pycache__' -prune -o -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) -print | grep -q .",
                                 returnStatus: true
                             ) == 0
 
