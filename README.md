@@ -95,6 +95,48 @@ Build and start all services:
 docker compose up -d --build
 ```
 
+## Offline Deployment
+
+For a server deployment without external image downloads during startup, create an image bundle on a machine with registry access:
+
+For the complete step-by-step procedure, see [`README-offline-deployment.md`](README-offline-deployment.md).
+
+```bash
+./scripts/export-offline-images.sh
+```
+
+On Windows PowerShell, use:
+
+```powershell
+.\scripts\export-offline-images.ps1
+```
+
+This creates:
+
+```text
+dist/codeguardian-images.tar
+```
+
+Copy that file to the target server and load/start the stack:
+
+```bash
+./scripts/import-offline-images.sh
+```
+
+On Windows PowerShell, use:
+
+```powershell
+.\scripts\import-offline-images.ps1
+```
+
+After the images are loaded, the normal startup command works without pulling from external registries:
+
+```bash
+docker compose up -d
+```
+
+The bundle includes the Compose services and the `mcp/sonarqube:latest` image used by the agent during analysis.
+
 Check the status:
 
 ```bash

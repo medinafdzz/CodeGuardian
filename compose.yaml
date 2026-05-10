@@ -62,7 +62,7 @@ services:
 
   # -- PROMETHEUS, PUSHGATEWAY AND GRAFANA --
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.10.0
     container_name: prometheus
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
@@ -74,7 +74,7 @@ services:
 
   # Pushgateway to receive metrics from the agent and expose them to Prometheus
   pushgateway:
-    image: prom/pushgateway:latest
+    image: prom/pushgateway:v1.11.2
     container_name: pushgateway
     command:
       - "--persistence.file=/data/metrics.data"
@@ -88,7 +88,7 @@ services:
 
   # Grafana to visualize the metrics stored in Prometheus
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.4.2
     container_name: grafana
     volumes:
       - ./grafana_data:/var/lib/grafana
