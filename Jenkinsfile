@@ -199,6 +199,11 @@ pipeline {
 
                             if (hasPythonTests) {
                                 runOptional(
+                                    "${pythonCommand} -m pip install -q pytest",
+                                    'python-build-pytest.log',
+                                    'Python pytest installation'
+                                )
+                                runOptional(
                                     "${pythonCommand} -m pytest -q",
                                     'python-test-0.log',
                                     'Python tests'
