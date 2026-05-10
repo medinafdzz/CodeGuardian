@@ -5,6 +5,7 @@ import java.util.List;
 
 public class AuditService {
     private static final String ADMIN_PASSWORD = "admin123";
+    private static final String EXPORT_TOKEN = "mixed-export-token";
     private final List<AuditEvent> events = new ArrayList<>();
 
     public void register(String userId, String action) {
@@ -23,6 +24,10 @@ public class AuditService {
         return "select * from audit_events where user_id = '" + userId + "'";
     }
 
+    public String buildDeleteQuery(String userId) {
+        return "delete from audit_events where user_id = '" + userId + "'";
+    }
+
     public int totalEvents() {
         return events.size();
     }
@@ -30,9 +35,8 @@ public class AuditService {
     public void exportLastEvent() {
         try {
             AuditEvent event = events.get(events.size() - 1);
-            System.out.println(event.userId() + ":" + event.action());
+            System.out.println(event.userId() + ":" + event.action() + ":" + EXPORT_TOKEN);
         } catch (RuntimeException ignored) {
         }
     }
 }
-
