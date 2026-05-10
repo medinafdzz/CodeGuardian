@@ -76,9 +76,11 @@
       },
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_latency_seconds{repository=\"$repository\"})",
+          "expr": "max(codeguardian_analysis_latency_seconds{repository=\"$repository\"})",
           "legendFormat": "$repository",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "title": "Analysis Latency",
@@ -143,24 +145,23 @@
       },
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_prompt_tokens{repository=\"$repository\"})",
+          "expr": "max(codeguardian_analysis_prompt_tokens{repository=\"$repository\"})",
           "legendFormat": "prompt",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_response_tokens{repository=\"$repository\"})",
+          "expr": "max(codeguardian_analysis_response_tokens{repository=\"$repository\"})",
           "legendFormat": "response",
-          "refId": "B"
-        },
-        {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_cached_tokens{repository=\"$repository\"})",
-          "legendFormat": "cached",
-          "refId": "C"
+          "refId": "B",
+          "instant": true,
+          "range": false
         }
       ],
       "title": "Token Usage",
       "type": "bargauge",
-      "description": "Green: under 50k tokens. Yellow: 50k to 150k tokens. Red: over 150k tokens."
+      "description": "Prompt and response tokens used by real model calls in the execution. Local batch cache reuse is shown in the Batch Cache panel."
     },
     {
       "datasource": {
@@ -216,9 +217,11 @@
       },
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_final_issues_total{repository=\"$repository\"})",
+          "expr": "max(codeguardian_final_issues_total{repository=\"$repository\"})",
           "legendFormat": "$repository",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "title": "Final Issues",
@@ -275,9 +278,11 @@
       },
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_blocking_findings{repository=\"$repository\"})",
+          "expr": "max(codeguardian_blocking_findings{repository=\"$repository\"})",
           "legendFormat": "$repository",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "title": "Blocking Findings",
@@ -580,16 +585,11 @@
           "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_response_tokens{repository=\"$repository\"})",
           "legendFormat": "response",
           "refId": "C"
-        },
-        {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_cached_tokens{repository=\"$repository\"})",
-          "legendFormat": "cached",
-          "refId": "D"
         }
       ],
       "title": "Token Usage Over Time",
       "type": "timeseries",
-      "description": "Green: under 50k tokens. Yellow: 50k to 150k tokens. Red: over 150k tokens."
+      "description": "Prompt, response and total tokens used by real model calls over time. Local batch cache reuse is shown in the Batch Cache panel."
     }
   ],
   "refresh": "10s",

@@ -11,7 +11,7 @@ The objective of this repository is not to contain the agent logic, but to provi
 | Jenkins + Blue Ocean | `jenkins-blueocean` | `8080`, `50000` | Executes pull request pipelines and starts the agent |
 | SonarQube Community | `sonarqube-server` | `9000` | Analyses the code and exposes the issues used by the agent |
 | Prometheus | `prometheus` | `9090` | Collects metrics from Pushgateway |
-| Pushgateway | `pushgateway` | `9091` | Receives metrics from short agent executions |
+| Pushgateway | `pushgateway` | `9091` | Receives metrics from short agent executions |P
 | Grafana | `grafana` | `3000` | Shows execution metrics in dashboards |
 
 All services are connected to the Docker network `services-net`.
