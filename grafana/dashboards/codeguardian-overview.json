@@ -76,7 +76,7 @@
       },
       "targets": [
         {
-          "expr": "max(codeguardian_analysis_latency_seconds{repository=\"$repository\"})",
+          "expr": "max(codeguardian_analysis_latency_seconds{repository=~\"$repository\"})",
           "legendFormat": "$repository",
           "refId": "A",
           "instant": true,
@@ -145,14 +145,14 @@
       },
       "targets": [
         {
-          "expr": "max(codeguardian_analysis_prompt_tokens{repository=\"$repository\"})",
+          "expr": "max(codeguardian_analysis_prompt_tokens{repository=~\"$repository\"})",
           "legendFormat": "prompt",
           "refId": "A",
           "instant": true,
           "range": false
         },
         {
-          "expr": "max(codeguardian_analysis_response_tokens{repository=\"$repository\"})",
+          "expr": "max(codeguardian_analysis_response_tokens{repository=~\"$repository\"})",
           "legendFormat": "response",
           "refId": "B",
           "instant": true,
@@ -217,7 +217,7 @@
       },
       "targets": [
         {
-          "expr": "max(codeguardian_final_issues_total{repository=\"$repository\"})",
+          "expr": "max(codeguardian_final_issues_total{repository=~\"$repository\"})",
           "legendFormat": "$repository",
           "refId": "A",
           "instant": true,
@@ -278,7 +278,7 @@
       },
       "targets": [
         {
-          "expr": "max(codeguardian_blocking_findings{repository=\"$repository\"})",
+          "expr": "max(codeguardian_blocking_findings{repository=~\"$repository\"})",
           "legendFormat": "$repository",
           "refId": "A",
           "instant": true,
@@ -343,27 +343,27 @@
       },
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_sonar_findings_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_sonar_findings_total{repository=~\"$repository\"})",
           "legendFormat": "sonar findings",
           "refId": "A"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_generated_issues_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_generated_issues_total{repository=~\"$repository\"})",
           "legendFormat": "generated",
           "refId": "B"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_invalid_issues_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_invalid_issues_total{repository=~\"$repository\"})",
           "legendFormat": "invalid",
           "refId": "C"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_patch_invalid_issues_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_patch_invalid_issues_total{repository=~\"$repository\"})",
           "legendFormat": "patch invalid",
           "refId": "D"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_final_issues_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_final_issues_total{repository=~\"$repository\"})",
           "legendFormat": "final",
           "refId": "E"
         }
@@ -426,22 +426,22 @@
       },
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_desired_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_desired_total{repository=~\"$repository\"})",
           "legendFormat": "desired",
           "refId": "A"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_created_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_created_total{repository=~\"$repository\"})",
           "legendFormat": "created",
           "refId": "B"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_reused_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_reused_total{repository=~\"$repository\"})",
           "legendFormat": "reused",
           "refId": "C"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_deleted_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_comments_deleted_total{repository=~\"$repository\"})",
           "legendFormat": "deleted",
           "refId": "D"
         }
@@ -504,12 +504,12 @@
       },
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_batch_cache_hits_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_batch_cache_hits_total{repository=~\"$repository\"})",
           "legendFormat": "hits",
           "refId": "A"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_batch_cache_misses_total{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_batch_cache_misses_total{repository=~\"$repository\"})",
           "legendFormat": "misses",
           "refId": "B"
         }
@@ -572,17 +572,17 @@
       },
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_total_tokens{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_total_tokens{repository=~\"$repository\"})",
           "legendFormat": "total",
           "refId": "A"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_prompt_tokens{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_prompt_tokens{repository=~\"$repository\"})",
           "legendFormat": "prompt",
           "refId": "B"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_response_tokens{repository=\"$repository\"})",
+          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (codeguardian_analysis_response_tokens{repository=~\"$repository\"})",
           "legendFormat": "response",
           "refId": "C"
         }
@@ -604,8 +604,8 @@
       {
         "current": {
           "selected": true,
-          "text": "demo-java",
-          "value": "demo-java"
+          "text": "All sample repositories",
+          "value": "sample-.*"
         },
         "datasource": {
           "type": "prometheus",
@@ -613,7 +613,7 @@
         },
         "definition": "label_values(codeguardian_analysis_latency_seconds, repository)",
         "hide": 0,
-        "includeAll": false,
+        "includeAll": true,
         "label": "Repository",
         "multi": false,
         "name": "repository",
@@ -623,7 +623,8 @@
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
-        "regex": "",
+        "regex": "sample-.*",
+        "allValue": "sample-.*",
         "skipUrlSync": false,
         "sort": 1,
         "type": "query"
