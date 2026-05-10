@@ -8,7 +8,8 @@ import google.genai as genai
 from google.genai import types
 
 from codeguardian.logging_utils import logger
-from codeguardian.models import AnalysisMetrics, Decision, IssueBatchDecision
+from codeguardian.models import AnalysisMetrics, Decision, Issue, IssueBatchDecision
+from codeguardian.text import clean_replacement_text, normalize_code_block, read_file_lines
 
 
 IMPROVEMENT_REVIEW_RULES = """
@@ -115,6 +116,36 @@ def improvement_signature(project_key: str, diff_payload: str, max_improvements:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def align_issue_to_current_file(issue: Issue) -> Issue:
+    if not issue.file or not os.path.exists(issue.file) or not issue.original_code:
+        return issue
+
+    try:
+        file_lines = read_file_lines(issue.file)
+    except Exception:
+        return issue
+
+    original_code = clean_replacement_text(issue.original_code)
+    original_lines = original_code.splitlines()
+    if not original_lines:
+        return issue
+
+    window_size = len(original_lines)
+    normalized_original = normalize_code_block(original_code)
+
+    for start_index in range(0, len(file_lines) - window_size + 1):
+        candidate = "".join(file_lines[start_index:start_index + window_size])
+        if normalize_code_block(candidate) != normalized_original:
+            continue
+
+        issue.original_start_line = start_index + 1
+        issue.original_end_line = start_index + window_size
+        issue.line = issue.original_start_line
+        return issue
+
+    return issue
+
+
 def analyze_improvements(project_key: str) -> Decision:
     if not improvements_enabled():
         return Decision(issues=[])
@@ -188,7 +219,7 @@ Diff context:
         if issue.sonar_key in seen_keys:
             continue
         seen_keys.add(issue.sonar_key)
-        issues.append(issue)
+        issues.append(align_issue_to_current_file(issue))
 
     logger.info("Improvement review produced %s suggestions", len(issues))
 
