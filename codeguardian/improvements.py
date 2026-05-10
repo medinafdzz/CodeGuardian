@@ -1,0 +1,203 @@
+import hashlib
+import json
+import os
+import subprocess
+import time
+
+import google.genai as genai
+from google.genai import types
+
+from codeguardian.logging_utils import logger
+from codeguardian.models import AnalysisMetrics, Decision, IssueBatchDecision
+
+
+IMPROVEMENT_REVIEW_RULES = """
+You are CodeGuardian Improvement Review.
+
+Goal:
+- Suggest maintainability improvements for changed code only.
+- Do not report security bugs, vulnerabilities, or SonarQube-style defects here.
+- Focus on technical debt, readability, decomposition, testability, naming, duplication, and legacy patterns.
+
+Strict rules:
+- Return at most the requested number of issues.
+- Only comment on code present in the provided diff.
+- Every suggestion must be non-blocking and useful in a code review.
+- Do not suggest large rewrites, architecture migrations, or project-wide refactors.
+- Do not invent files, line numbers, imports, APIs, or hidden dependencies.
+- original_code must be copied exactly from the current file content shown in the diff context.
+- proposed_code must be a concrete replacement for original_code.
+- If there is no high-confidence improvement, return an empty issues list.
+- Use severity "IMPROVEMENT".
+- Use sonar_key values starting with "IMPROVEMENT:".
+"""
+
+
+def improvements_enabled() -> bool:
+    return os.getenv("CODEGUARDIAN_ENABLE_IMPROVEMENTS", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def run_git(args: list[str]) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def diff_base_ref() -> str:
+    target = os.getenv("CHANGE_TARGET", "main").strip() or "main"
+    candidates = [
+        f"origin/{target}...HEAD",
+        f"{target}...HEAD",
+        "HEAD~1...HEAD",
+    ]
+
+    for candidate in candidates:
+        if run_git(["diff", "--name-only", candidate]):
+            return candidate
+
+    return ""
+
+
+def changed_files(base_ref: str, max_files: int) -> list[str]:
+    if not base_ref:
+        return []
+
+    output = run_git(["diff", "--name-only", "--diff-filter=AM", base_ref])
+    files = []
+
+    excluded_prefixes = (".git/", "node_modules/", "target/", "build/", ".venv/", "venv/", ".codeguardian-venv/")
+
+    for raw_path in output.splitlines():
+        path = raw_path.strip()
+        if not path or path.startswith(excluded_prefixes):
+            continue
+        if not os.path.isfile(path):
+            continue
+        files.append(path)
+        if len(files) >= max_files:
+            break
+
+    return files
+
+
+def build_diff_payload(base_ref: str, files: list[str], max_chars: int) -> str:
+    payload_parts = []
+    remaining_chars = max_chars
+
+    for file_path in files:
+        if remaining_chars <= 0:
+            break
+
+        diff = run_git(["diff", "--unified=25", base_ref, "--", file_path])
+        if not diff:
+            continue
+
+        snippet = diff[:remaining_chars]
+        payload_parts.append(f"### FILE: {file_path}\n```diff\n{snippet}\n```")
+        remaining_chars -= len(snippet)
+
+    return "\n\n".join(payload_parts)
+
+
+def improvement_signature(project_key: str, diff_payload: str, max_improvements: int) -> str:
+    raw = json.dumps({
+        "project_key": project_key,
+        "rules": IMPROVEMENT_REVIEW_RULES,
+        "max_improvements": max_improvements,
+        "diff_hash": hashlib.sha256(diff_payload.encode("utf-8")).hexdigest(),
+    }, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def analyze_improvements(project_key: str) -> Decision:
+    if not improvements_enabled():
+        return Decision(issues=[])
+
+    max_files = int(os.getenv("CODEGUARDIAN_MAX_IMPROVEMENT_FILES", "4"))
+    max_chars = int(os.getenv("CODEGUARDIAN_MAX_IMPROVEMENT_CHARS", "18000"))
+    max_improvements = int(os.getenv("CODEGUARDIAN_MAX_IMPROVEMENTS", "3"))
+
+    base_ref = diff_base_ref()
+    files = changed_files(base_ref, max_files)
+    diff_payload = build_diff_payload(base_ref, files, max_chars)
+
+    if not diff_payload:
+        logger.info("Improvement review skipped: no suitable diff found")
+        return Decision(issues=[])
+
+    client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
+    start_time = time.time()
+
+    prompt = f"""
+Project:
+{project_key}
+
+Maximum improvement suggestions:
+{max_improvements}
+
+Changed files:
+{json.dumps(files)}
+
+Diff context:
+{diff_payload}
+"""
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=f"{IMPROVEMENT_REVIEW_RULES}\n\n{prompt}",
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=IssueBatchDecision,
+            temperature=0,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        ),
+    )
+
+    prompt_tokens = 0
+    response_tokens = 0
+    total_tokens = 0
+
+    try:
+        prompt_tokens = int(response.usage_metadata.prompt_token_count)
+        response_tokens = int(response.usage_metadata.candidates_token_count)
+        total_tokens = int(response.usage_metadata.total_token_count)
+    except Exception:
+        pass
+
+    try:
+        decision = IssueBatchDecision.model_validate_json(response.text)
+    except Exception as e:
+        logger.error("Failed to parse improvement review response: %s", e)
+        logger.error("The response from the model was: %s", response.text)
+        return Decision(issues=[])
+
+    issues = []
+    seen_keys = set()
+    signature = improvement_signature(project_key, diff_payload, max_improvements)
+
+    for index, issue in enumerate(decision.issues[:max_improvements], start=1):
+        issue.severity = "IMPROVEMENT"
+        if not issue.sonar_key or not issue.sonar_key.startswith("IMPROVEMENT:"):
+            issue.sonar_key = f"IMPROVEMENT:{signature}:{index}"
+        if issue.sonar_key in seen_keys:
+            continue
+        seen_keys.add(issue.sonar_key)
+        issues.append(issue)
+
+    logger.info("Improvement review produced %s suggestions", len(issues))
+
+    return Decision(
+        issues=issues,
+        metrics=AnalysisMetrics(
+            latency_seconds=time.time() - start_time,
+            prompt_tokens=prompt_tokens,
+            response_tokens=response_tokens,
+            total_tokens=total_tokens,
+        ),
+    )

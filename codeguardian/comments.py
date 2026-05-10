@@ -90,14 +90,20 @@ def comment_content(issues: list[Issue]) -> str:
                          f"```{file_extension}\n" +
                          "\n".join(required_import for required_import in all_required_imports) + "\n```\n\n")
 
+    is_improvement = all((issue.severity or "").upper() == "IMPROVEMENT" for issue in issues)
+
     if len(issues) == 1:
         issue = issues[0]
-        body = (f"### Code Issue\n\n"
+        title = "Code Improvement" if is_improvement else "Code Issue"
+        problem_label = "Improvement opportunity" if is_improvement else "Problems"
+        solution_label = "Suggested improvement" if is_improvement else "Solutions"
+
+        body = (f"### {title}\n\n"
                 f"**File:** {issue.file}\n\n"
                 f"**Lines:** {min_line}-{max_line}\n\n"
                 f"**Severity:** {issue.severity}\n\n"
-                f"**Problems:**\n\n{issue.problem}\n\n"
-                f"**Solutions:**\n\n{issue.solution}\n\n"
+                f"**{problem_label}:**\n\n{issue.problem}\n\n"
+                f"**{solution_label}:**\n\n{issue.solution}\n\n"
                 f"{imports_block}"
                 f"**Block to substitute:**\n"
                 f"```{file_extension}\n"
@@ -135,16 +141,21 @@ def comment_content(issues: list[Issue]) -> str:
         seen_solutions.add(normalized_solution)
         unique_solutions.append(issue.solution.strip())
 
+    title = "Code Improvements" if is_improvement else "Code Issues"
+    problems_label = "Improvement opportunities" if is_improvement else "Detected problems"
+    single_solution_label = "Suggested improvement" if is_improvement else "Suggested solution"
+    solution_label = "Suggested improvements" if is_improvement else "Suggested actions"
+
     if len(unique_solutions) == 1:
-        solution_block = f"**Suggested solution:**\n{unique_solutions[0]}\n\n"
+        solution_block = f"**{single_solution_label}:**\n{unique_solutions[0]}\n\n"
     else:
-        solution_block = "**Suggested actions:**\n\n" + "\n".join(
+        solution_block = f"**{solution_label}:**\n\n" + "\n".join(
             f"- {solution}" for solution in unique_solutions) + "\n\n"
 
-    body = (f"### Code Issues\n\n"
+    body = (f"### {title}\n\n"
             f"**File:** {base_issue.file}\n\n"
             f"**Lines:** {min_line}-{max_line}\n\n"
-            f"**Detected problems:**\n\n"
+            f"**{problems_label}:**\n\n"
             f"{combined_problems}\n\n"
             f"{solution_block}"
             f"{imports_block}"

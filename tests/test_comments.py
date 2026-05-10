@@ -75,3 +75,17 @@ def test_comment_content_combines_multiple_issues_for_same_block():
     assert "**Suggested solution:**" in content
     assert "ID: S1" in content
     assert "ID: S2" in content
+
+
+def test_comment_content_formats_improvement_suggestion():
+    content = comment_content([make_issue(
+        sonar_key="IMPROVEMENT:1",
+        severity="IMPROVEMENT",
+        problem="This function mixes parsing and persistence concerns.",
+        solution="Extract persistence into a separate helper to make the flow easier to test.",
+    )])
+
+    assert "### Code Improvement" in content
+    assert "**Improvement opportunity:**" in content
+    assert "**Suggested improvement:**" in content
+    assert "ID: IMPROVEMENT:1" in content
