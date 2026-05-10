@@ -26,7 +26,7 @@ pipeline {
 
                 script {
                     def commonExclusions = '**/node_modules/**,**/dist/**,**/build/**,**/target/**,**/.git/**'
-                    def analysisExclusions = "${commonExclusions},**/__pycache__/**,**/.venv/**,**/venv/**,**/.pytest_cache/**,**/coverage/**"
+                    def analysisExclusions = "${commonExclusions},**/__pycache__/**,**/.venv/**,**/venv/**,**/.codeguardian-venv/**,**/.pytest_cache/**,**/coverage/**"
 
                     env.REPO_NAME = sh(
                         script: 'basename "$(git config --get remote.origin.url)" .git',
@@ -168,17 +168,26 @@ pipeline {
 
                         if (hasPython) {
                             detectedStacks.add('python')
+                            def pythonCommand = 'python3'
                             def requirementFiles = findFiles('requirements.txt')
-                            requirementFiles.eachWithIndex { requirementsFile, index ->
+                            if (!requirementFiles.isEmpty()) {
                                 runOptional(
-                                    "python3 -m pip install -q -r \"${requirementsFile}\"",
-                                    "python-build-${index}.log",
-                                    "Python dependency installation (${requirementsFile})"
+                                    'python3 -m venv .codeguardian-venv',
+                                    'python-build-venv.log',
+                                    'Python virtual environment creation'
                                 )
+                                pythonCommand = './.codeguardian-venv/bin/python'
+                                requirementFiles.eachWithIndex { requirementsFile, index ->
+                                    runOptional(
+                                        "${pythonCommand} -m pip install -q -r \"${requirementsFile}\"",
+                                        "python-build-${index}.log",
+                                        "Python dependency installation (${requirementsFile})"
+                                    )
+                                }
                             }
 
                             runOptional(
-                                'python3 -m compileall -q .',
+                                "${pythonCommand} -m compileall -q .",
                                 'python-build-compile.log',
                                 'Python syntax compilation'
                             )
@@ -190,7 +199,7 @@ pipeline {
 
                             if (hasPythonTests) {
                                 runOptional(
-                                    'python3 -m pytest -q',
+                                    "${pythonCommand} -m pytest -q",
                                     'python-test-0.log',
                                     'Python tests'
                                 )
