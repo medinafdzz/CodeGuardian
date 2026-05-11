@@ -11,15 +11,9 @@ PUSHGATEWAY_URL = os.getenv("PUSHGATEWAY_URL", "pushgateway:9091")
 
 
 def metric_grouping_key(project_key: str, current_timestamp: float | None = None) -> dict[str, str]:
-    timestamp = current_timestamp if current_timestamp is not None else time.time()
-    build_id = os.getenv("BUILD_NUMBER", "local_build")
-
     return {
-        "build_number": build_id,
         "event_type": "pull_request",
-        "display_id": f"{project_key}-PR-{build_id}",
         "repository": project_key,
-        "exec_timestamp": str(int(timestamp)),
     }
 
 

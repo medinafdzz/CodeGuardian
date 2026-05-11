@@ -4,6 +4,8 @@ CodeGuardian is the system developed for the final degree project. Its objective
 
 The system does not use the AI model as the only source of truth. First, SonarQube detects issues in the target repository. After that, the CodeGuardian agent reads those findings, prepares the code context, asks the AI model for possible fixes, validates the generated suggestions and publishes the final feedback as inline comments in Bitbucket.
 
+CodeGuardian can also run an optional improvement review mode. This mode is separate from defect detection: it only reads the pull request diff, applies strict token limits and asks the model for a small number of non-blocking maintainability suggestions.
+
 This repository, `codeguardian-core`, contains the main agent logic. At the same time, its README acts as the global entry point for the whole project because the agent is the central element of the system.
 
 ## Project Repositories
@@ -44,6 +46,7 @@ For this reason, the core logic and the current unit tests are designed to be ge
 | `codeguardian/input_contract.py` | Pipeline input JSON parsing |
 | `codeguardian/sonarqube.py` | SonarQube result parsing and retrieval helpers |
 | `codeguardian/ai.py` | AI batching, cache and generation helpers |
+| `codeguardian/improvements.py` | Optional diff-based maintainability improvement review |
 | `codeguardian/bitbucket.py` | Bitbucket REST and comment synchronization helpers |
 | `codeguardian/cli.py` | Command-line entrypoint helper |
 | `docs/` | Architecture, pipeline, validation, synchronization and metrics documentation |
@@ -63,6 +66,7 @@ Its main responsibilities are:
 - filtering and normalising findings,
 - resolving code scope,
 - grouping findings before sending them to the model,
+- optionally reviewing pull request diffs for maintainability improvements,
 - validating generated code replacements,
 - synchronising inline comments in Bitbucket,
 - exporting execution metrics.
@@ -104,10 +108,11 @@ The expected end-to-end flow is:
 7. The agent retrieves SonarQube issues.
 8. The agent prepares code context and groups findings.
 9. The AI model generates possible fix suggestions.
-10. The agent validates the generated replacements.
-11. Valid suggestions are published as inline comments in Bitbucket.
-12. Execution metrics are pushed to Pushgateway.
-13. Prometheus and Grafana expose the metrics.
+10. If enabled, the agent reviews the pull request diff for maintainability improvements.
+11. The agent validates the generated replacements.
+12. Valid suggestions are published as inline comments in Bitbucket.
+13. Execution metrics are pushed to Pushgateway.
+14. Prometheus and Grafana expose the metrics.
 ```
 
 ## Core Design
@@ -116,7 +121,7 @@ The system clearly separates detection, generation and publication:
 
 - SonarQube detects problems.
 - The agent decides what to process and validates the results.
-- AI proposes concrete code changes.
+- AI proposes concrete code changes and optional non-blocking improvements.
 - Bitbucket displays the final feedback inside the pull request.
 
 This separation reduces operational risk compared to a direct LLM-only approach without validation barriers.
@@ -173,6 +178,28 @@ The agent includes safety barriers before publishing suggestions:
 
 These mechanisms do not guarantee perfect correctness, but they reduce the probability of publishing invalid suggestions.
 
+## Optional Improvement Review
+
+The improvement review is disabled by default and can be enabled per pipeline or per repository:
+
+```text
+CODEGUARDIAN_ENABLE_IMPROVEMENTS=true
+CODEGUARDIAN_MAX_IMPROVEMENTS=3
+CODEGUARDIAN_MAX_IMPROVEMENT_FILES=4
+CODEGUARDIAN_MAX_IMPROVEMENT_CHARS=18000
+```
+
+This mode is language-agnostic. It does not depend on a Java, Python or Node-specific refactoring tool. Instead, it reads only the pull request diff, sends a bounded amount of context to the model and asks for maintainability suggestions such as simpler structure, lower duplication, clearer naming or easier testing.
+
+The output is published as `Code Improvement` comments in Bitbucket. These comments are intentionally non-blocking and separate from the SonarQube-backed defect comments.
+
+The token cost is controlled by:
+
+- limiting the number of changed files sent to the model,
+- limiting the maximum diff size,
+- limiting the number of improvement suggestions,
+- validating that proposed replacements match the current file before publication.
+
 ## Observability
 
 Analysis metrics are exported to Pushgateway, including:
@@ -206,7 +233,7 @@ Main environment variables:
 - `BITBUCKET_API_TOKEN`
 - `ATLASSIAN_MCP_AUTH_HEADER`
 
-Additional optional variables are available for cache configuration, endpoints and grouping behaviour.
+Additional optional variables are available for cache configuration, endpoints, grouping behaviour and improvement review.
 
 ## Minimal Agent Invocation
 
@@ -236,6 +263,7 @@ Current test coverage:
 - `tests/test_patch_validation.py`: checks patch application against real temporary files, `original_code` matching, Python syntax validation and dropping of invalid issues.
 - `tests/test_build_validation.py`: checks Maven compile validation, including skipped execution when no `pom.xml` exists and failure when Maven compilation fails.
 - `tests/test_comments.py`: checks hidden issue identifiers, CodeGuardian comment markers and generated inline comment content.
+- `tests/test_improvements.py`: checks improvement-review activation, diff file filtering and line alignment.
 - `tests/test_scope_batching.py`: checks grouping of findings by function or global scope before sending them to the model.
 - `tests/test_sonar_results.py`: checks parsing of SonarQube JSON responses into the internal simplified format.
 

@@ -211,39 +211,26 @@ The code uses a dedicated `CollectorRegistry()` instead of the global default re
 
 ## Grouping Labels Used in Pushgateway
 
-When the metrics are pushed, the agent includes a grouping key with the following labels:
+When the metrics are pushed, the agent includes a stable grouping key with the following labels:
 
-- `build_number`
 - `event_type`
-- `display_id`
 - `repository`
-- `exec_timestamp`
 
 ### Meaning of each label
-
-#### `build_number`
-This is usually taken from Jenkins `BUILD_NUMBER`. It identifies the specific pipeline run.
 
 #### `event_type`
 In the current version it is set to `"pull_request"`, which matches the actual purpose of the pipeline.
 
-#### `display_id`
-This is a formatted label combining repository name and build number. It gives a human-readable identifier for dashboards.
-
 #### `repository`
 This stores the SonarQube project key or repository identity associated with the run.
-
-#### `exec_timestamp`
-This stores the execution time as an integer string, allowing each push to be associated with a specific run moment.
 
 ### Why these labels are useful
 
 These labels make it easier to build Grafana dashboards and to filter metrics by:
 - repository,
-- build,
-- or execution time.
+- or event type.
 
-They also make historical comparisons easier when analyzing multiple runs.
+The grouping key is intentionally stable. Prometheus already stores the historical samples over time, so adding the Jenkins build number or timestamp as Pushgateway grouping labels would create many independent series and make Grafana panels harder to read.
 
 ---
 

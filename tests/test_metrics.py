@@ -44,15 +44,12 @@ def test_build_metrics_registry_exports_execution_analysis_and_comment_values():
     assert "codeguardian_comments_deleted_total 3.0" in output
 
 
-def test_metric_grouping_key_uses_jenkins_build_number(monkeypatch):
+def test_metric_grouping_key_uses_stable_repository_labels(monkeypatch):
     monkeypatch.setenv("BUILD_NUMBER", "58")
 
     grouping_key = metric_grouping_key("demo-java", current_timestamp=1780000000.2)
 
     assert grouping_key == {
-        "build_number": "58",
         "event_type": "pull_request",
-        "display_id": "demo-java-PR-58",
         "repository": "demo-java",
-        "exec_timestamp": "1780000000",
     }
