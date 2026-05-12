@@ -1,3 +1,4 @@
+import ast
 import fnmatch
 import hashlib
 import json
@@ -9,7 +10,13 @@ import google.genai as genai
 from google.genai import types
 
 from codeguardian.logging_utils import logger
-from codeguardian.models import AnalysisMetrics, Decision, Issue, IssueBatchDecision
+from codeguardian.models import (
+    AnalysisMetrics,
+    Decision,
+    ImprovementCandidate,
+    Issue,
+    IssueBatchDecision,
+)
 from codeguardian.text import clean_replacement_text, normalize_code_block, read_file_lines
 
 
@@ -141,6 +148,59 @@ def build_diff_payload(base_ref: str, files: list[str], max_chars: int) -> str:
         remaining_chars -= len(snippet)
 
     return "\n\n".join(payload_parts)
+
+
+def _python_node_source(lines: list[str], node: ast.AST) -> str:
+    start_line = getattr(node, "lineno", 1)
+    end_line = getattr(node, "end_lineno", start_line)
+    return "".join(lines[start_line - 1:end_line]).rstrip()
+
+
+def detect_python_improvement_candidates(
+    file_path: str,
+    max_function_lines: int = 60,
+) -> list[ImprovementCandidate]:
+    try:
+        lines = read_file_lines(file_path)
+        tree = ast.parse("".join(lines), filename=file_path)
+    except Exception:
+        return []
+
+    candidates: list[ImprovementCandidate] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            function_lines = int(getattr(node, "end_lineno", node.lineno)) - node.lineno + 1
+            if function_lines > max_function_lines:
+                candidates.append(ImprovementCandidate(
+                    file=file_path,
+                    line=node.lineno,
+                    language="python",
+                    category="complexity",
+                    reason="Function is long enough to make maintenance and testing harder.",
+                    evidence=f"function_lines={function_lines};threshold={max_function_lines}",
+                    original_code=_python_node_source(lines, node),
+                    confidence=0.7,
+                ))
+
+        if isinstance(node, ast.ExceptHandler):
+            exception_name = "bare"
+            if isinstance(node.type, ast.Name):
+                exception_name = node.type.id
+
+            if node.type is None or exception_name in {"Exception", "BaseException"}:
+                candidates.append(ImprovementCandidate(
+                    file=file_path,
+                    line=node.lineno,
+                    language="python",
+                    category="error_handling",
+                    reason="Broad exception handling can hide unrelated failures.",
+                    evidence=f"broad_exception={exception_name}",
+                    original_code=_python_node_source(lines, node),
+                    confidence=0.75,
+                ))
+
+    return candidates
 
 
 def improvement_signature(project_key: str, diff_payload: str, max_improvements: int) -> str:

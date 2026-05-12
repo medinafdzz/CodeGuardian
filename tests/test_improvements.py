@@ -1,4 +1,9 @@
-from codeguardian.improvements import align_issue_to_current_file, changed_files, improvements_enabled
+from codeguardian.improvements import (
+    align_issue_to_current_file,
+    changed_files,
+    detect_python_improvement_candidates,
+    improvements_enabled,
+)
 from codeguardian.models import ImprovementCandidate, Issue
 
 
@@ -80,6 +85,51 @@ def test_improvement_candidate_keeps_detection_evidence():
     assert candidate.category == "complexity"
     assert candidate.evidence == "nesting_depth=4"
     assert candidate.confidence == 0.8
+
+
+def test_detect_python_improvement_candidates_reports_long_functions(tmp_path):
+    source = tmp_path / "service.py"
+    source.write_text(
+        "def compact():\n"
+        "    return 1\n\n"
+        "def too_long():\n"
+        "    value = 1\n"
+        "    value += 1\n"
+        "    value += 1\n"
+        "    value += 1\n"
+        "    return value\n",
+        encoding="utf-8",
+    )
+
+    candidates = detect_python_improvement_candidates(str(source), max_function_lines=4)
+
+    assert len(candidates) == 1
+    assert candidates[0].file == str(source)
+    assert candidates[0].line == 4
+    assert candidates[0].language == "python"
+    assert candidates[0].category == "complexity"
+    assert "function_lines=6" in candidates[0].evidence
+    assert "def too_long" in candidates[0].original_code
+
+
+def test_detect_python_improvement_candidates_reports_broad_exceptions(tmp_path):
+    source = tmp_path / "service.py"
+    source.write_text(
+        "def load():\n"
+        "    try:\n"
+        "        return int('x')\n"
+        "    except Exception as error:\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+
+    candidates = detect_python_improvement_candidates(str(source), max_function_lines=20)
+
+    assert len(candidates) == 1
+    assert candidates[0].line == 4
+    assert candidates[0].category == "error_handling"
+    assert "broad_exception=Exception" in candidates[0].evidence
+    assert "except Exception" in candidates[0].original_code
 
 
 def test_align_issue_to_current_file_updates_imprecise_line(monkeypatch, tmp_path):
