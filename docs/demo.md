@@ -73,14 +73,16 @@ Show that CodeGuardian can also suggest non-blocking maintainability improvement
 
 ### Code Change
 
-Add or modify one changed file with a small maintainability issue. For example, a broad exception handler:
+Add or modify one changed file with a small maintainability issue. For example, a broad Java exception handler:
 
-```python
-def load_value(raw_value):
-    try:
-        return int(raw_value)
-    except Exception:
-        return None
+```java
+int loadValue(String rawValue) {
+    try {
+        return Integer.parseInt(rawValue);
+    } catch (Exception error) {
+        return 0;
+    }
+}
 ```
 
 Expected candidate:
@@ -102,7 +104,7 @@ Suggested improvement:
 Catch the expected conversion error or keep the original exception context.
 ```
 
-Another valid example is a fragile condition in a script:
+Other valid examples are console prints in Java, fragile conditions in scripts, or basic C/C++ maintainability signals:
 
 ```bash
 if [ -d $ESS_HOME ] ; then
@@ -172,7 +174,7 @@ The TFG can be evaluated not only by looking at comments, but also by measuring 
 
 ### Current Limitations
 
-- Improvement detection currently covers Python and shell/KSH only.
+- Improvement detection currently covers Python, shell/KSH, Java and basic C/C++ signals.
 - Candidates are detected in changed files, but not yet strictly filtered by changed line ranges.
 - Improvement responses are guided by candidates, but the response does not yet carry a strict `candidate_id`.
 - Validation checks applicability and Python syntax, but does not prove semantic correctness.
@@ -182,7 +184,7 @@ The TFG can be evaluated not only by looking at comments, but also by measuring 
 
 - Filter improvement candidates by changed line ranges.
 - Add `candidate_id` to the prompt and validate responses against it.
-- Add Java, XML and duplication detectors.
+- Add XML, duplication and deeper performance detectors.
 - Integrate external tools such as Ruff, ShellCheck, Semgrep or CPD as additional candidate sources.
 - Add metrics by improvement category.
 - Add repository-level configuration with a `.codeguardian.yml` file.

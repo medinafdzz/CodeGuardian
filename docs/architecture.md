@@ -53,7 +53,7 @@ One of the key architectural decisions in CodeGuardian is that findings are not 
 
 After batching, the agent sends the selected findings to the AI model. The prompt is strongly constrained: the model must return valid JSON, keep the original SonarQube key, propose only real code modifications, preserve concrete types when needed, avoid unsafe shorthand refactors, and return no issue at all if the replacement is not safe enough. The current implementation also supports prompt caching and batch-level caching to reduce repeated requests and lower execution cost.
 
-When improvement review is enabled, the agent follows a similar controlled pattern but with a different source of evidence. Instead of asking the model to inspect the diff freely, CodeGuardian first detects static candidates such as long Python functions, broad Python exception handlers, fragile shell loops and unquoted shell test variables. These candidates are included in the prompt so that improvement comments can be explained and bounded.
+When improvement review is enabled, the agent follows a similar controlled pattern but with a different source of evidence. Instead of asking the model to inspect the diff freely, CodeGuardian first detects static candidates such as long Python functions, broad exception handlers in Python or Java, Java console prints, fragile shell loops, unquoted shell test variables and basic C/C++ maintainability signals. These candidates are included in the prompt so that improvement comments can be explained and bounded.
 
 ### 6. Validation of generated patches
 
@@ -163,7 +163,7 @@ The current architecture still has some limitations:
 - syntax validation is stronger for Python than for other ecosystems,
 - generated fixes are not compiled or tested before publication,
 - the system still depends on the quality of SonarQube findings,
-- improvement candidate detection currently focuses on Python and shell/KSH,
+- improvement candidate detection is still heuristic and currently covers Python, shell/KSH, Java and basic C/C++ signals,
 - improvement candidates are not yet strictly filtered by changed line ranges,
 - model improvement responses are not yet validated against a candidate identifier,
 - and some languages rely on heuristic scope detection instead of full parsing.
@@ -179,7 +179,7 @@ This architecture leaves room for several future improvements:
 - ecosystem-specific validation, such as Maven or Gradle compilation,
 - export of structured results in formats such as JSON or SARIF,
 - project-specific review profiles,
-- more improvement detectors for Java, XML, duplication and performance smells,
+- more improvement detectors for XML, duplication and performance smells,
 - strict candidate-id validation for improvement responses,
 - filtering improvement candidates by changed line ranges,
 - richer dashboards based on the exported metrics,

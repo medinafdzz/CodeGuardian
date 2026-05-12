@@ -1,8 +1,10 @@
 from codeguardian.improvements import (
     align_issue_to_current_file,
     build_improvement_prompt,
+    detect_cpp_improvement_candidates,
     changed_files,
     detect_improvement_candidates,
+    detect_java_improvement_candidates,
     detect_python_improvement_candidates,
     detect_shell_improvement_candidates,
     improvements_enabled,
@@ -176,6 +178,91 @@ def test_detect_shell_improvement_candidates_reports_unquoted_test_variables(tmp
     assert "[ -d $ESS_HOME ]" in candidates[0].original_code
 
 
+def test_detect_java_improvement_candidates_reports_broad_catches(tmp_path):
+    source = tmp_path / "Service.java"
+    source.write_text(
+        "class Service {\n"
+        "  int load(String value) {\n"
+        "    try {\n"
+        "      return Integer.parseInt(value);\n"
+        "    } catch (Exception error) {\n"
+        "      return 0;\n"
+        "    }\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    candidates = detect_java_improvement_candidates(str(source))
+
+    assert len(candidates) == 1
+    assert candidates[0].line == 5
+    assert candidates[0].language == "java"
+    assert candidates[0].category == "error_handling"
+    assert "broad_exception=Exception" in candidates[0].evidence
+    assert "catch (Exception error)" in candidates[0].original_code
+
+
+def test_detect_java_improvement_candidates_reports_console_prints(tmp_path):
+    source = tmp_path / "Service.java"
+    source.write_text(
+        "class Service {\n"
+        "  void run() {\n"
+        "    System.out.println(\"ready\");\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    candidates = detect_java_improvement_candidates(str(source))
+
+    assert len(candidates) == 1
+    assert candidates[0].line == 3
+    assert candidates[0].language == "java"
+    assert candidates[0].category == "observability"
+    assert "console_print=System.out.println" in candidates[0].evidence
+    assert "System.out.println" in candidates[0].original_code
+
+
+def test_detect_cpp_improvement_candidates_reports_namespace_pollution(tmp_path):
+    source = tmp_path / "service.cpp"
+    source.write_text(
+        "#include <vector>\n"
+        "using namespace std;\n"
+        "int main() { return 0; }\n",
+        encoding="utf-8",
+    )
+
+    candidates = detect_cpp_improvement_candidates(str(source))
+
+    assert len(candidates) == 1
+    assert candidates[0].line == 2
+    assert candidates[0].language == "cpp"
+    assert candidates[0].category == "maintainability"
+    assert "using_namespace_std" in candidates[0].evidence
+    assert "using namespace std" in candidates[0].original_code
+
+
+def test_detect_cpp_improvement_candidates_reports_manual_allocation(tmp_path):
+    source = tmp_path / "service.cc"
+    source.write_text(
+        "void run() {\n"
+        "  auto value = new Widget();\n"
+        "  value->start();\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    candidates = detect_cpp_improvement_candidates(str(source))
+
+    assert len(candidates) == 1
+    assert candidates[0].line == 2
+    assert candidates[0].language == "cpp"
+    assert candidates[0].category == "resource_management"
+    assert "manual_new_allocation" in candidates[0].evidence
+    assert "new Widget" in candidates[0].original_code
+
+
 def test_detect_improvement_candidates_dispatches_supported_files(tmp_path):
     python_source = tmp_path / "service.py"
     python_source.write_text(
@@ -194,17 +281,39 @@ def test_detect_improvement_candidates_dispatches_supported_files(tmp_path):
         "fi\n",
         encoding="utf-8",
     )
+    java_source = tmp_path / "Service.java"
+    java_source.write_text(
+        "class Service {\n"
+        "  void run() {\n"
+        "    System.out.println(\"ready\");\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    cpp_source = tmp_path / "service.cpp"
+    cpp_source.write_text(
+        "#include <vector>\n"
+        "using namespace std;\n",
+        encoding="utf-8",
+    )
     ignored_source = tmp_path / "README.md"
     ignored_source.write_text("# docs\n", encoding="utf-8")
 
     candidates = detect_improvement_candidates([
         str(python_source),
         str(shell_source),
+        str(java_source),
+        str(cpp_source),
         str(ignored_source),
     ])
 
-    assert [candidate.language for candidate in candidates] == ["python", "shell"]
-    assert [candidate.category for candidate in candidates] == ["error_handling", "resource_handling"]
+    assert [candidate.language for candidate in candidates] == ["python", "shell", "java", "cpp"]
+    assert [candidate.category for candidate in candidates] == [
+        "error_handling",
+        "resource_handling",
+        "observability",
+        "maintainability",
+    ]
 
 
 def test_build_improvement_prompt_includes_detected_candidates():

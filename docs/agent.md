@@ -60,7 +60,7 @@ This model represents the JSON structure expected from Gemini for one batch of f
 
 ### `ImprovementCandidate`
 
-`ImprovementCandidate` represents a static maintainability signal found before the optional improvement review calls Gemini. It stores the file, line, language, category, reason, evidence, original code and confidence score. The current implementation uses it for Python and shell/KSH improvement candidates.
+`ImprovementCandidate` represents a static maintainability signal found before the optional improvement review calls Gemini. It stores the file, line, language, category, reason, evidence, original code and confidence score. The current implementation uses it for Python, shell/KSH, Java and basic C/C++ improvement candidates.
 
 ### `AgentExecutionError`
 
@@ -402,8 +402,12 @@ The current detectors are intentionally small and explainable:
 
 - Python long functions,
 - Python broad exception handlers,
+- Java broad exception handlers,
+- Java console prints,
 - shell loops based on command substitution,
-- unquoted shell variables in test expressions.
+- unquoted shell variables in test expressions,
+- C/C++ `using namespace std`,
+- C/C++ manual allocation with `new`.
 
 This design keeps the LLM as a proposal engine rather than the only source of improvement detection. The current limitation is that the model response is not yet strictly linked back to a candidate identifier; this is a natural next step for future work.
 

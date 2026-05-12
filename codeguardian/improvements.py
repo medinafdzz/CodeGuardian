@@ -251,6 +251,89 @@ def detect_shell_improvement_candidates(file_path: str) -> list[ImprovementCandi
     return candidates
 
 
+def detect_java_improvement_candidates(file_path: str) -> list[ImprovementCandidate]:
+    try:
+        lines = read_file_lines(file_path)
+    except Exception:
+        return []
+
+    candidates: list[ImprovementCandidate] = []
+    broad_catch_pattern = re.compile(r"\bcatch\s*\(\s*(Exception|Throwable)\b")
+    console_print_pattern = re.compile(r"\b(System\.(?:out|err)\.println)\s*\(")
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+
+        catch_match = broad_catch_pattern.search(stripped)
+        if catch_match:
+            exception_name = catch_match.group(1)
+            candidates.append(ImprovementCandidate(
+                file=file_path,
+                line=index + 1,
+                language="java",
+                category="error_handling",
+                reason="Broad exception handling can hide unrelated failures.",
+                evidence=f"broad_exception={exception_name}",
+                original_code=_line_block(lines, index),
+                confidence=0.75,
+            ))
+
+        print_match = console_print_pattern.search(stripped)
+        if print_match:
+            print_call = print_match.group(1)
+            candidates.append(ImprovementCandidate(
+                file=file_path,
+                line=index + 1,
+                language="java",
+                category="observability",
+                reason="Console prints in application code are harder to control than a project logger.",
+                evidence=f"console_print={print_call}",
+                original_code=_line_block(lines, index),
+                confidence=0.65,
+            ))
+
+    return candidates
+
+
+def detect_cpp_improvement_candidates(file_path: str) -> list[ImprovementCandidate]:
+    try:
+        lines = read_file_lines(file_path)
+    except Exception:
+        return []
+
+    candidates: list[ImprovementCandidate] = []
+    manual_new_pattern = re.compile(r"(?:^|[=\s(])new\s+[A-Za-z_][A-Za-z0-9_:<>]*\s*(?:\(|\[)")
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+
+        if stripped == "using namespace std;":
+            candidates.append(ImprovementCandidate(
+                file=file_path,
+                line=index + 1,
+                language="cpp",
+                category="maintainability",
+                reason="Using the whole std namespace can create naming conflicts in larger codebases.",
+                evidence="using_namespace_std",
+                original_code=_line_block(lines, index),
+                confidence=0.7,
+            ))
+
+        if manual_new_pattern.search(stripped):
+            candidates.append(ImprovementCandidate(
+                file=file_path,
+                line=index + 1,
+                language="cpp",
+                category="resource_management",
+                reason="Manual allocation with new is easier to leak than scoped ownership.",
+                evidence="manual_new_allocation",
+                original_code=_line_block(lines, index),
+                confidence=0.65,
+            ))
+
+    return candidates
+
+
 def detect_improvement_candidates(
     files: list[str],
     max_candidates: int = 10,
@@ -264,6 +347,10 @@ def detect_improvement_candidates(
             candidates.extend(detect_python_improvement_candidates(file_path))
         elif extension in {".sh", ".ksh", ".bash"}:
             candidates.extend(detect_shell_improvement_candidates(file_path))
+        elif extension == ".java":
+            candidates.extend(detect_java_improvement_candidates(file_path))
+        elif extension in {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}:
+            candidates.extend(detect_cpp_improvement_candidates(file_path))
 
         if len(candidates) >= max_candidates:
             return candidates[:max_candidates]
