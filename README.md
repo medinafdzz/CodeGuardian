@@ -187,6 +187,7 @@ CODEGUARDIAN_ENABLE_IMPROVEMENTS=true
 CODEGUARDIAN_MAX_IMPROVEMENTS=3
 CODEGUARDIAN_MAX_IMPROVEMENT_FILES=4
 CODEGUARDIAN_MAX_IMPROVEMENT_CHARS=18000
+CODEGUARDIAN_IMPROVEMENT_EXCLUDE=generated/,release/,*_pb2.py
 ```
 
 This mode is language-agnostic. It does not depend on a Java, Python or Node-specific refactoring tool. Instead, it reads only the pull request diff, sends a bounded amount of context to the model and asks for maintainability suggestions such as simpler structure, lower duplication, clearer naming or easier testing.

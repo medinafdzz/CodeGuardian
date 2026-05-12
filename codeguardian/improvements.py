@@ -1,3 +1,4 @@
+import fnmatch
 import hashlib
 import json
 import os
@@ -11,6 +12,18 @@ from codeguardian.logging_utils import logger
 from codeguardian.models import AnalysisMetrics, Decision, Issue, IssueBatchDecision
 from codeguardian.text import clean_replacement_text, normalize_code_block, read_file_lines
 
+
+DEFAULT_IMPROVEMENT_EXCLUSIONS = (
+    ".git/",
+    "node_modules/",
+    "target/",
+    "build/",
+    ".venv/",
+    "venv/",
+    ".codeguardian-venv/",
+    "__pycache__/",
+    ".ruff_cache/",
+)
 
 IMPROVEMENT_REVIEW_RULES = """
 You are CodeGuardian Improvement Review.
@@ -50,6 +63,31 @@ def run_git(args: list[str]) -> str:
     return result.stdout.strip()
 
 
+def improvement_exclusions() -> tuple[str, ...]:
+    configured = os.getenv("CODEGUARDIAN_IMPROVEMENT_EXCLUDE", "")
+    extra_patterns = [
+        pattern.strip().replace("\\", "/")
+        for chunk in configured.replace(";", ",").split(",")
+        for pattern in chunk.splitlines()
+        if pattern.strip()
+    ]
+    return (*DEFAULT_IMPROVEMENT_EXCLUSIONS, *extra_patterns)
+
+
+def is_improvement_path_excluded(path: str, exclusions: tuple[str, ...] | None = None) -> bool:
+    normalized_path = path.replace("\\", "/").lstrip("./")
+    patterns = exclusions or improvement_exclusions()
+
+    for pattern in patterns:
+        normalized_pattern = pattern.replace("\\", "/").lstrip("./")
+        if normalized_pattern.endswith("/") and normalized_path.startswith(normalized_pattern):
+            return True
+        if fnmatch.fnmatch(normalized_path, normalized_pattern):
+            return True
+
+    return False
+
+
 def diff_base_ref() -> str:
     target = os.getenv("CHANGE_TARGET", "main").strip() or "main"
     candidates = [
@@ -71,12 +109,11 @@ def changed_files(base_ref: str, max_files: int) -> list[str]:
 
     output = run_git(["diff", "--name-only", "--diff-filter=AM", base_ref])
     files = []
-
-    excluded_prefixes = (".git/", "node_modules/", "target/", "build/", ".venv/", "venv/", ".codeguardian-venv/")
+    exclusions = improvement_exclusions()
 
     for raw_path in output.splitlines():
         path = raw_path.strip()
-        if not path or path.startswith(excluded_prefixes):
+        if not path or is_improvement_path_excluded(path, exclusions):
             continue
         if not os.path.isfile(path):
             continue

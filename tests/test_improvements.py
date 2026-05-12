@@ -31,6 +31,37 @@ def test_changed_files_filters_generated_and_missing_paths(monkeypatch, tmp_path
     assert changed_files("origin/main...HEAD", max_files=5) == ["service.py"]
 
 
+def test_changed_files_uses_configurable_exclusions(monkeypatch, tmp_path):
+    for path in [
+        "service.py",
+        "generated/client.py",
+        "essFramework/release/runtime.py",
+        "models/service_pb2.py",
+    ]:
+        file_path = tmp_path / path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("print('ok')\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "CODEGUARDIAN_IMPROVEMENT_EXCLUDE",
+        "generated/,essFramework/release/,*_pb2.py",
+    )
+
+    def fake_run_git(args):
+        assert args == ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD"]
+        return "\n".join([
+            "service.py",
+            "generated/client.py",
+            "essFramework/release/runtime.py",
+            "models/service_pb2.py",
+        ])
+
+    monkeypatch.setattr("codeguardian.improvements.run_git", fake_run_git)
+
+    assert changed_files("origin/main...HEAD", max_files=5) == ["service.py"]
+
+
 def test_align_issue_to_current_file_updates_imprecise_line(monkeypatch, tmp_path):
     source = tmp_path / "service.py"
     source.write_text("def first():\n    return 1\n\n\ndef second():\n    return 2\n", encoding="utf-8")
