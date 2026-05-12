@@ -71,9 +71,9 @@ CodeGuardian does not ask the LLM to inspect the whole repository freely. SonarQ
 
 Show that CodeGuardian can also suggest non-blocking maintainability improvements, separate from SonarQube defects.
 
-### Suggested Python Change
+### Code Change
 
-Add or modify a Python file with a broad exception handler:
+Add or modify one changed file with a small maintainability issue. For example, a broad exception handler:
 
 ```python
 def load_value(raw_value):
@@ -102,9 +102,7 @@ Suggested improvement:
 Catch the expected conversion error or keep the original exception context.
 ```
 
-### Suggested Shell/KSH Change
-
-Add or modify a shell file with a fragile test:
+Another valid example is a fragile condition in a script:
 
 ```bash
 if [ -d $ESS_HOME ] ; then
