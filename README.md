@@ -4,7 +4,7 @@ CodeGuardian is the system developed for the final degree project. Its objective
 
 The system does not use the AI model as the only source of truth. First, SonarQube detects issues in the target repository. After that, the CodeGuardian agent reads those findings, prepares the code context, asks the AI model for possible fixes, validates the generated suggestions and publishes the final feedback as inline comments in Bitbucket.
 
-CodeGuardian can also run an optional improvement review mode. This mode is separate from defect detection: it only reads the pull request diff, applies strict token limits and asks the model for a small number of non-blocking maintainability suggestions.
+CodeGuardian can also run an optional improvement review mode. This mode is separate from defect detection: it reads the pull request diff, detects static improvement candidates in changed Python and shell/KSH files, and asks the model for a small number of non-blocking maintainability suggestions based on that evidence.
 
 This repository, `codeguardian-core`, contains the main agent logic. At the same time, its README acts as the global entry point for the whole project because the agent is the central element of the system.
 
@@ -191,13 +191,23 @@ CODEGUARDIAN_MAX_IMPROVEMENT_CHARS=18000
 CODEGUARDIAN_IMPROVEMENT_EXCLUDE=generated/,release/,*_pb2.py
 ```
 
-This mode is language-agnostic. It does not depend on a Java, Python or Node-specific refactoring tool. Instead, it reads only the pull request diff, sends a bounded amount of context to the model and asks for maintainability suggestions such as simpler structure, lower duplication, clearer naming or easier testing.
+This mode is repository-independent but no longer relies only on the model reading the diff. The agent first detects static improvement candidates in supported changed files and then sends those candidates together with bounded diff context to the model.
+
+The current candidate detectors cover:
+
+- Python functions that are long enough to be harder to maintain or test,
+- broad Python exception handlers such as `except:` or `except Exception`,
+- fragile shell loops based on command substitution,
+- unquoted variables in shell test expressions.
+
+These candidates make the improvement review more explainable: the model is asked to publish suggestions only when they are supported by detected evidence.
 
 The output is published as `Code Improvement` comments in Bitbucket. These comments are intentionally non-blocking and separate from the SonarQube-backed defect comments.
 
 The token cost is controlled by:
 
 - limiting the number of changed files sent to the model,
+- limiting the number of static improvement candidates,
 - limiting the maximum diff size,
 - limiting the number of improvement suggestions,
 - validating that proposed replacements match the current file before publication.
@@ -265,7 +275,8 @@ Current test coverage:
 - `tests/test_patch_validation.py`: checks patch application against real temporary files, `original_code` matching, Python syntax validation and dropping of invalid issues.
 - `tests/test_build_validation.py`: checks Maven compile validation, including skipped execution when no `pom.xml` exists and failure when Maven compilation fails.
 - `tests/test_comments.py`: checks hidden issue identifiers, CodeGuardian comment markers and generated inline comment content.
-- `tests/test_improvements.py`: checks improvement-review activation, diff file filtering and line alignment.
+- `tests/test_improvements.py`: checks improvement-review activation, configurable exclusions, static candidate detection, prompt construction and line alignment.
+- `tests/test_runtime.py`: checks aggregation of analysis metrics across static and improvement review stages.
 - `tests/test_scope_batching.py`: checks grouping of findings by function or global scope before sending them to the model.
 - `tests/test_sonar_results.py`: checks parsing of SonarQube JSON responses into the internal simplified format.
 
@@ -283,6 +294,7 @@ The current suite is mainly a characterization suite. It captures the present be
 - [docs/bitbucket-sync.md](docs/bitbucket-sync.md)
 - [docs/pipeline.md](docs/pipeline.md)
 - [docs/metrics.md](docs/metrics.md)
+- [docs/demo.md](docs/demo.md)
 
 ## Current Scope and Limitations
 
@@ -290,6 +302,9 @@ The current suite is mainly a characterization suite. It captures the present be
 - Java projects with Maven are also validated at project level with `mvn compile` when `pom.xml` is present.
 - Other ecosystems still use applicability validation without compilation or tests by default.
 - Part of scope detection in brace-based languages is heuristic.
+- Improvement candidates are currently implemented for Python and shell/KSH files.
+- Improvement comments are guided by static candidates, but there is not yet a strict candidate-id validation step on the model response.
+- Improvement candidates are selected from changed files; future work should filter them more tightly against changed line ranges.
 - The current automated tests focus on internal core logic, not on full external-service integration.
 
 ## Status
