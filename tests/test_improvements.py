@@ -2,6 +2,7 @@ from codeguardian.improvements import (
     align_issue_to_current_file,
     changed_files,
     detect_python_improvement_candidates,
+    detect_shell_improvement_candidates,
     improvements_enabled,
 )
 from codeguardian.models import ImprovementCandidate, Issue
@@ -130,6 +131,47 @@ def test_detect_python_improvement_candidates_reports_broad_exceptions(tmp_path)
     assert candidates[0].category == "error_handling"
     assert "broad_exception=Exception" in candidates[0].evidence
     assert "except Exception" in candidates[0].original_code
+
+
+def test_detect_shell_improvement_candidates_reports_command_substitution_iteration(tmp_path):
+    source = tmp_path / "startup.sh"
+    source.write_text(
+        "#!/bin/bash\n"
+        "for file in $(ls $ROOT/*.xml)\n"
+        "do\n"
+        "  echo $file\n"
+        "done\n",
+        encoding="utf-8",
+    )
+
+    candidates = detect_shell_improvement_candidates(str(source))
+
+    assert len(candidates) == 1
+    assert candidates[0].file == str(source)
+    assert candidates[0].line == 2
+    assert candidates[0].language == "shell"
+    assert candidates[0].category == "maintainability"
+    assert "command_substitution_iteration" in candidates[0].evidence
+    assert "for file in $(ls" in candidates[0].original_code
+
+
+def test_detect_shell_improvement_candidates_reports_unquoted_test_variables(tmp_path):
+    source = tmp_path / "startup.ksh"
+    source.write_text(
+        "#!/bin/ksh\n"
+        "if [ -d $ESS_HOME ] ; then\n"
+        "  echo ready\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+
+    candidates = detect_shell_improvement_candidates(str(source))
+
+    assert len(candidates) == 1
+    assert candidates[0].line == 2
+    assert candidates[0].category == "resource_handling"
+    assert "unquoted_test_variable=ESS_HOME" in candidates[0].evidence
+    assert "[ -d $ESS_HOME ]" in candidates[0].original_code
 
 
 def test_align_issue_to_current_file_updates_imprecise_line(monkeypatch, tmp_path):

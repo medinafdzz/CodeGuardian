@@ -3,6 +3,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -199,6 +200,53 @@ def detect_python_improvement_candidates(
                     original_code=_python_node_source(lines, node),
                     confidence=0.75,
                 ))
+
+    return candidates
+
+
+def _line_block(lines: list[str], line_index: int, context: int = 1) -> str:
+    start = max(0, line_index - context)
+    end = min(len(lines), line_index + context + 1)
+    return "".join(lines[start:end]).rstrip()
+
+
+def detect_shell_improvement_candidates(file_path: str) -> list[ImprovementCandidate]:
+    try:
+        lines = read_file_lines(file_path)
+    except Exception:
+        return []
+
+    candidates: list[ImprovementCandidate] = []
+    unquoted_test_pattern = re.compile(r"\[\s+-[a-zA-Z]\s+\$([A-Za-z_][A-Za-z0-9_]*)\s+\]")
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+
+        if re.search(r"\bfor\s+\w+\s+in\s+\$\(", stripped):
+            candidates.append(ImprovementCandidate(
+                file=file_path,
+                line=index + 1,
+                language="shell",
+                category="maintainability",
+                reason="Command substitution in shell loops is fragile when values contain spaces or newlines.",
+                evidence="command_substitution_iteration",
+                original_code=_line_block(lines, index),
+                confidence=0.75,
+            ))
+
+        match = unquoted_test_pattern.search(stripped)
+        if match:
+            variable_name = match.group(1)
+            candidates.append(ImprovementCandidate(
+                file=file_path,
+                line=index + 1,
+                language="shell",
+                category="resource_handling",
+                reason="Unquoted variables in shell tests can break when paths contain spaces or are empty.",
+                evidence=f"unquoted_test_variable={variable_name}",
+                original_code=_line_block(lines, index),
+                confidence=0.8,
+            ))
 
     return candidates
 
