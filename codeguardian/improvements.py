@@ -441,5 +441,6 @@ def analyze_improvements(project_key: str) -> Decision:
             prompt_tokens=prompt_tokens,
             response_tokens=response_tokens,
             total_tokens=total_tokens,
+            improvement_candidates=len(candidates),
         ),
     )

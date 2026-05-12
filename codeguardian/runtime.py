@@ -20,6 +20,7 @@ def combine_analysis_metrics(*metrics: AnalysisMetrics) -> AnalysisMetrics:
         cached_tokens=sum(metric.cached_tokens for metric in metrics),
         batch_cache_hits=sum(metric.batch_cache_hits for metric in metrics),
         batch_cache_misses=sum(metric.batch_cache_misses for metric in metrics),
+        improvement_candidates=sum(metric.improvement_candidates for metric in metrics),
     )
 
 

@@ -60,6 +60,7 @@ class AnalysisMetrics:
     cached_tokens: int = 0
     batch_cache_hits: int = 0
     batch_cache_misses: int = 0
+    improvement_candidates: int = 0
 
 
 @dataclass(frozen=True)

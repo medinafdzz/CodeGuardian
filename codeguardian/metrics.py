@@ -79,6 +79,12 @@ def build_metrics_registry(
     )
     _set_gauge(
         registry,
+        "codeguardian_improvement_candidates_total",
+        "Number of static improvement candidates detected before AI review",
+        analysis.improvement_candidates,
+    )
+    _set_gauge(
+        registry,
         "codeguardian_sonar_findings_total",
         "Number of relevant SonarQube findings read by the agent",
         execution.sonar_findings,
