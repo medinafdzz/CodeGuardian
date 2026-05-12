@@ -40,6 +40,18 @@ class BuildValidationResult:
 
 
 @dataclass(frozen=True)
+class ImprovementCandidate:
+    file: str
+    line: int
+    language: str
+    category: str
+    reason: str
+    evidence: str
+    original_code: str
+    confidence: float
+
+
+@dataclass(frozen=True)
 class AnalysisMetrics:
     latency_seconds: float = 0.0
     prompt_tokens: int = 0

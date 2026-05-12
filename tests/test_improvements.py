@@ -1,5 +1,5 @@
 from codeguardian.improvements import align_issue_to_current_file, changed_files, improvements_enabled
-from codeguardian.models import Issue
+from codeguardian.models import ImprovementCandidate, Issue
 
 
 def test_improvements_enabled_accepts_true_values(monkeypatch):
@@ -60,6 +60,26 @@ def test_changed_files_uses_configurable_exclusions(monkeypatch, tmp_path):
     monkeypatch.setattr("codeguardian.improvements.run_git", fake_run_git)
 
     assert changed_files("origin/main...HEAD", max_files=5) == ["service.py"]
+
+
+def test_improvement_candidate_keeps_detection_evidence():
+    candidate = ImprovementCandidate(
+        file="service.py",
+        line=12,
+        language="python",
+        category="complexity",
+        reason="Function has too many nested branches.",
+        evidence="nesting_depth=4",
+        original_code="def run():\n    if enabled:\n        return True",
+        confidence=0.8,
+    )
+
+    assert candidate.file == "service.py"
+    assert candidate.line == 12
+    assert candidate.language == "python"
+    assert candidate.category == "complexity"
+    assert candidate.evidence == "nesting_depth=4"
+    assert candidate.confidence == 0.8
 
 
 def test_align_issue_to_current_file_updates_imprecise_line(monkeypatch, tmp_path):
