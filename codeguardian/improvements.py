@@ -251,6 +251,75 @@ def detect_shell_improvement_candidates(file_path: str) -> list[ImprovementCandi
     return candidates
 
 
+def detect_improvement_candidates(
+    files: list[str],
+    max_candidates: int = 10,
+) -> list[ImprovementCandidate]:
+    candidates: list[ImprovementCandidate] = []
+
+    for file_path in files:
+        extension = os.path.splitext(file_path)[1].lower()
+
+        if extension == ".py":
+            candidates.extend(detect_python_improvement_candidates(file_path))
+        elif extension in {".sh", ".ksh", ".bash"}:
+            candidates.extend(detect_shell_improvement_candidates(file_path))
+
+        if len(candidates) >= max_candidates:
+            return candidates[:max_candidates]
+
+    return candidates
+
+
+def format_improvement_candidates(candidates: list[ImprovementCandidate]) -> str:
+    if not candidates:
+        return "No static improvement candidates were detected."
+
+    payload = []
+    for index, candidate in enumerate(candidates, start=1):
+        payload.append({
+            "id": index,
+            "file": candidate.file,
+            "line": candidate.line,
+            "language": candidate.language,
+            "category": candidate.category,
+            "reason": candidate.reason,
+            "evidence": candidate.evidence,
+            "confidence": candidate.confidence,
+            "original_code": candidate.original_code,
+        })
+
+    return json.dumps(payload, indent=2)
+
+
+def build_improvement_prompt(
+    project_key: str,
+    max_improvements: int,
+    files: list[str],
+    diff_payload: str,
+    candidates: list[ImprovementCandidate],
+) -> str:
+    return f"""
+Project:
+{project_key}
+
+Maximum improvement suggestions:
+{max_improvements}
+
+Changed files:
+{json.dumps(files)}
+
+Detected improvement candidates:
+{format_improvement_candidates(candidates)}
+
+Only publish suggestions that are supported by these candidates.
+Use the diff context to verify that the suggestion applies to changed code.
+
+Diff context:
+{diff_payload}
+"""
+
+
 def improvement_signature(project_key: str, diff_payload: str, max_improvements: int) -> str:
     raw = json.dumps({
         "project_key": project_key,
@@ -298,6 +367,7 @@ def analyze_improvements(project_key: str) -> Decision:
     max_files = int(os.getenv("CODEGUARDIAN_MAX_IMPROVEMENT_FILES", "4"))
     max_chars = int(os.getenv("CODEGUARDIAN_MAX_IMPROVEMENT_CHARS", "18000"))
     max_improvements = int(os.getenv("CODEGUARDIAN_MAX_IMPROVEMENTS", "3"))
+    max_candidates = int(os.getenv("CODEGUARDIAN_MAX_IMPROVEMENT_CANDIDATES", "10"))
 
     base_ref = diff_base_ref()
     files = changed_files(base_ref, max_files)
@@ -309,20 +379,16 @@ def analyze_improvements(project_key: str) -> Decision:
 
     client = genai.Client(api_key=os.getenv("LLM_AUTH_TOKEN"))
     start_time = time.time()
+    candidates = detect_improvement_candidates(files, max_candidates=max_candidates)
+    logger.info("Improvement review detected %s static candidates", len(candidates))
 
-    prompt = f"""
-Project:
-{project_key}
-
-Maximum improvement suggestions:
-{max_improvements}
-
-Changed files:
-{json.dumps(files)}
-
-Diff context:
-{diff_payload}
-"""
+    prompt = build_improvement_prompt(
+        project_key=project_key,
+        max_improvements=max_improvements,
+        files=files,
+        diff_payload=diff_payload,
+        candidates=candidates,
+    )
 
     response = client.models.generate_content(
         model="gemini-2.5-flash",

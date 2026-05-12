@@ -1,6 +1,8 @@
 from codeguardian.improvements import (
     align_issue_to_current_file,
+    build_improvement_prompt,
     changed_files,
+    detect_improvement_candidates,
     detect_python_improvement_candidates,
     detect_shell_improvement_candidates,
     improvements_enabled,
@@ -172,6 +174,63 @@ def test_detect_shell_improvement_candidates_reports_unquoted_test_variables(tmp
     assert candidates[0].category == "resource_handling"
     assert "unquoted_test_variable=ESS_HOME" in candidates[0].evidence
     assert "[ -d $ESS_HOME ]" in candidates[0].original_code
+
+
+def test_detect_improvement_candidates_dispatches_supported_files(tmp_path):
+    python_source = tmp_path / "service.py"
+    python_source.write_text(
+        "def load():\n"
+        "    try:\n"
+        "        return int('x')\n"
+        "    except Exception:\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    shell_source = tmp_path / "startup.ksh"
+    shell_source.write_text(
+        "#!/bin/ksh\n"
+        "if [ -d $ESS_HOME ] ; then\n"
+        "  echo ready\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    ignored_source = tmp_path / "README.md"
+    ignored_source.write_text("# docs\n", encoding="utf-8")
+
+    candidates = detect_improvement_candidates([
+        str(python_source),
+        str(shell_source),
+        str(ignored_source),
+    ])
+
+    assert [candidate.language for candidate in candidates] == ["python", "shell"]
+    assert [candidate.category for candidate in candidates] == ["error_handling", "resource_handling"]
+
+
+def test_build_improvement_prompt_includes_detected_candidates():
+    candidate = ImprovementCandidate(
+        file="service.py",
+        line=10,
+        language="python",
+        category="complexity",
+        reason="Function is long enough to make maintenance and testing harder.",
+        evidence="function_lines=80;threshold=60",
+        original_code="def service():\n    return True",
+        confidence=0.7,
+    )
+
+    prompt = build_improvement_prompt(
+        project_key="demo",
+        max_improvements=3,
+        files=["service.py"],
+        diff_payload="diff --git a/service.py b/service.py",
+        candidates=[candidate],
+    )
+
+    assert "Detected improvement candidates:" in prompt
+    assert "function_lines=80;threshold=60" in prompt
+    assert "Only publish suggestions that are supported by these candidates." in prompt
+    assert "Diff context:" in prompt
 
 
 def test_align_issue_to_current_file_updates_imprecise_line(monkeypatch, tmp_path):
