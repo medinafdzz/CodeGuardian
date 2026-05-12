@@ -57,6 +57,8 @@ The agent uses the `prometheus_client` library and pushes data to **Prometheus P
 
 The metrics are pushed near the end of the agent execution, once the model interaction, validation and Bitbucket synchronization have completed.
 
+Grafana panels use `last_over_time(...)` for execution gauges. This keeps the dashboard continuous by showing the latest known execution value between agent runs. The agent is a Jenkins batch process, so it does not produce a new sample every few seconds like a long-running service.
+
 ### Why Pushgateway is used
 
 The agent is executed inside Jenkins as a short-lived process. Because of that, it does not expose a long-running HTTP metrics endpoint. A pull-based Prometheus scrape model would not fit well here.
