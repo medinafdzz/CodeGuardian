@@ -51,6 +51,7 @@ For this reason, the core logic and the current unit tests are designed to be ge
 | `codeguardian/bitbucket.py` | Bitbucket REST and comment synchronization helpers |
 | `codeguardian/cli.py` | Command-line entrypoint helper |
 | `docs/` | Architecture, pipeline, validation, synchronization and metrics documentation |
+| `docs/copilot-mcp.md` | Copilot MCP integration guide |
 | `requirements.txt` | Python dependencies for runtime and testing |
 | `tests/` | Unit tests for internal agent behaviour |
 
@@ -203,6 +204,12 @@ The token cost is controlled by:
 - limiting the number of changed files sent to the model,
 - limiting the number of optimization scopes,
 - validating that proposed replacements match the current file before publication.
+
+## Copilot MCP
+
+CodeGuardian exposes an optional read-only MCP server for GitHub Copilot Business or Enterprise. It lets Copilot query SonarQube findings, Bitbucket CodeGuardian comments, Prometheus metrics and Jenkins build summaries from the local infrastructure.
+
+The server is documented in `docs/copilot-mcp.md` and is intended as a support interface for the TFG workflow. It does not modify repositories, pull requests, Jenkins jobs or SonarQube projects.
 
 ## Observability
 
