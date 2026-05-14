@@ -101,6 +101,35 @@ services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
 
+  # Read-only MCP server used by GitHub Copilot to query CodeGuardian context
+  codeguardian-mcp:
+    container_name: codeguardian-mcp
+    build:
+      context: ..
+      dockerfile: codeguardian-infra/Dockerfile.mcp
+    networks:
+      - services-net
+    ports:
+      - "8010:8010"
+    environment:
+      - CODEGUARDIAN_MCP_HOST=0.0.0.0
+      - CODEGUARDIAN_MCP_PORT=8010
+      - CODEGUARDIAN_MCP_PATH=/mcp
+      - BITBUCKET_URL=https://api.bitbucket.org/2.0
+      - BITBUCKET_EMAIL=${BITBUCKET_EMAIL:-}
+      - BITBUCKET_API_TOKEN=${BITBUCKET_API_TOKEN:-}
+      - SONARQUBE_URL=http://sonarqube-server:9000
+      - SONARQUBE_AUTH_TOKEN=${SONARQUBE_AUTH_TOKEN:-}
+      - PROMETHEUS_URL=http://prometheus:9090
+      - JENKINS_URL=http://jenkins-blueocean:8080
+      - JENKINS_USER=${JENKINS_USER:-}
+      - JENKINS_API_TOKEN=${JENKINS_API_TOKEN:-}
+    depends_on:
+      - jenkins-blueocean
+      - sonarqube-server
+      - prometheus
+    restart: "on-failure"
+
 volumes:
   jenkins-data:
     external: true
