@@ -77,15 +77,22 @@ def test_comment_content_combines_multiple_issues_for_same_block():
     assert "ID: S2" in content
 
 
-def test_comment_content_formats_improvement_suggestion():
+def test_comment_content_formats_performance_suggestion():
     content = comment_content([make_issue(
-        sonar_key="IMPROVEMENT:1",
-        severity="IMPROVEMENT",
-        problem="This function mixes parsing and persistence concerns.",
-        solution="Extract persistence into a separate helper to make the flow easier to test.",
+        sonar_key="PERFORMANCE:1",
+        source="performance",
+        severity="PERFORMANCE",
+        problem="Repeated membership checks scan the list for every item.",
+        solution="Build a set once and use constant-time membership checks.",
+        original_complexity="O(n*m)",
+        proposed_complexity="O(n+m)",
+        complexity_justification="Creating a set avoids the repeated linear search inside the loop.",
     )])
 
-    assert "### Code Improvement" in content
-    assert "**Improvement opportunity:**" in content
-    assert "**Suggested improvement:**" in content
-    assert "ID: IMPROVEMENT:1" in content
+    assert "### CodeGuardian performance suggestion" in content
+    assert "**Performance issue:**" in content
+    assert "**Current estimated complexity:** O(n*m)" in content
+    assert "**Proposed estimated complexity:** O(n+m)" in content
+    assert "**Complexity justification:**" in content
+    assert "**Suggested performance improvement:**" in content
+    assert "ID: PERFORMANCE:1" in content

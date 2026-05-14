@@ -14,7 +14,8 @@ def test_build_metrics_registry_exports_execution_analysis_and_comment_values():
             cached_tokens=60,
             batch_cache_hits=3,
             batch_cache_misses=1,
-            improvement_candidates=4,
+            performance_candidates=2,
+            performance_suggestions=1,
         ),
         execution=ExecutionMetrics(
             sonar_findings=10,
@@ -38,7 +39,8 @@ def test_build_metrics_registry_exports_execution_analysis_and_comment_values():
     assert "codeguardian_analysis_prompt_tokens 100.0" in output
     assert "codeguardian_analysis_cached_tokens 60.0" in output
     assert "codeguardian_batch_cache_hits_total 3.0" in output
-    assert "codeguardian_improvement_candidates_total 4.0" in output
+    assert "codeguardian_performance_candidates_total 2.0" in output
+    assert "codeguardian_performance_suggestions_total 1.0" in output
     assert "codeguardian_sonar_findings_total 10.0" in output
     assert "codeguardian_final_issues_total 2.0" in output
     assert "codeguardian_blocking_findings 1.0" in output

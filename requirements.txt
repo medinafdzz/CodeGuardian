@@ -1,10 +1,8 @@
 # HTTP requests and API calls
-requests
 httpx
 
 # LLM providers
 google-genai
-openai
 
 # Model Context Protocol SDK (for MCP client communication)
 mcp

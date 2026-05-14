@@ -79,9 +79,15 @@ def build_metrics_registry(
     )
     _set_gauge(
         registry,
-        "codeguardian_improvement_candidates_total",
-        "Number of static improvement candidates detected before AI review",
-        analysis.improvement_candidates,
+        "codeguardian_performance_candidates_total",
+        "Number of performance candidate scopes available before AI review",
+        analysis.performance_candidates,
+    )
+    _set_gauge(
+        registry,
+        "codeguardian_performance_suggestions_total",
+        "Number of performance suggestions generated before validation",
+        analysis.performance_suggestions,
     )
     _set_gauge(
         registry,

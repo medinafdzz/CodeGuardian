@@ -2,11 +2,11 @@ import argparse
 
 from codeguardian.ai import analyze_code_with_gemini
 from codeguardian.bitbucket import report_to_bitbucket
-from codeguardian.improvements import analyze_improvements, improvements_enabled
 from codeguardian.input_contract import load_webhook_data
 from codeguardian.logging_utils import logger
 from codeguardian.metrics import push_execution_metrics
 from codeguardian.models import AgentExecutionError, AnalysisMetrics, Decision, ExecutionMetrics
+from codeguardian.performance import analyze_performance, performance_enabled
 from codeguardian.sonarqube import fetch_sonar_issues
 from codeguardian.validation import filter_valid_issues, normalize_issues, validate_maven_compile
 
@@ -20,7 +20,8 @@ def combine_analysis_metrics(*metrics: AnalysisMetrics) -> AnalysisMetrics:
         cached_tokens=sum(metric.cached_tokens for metric in metrics),
         batch_cache_hits=sum(metric.batch_cache_hits for metric in metrics),
         batch_cache_misses=sum(metric.batch_cache_misses for metric in metrics),
-        improvement_candidates=sum(metric.improvement_candidates for metric in metrics),
+        performance_candidates=sum(metric.performance_candidates for metric in metrics),
+        performance_suggestions=sum(metric.performance_suggestions for metric in metrics),
     )
 
 
@@ -64,31 +65,38 @@ async def main() -> None:
     else:
         logger.info("No relevant issues found by SonarQube.")
 
-    if improvements_enabled():
-        improvement_decision = analyze_improvements(project_key)
-        improvement_decision.issues, improvement_invalid_count = normalize_issues(improvement_decision.issues)
-        improvement_decision.issues, improvement_patch_invalid_count = filter_valid_issues(improvement_decision.issues)
+    performance_review_enabled = performance_enabled()
+    logger.info("Performance review enabled: %s", performance_review_enabled)
 
-        if improvement_invalid_count:
-            logger.info("Dropped %s invalid improvement suggestions", improvement_invalid_count)
+    if performance_review_enabled:
+        performance_decision = analyze_performance(project_key)
+        performance_decision.issues, performance_invalid_count = normalize_issues(performance_decision.issues)
+        performance_decision.issues, performance_patch_invalid_count = filter_valid_issues(performance_decision.issues)
 
-        if improvement_patch_invalid_count:
-            logger.info("Dropped %s improvement suggestions after patch validation", improvement_patch_invalid_count)
+        if performance_invalid_count:
+            logger.info("Dropped %s invalid performance suggestions", performance_invalid_count)
 
-        decision.issues.extend(improvement_decision.issues)
-        analysis_metrics = combine_analysis_metrics(analysis_metrics, improvement_decision.metrics)
+        if performance_patch_invalid_count:
+            logger.info(
+                "Dropped %s performance suggestions after patch validation",
+                performance_patch_invalid_count,
+            )
+
+        logger.info("Final performance comments: %s", len(performance_decision.issues))
+        decision.issues.extend(performance_decision.issues)
+        analysis_metrics = combine_analysis_metrics(analysis_metrics, performance_decision.metrics)
 
     validate_maven_compile()
 
     logger.info(
-        "Execution summary: sonar_findings=%s generated_issues=%s dropped_invalid=%s dropped_patch_validation=%s final_issues=%s blocking_findings=%s improvement_suggestions=%s",
+        "Execution summary: sonar_findings=%s generated_issues=%s dropped_invalid=%s dropped_patch_validation=%s final_issues=%s blocking_findings=%s performance_suggestions=%s",
         len(sonar_issues),
         generated_static_count,
         invalid_count,
         patch_invalid_count,
         len(decision.issues),
         has_blocking_findings,
-        len([issue for issue in decision.issues if issue.severity == "IMPROVEMENT"]),
+        len([issue for issue in decision.issues if issue.source == "performance"]),
     )
 
     comments = await report_to_bitbucket(pr_id, repo_slug, workspace, decision)

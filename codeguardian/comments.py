@@ -90,19 +90,31 @@ def comment_content(issues: list[Issue]) -> str:
                          f"```{file_extension}\n" +
                          "\n".join(required_import for required_import in all_required_imports) + "\n```\n\n")
 
-    is_improvement = all((issue.severity or "").upper() == "IMPROVEMENT" for issue in issues)
+    is_performance = all((issue.source or "").lower() == "performance" for issue in issues)
+
+    complexity_block = ""
+    if is_performance:
+        base_original_complexity = base_issue.original_complexity or "Not provided"
+        base_proposed_complexity = base_issue.proposed_complexity or "Not provided"
+        base_complexity_justification = base_issue.complexity_justification or "Not provided"
+        complexity_block = (
+            f"**Current estimated complexity:** {base_original_complexity}\n\n"
+            f"**Proposed estimated complexity:** {base_proposed_complexity}\n\n"
+            f"**Complexity justification:**\n\n{base_complexity_justification}\n\n"
+        )
 
     if len(issues) == 1:
         issue = issues[0]
-        title = "Code Improvement" if is_improvement else "Code Issue"
-        problem_label = "Improvement opportunity" if is_improvement else "Problems"
-        solution_label = "Suggested improvement" if is_improvement else "Solutions"
+        title = "CodeGuardian performance suggestion" if is_performance else "Code Issue"
+        problem_label = "Performance issue" if is_performance else "Problems"
+        solution_label = "Suggested performance improvement" if is_performance else "Solutions"
 
         body = (f"### {title}\n\n"
                 f"**File:** {issue.file}\n\n"
                 f"**Lines:** {min_line}-{max_line}\n\n"
                 f"**Severity:** {issue.severity}\n\n"
                 f"**{problem_label}:**\n\n{issue.problem}\n\n"
+                f"{complexity_block}"
                 f"**{solution_label}:**\n\n{issue.solution}\n\n"
                 f"{imports_block}"
                 f"**Block to substitute:**\n"
@@ -141,10 +153,10 @@ def comment_content(issues: list[Issue]) -> str:
         seen_solutions.add(normalized_solution)
         unique_solutions.append(issue.solution.strip())
 
-    title = "Code Improvements" if is_improvement else "Code Issues"
-    problems_label = "Improvement opportunities" if is_improvement else "Detected problems"
-    single_solution_label = "Suggested improvement" if is_improvement else "Suggested solution"
-    solution_label = "Suggested improvements" if is_improvement else "Suggested actions"
+    title = "CodeGuardian performance suggestions" if is_performance else "Code Issues"
+    problems_label = "Performance issues" if is_performance else "Detected problems"
+    single_solution_label = "Suggested performance improvement" if is_performance else "Suggested solution"
+    solution_label = "Suggested performance improvements" if is_performance else "Suggested actions"
 
     if len(unique_solutions) == 1:
         solution_block = f"**{single_solution_label}:**\n{unique_solutions[0]}\n\n"
@@ -157,6 +169,7 @@ def comment_content(issues: list[Issue]) -> str:
             f"**Lines:** {min_line}-{max_line}\n\n"
             f"**{problems_label}:**\n\n"
             f"{combined_problems}\n\n"
+            f"{complexity_block}"
             f"{solution_block}"
             f"{imports_block}"
             f"**Block to substitute:**\n"

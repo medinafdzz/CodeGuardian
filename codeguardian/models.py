@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class Issue(BaseModel):
     sonar_key: str
+    source: str = "sonarqube"
     file: str
     target_type: str
     target_name: str
@@ -14,6 +15,9 @@ class Issue(BaseModel):
     problem: str
     severity: str
     solution: str
+    original_complexity: str | None = None
+    proposed_complexity: str | None = None
+    complexity_justification: str | None = None
     original_code: str
     proposed_code: str
     required_imports: list[str] = Field(default_factory=list)
@@ -40,15 +44,14 @@ class BuildValidationResult:
 
 
 @dataclass(frozen=True)
-class ImprovementCandidate:
+class PerformanceCandidate:
     file: str
-    line: int
+    target_type: str
+    target_name: str
+    start_line: int
+    end_line: int
     language: str
-    category: str
-    reason: str
-    evidence: str
-    original_code: str
-    confidence: float
+    code: str
 
 
 @dataclass(frozen=True)
@@ -60,7 +63,8 @@ class AnalysisMetrics:
     cached_tokens: int = 0
     batch_cache_hits: int = 0
     batch_cache_misses: int = 0
-    improvement_candidates: int = 0
+    performance_candidates: int = 0
+    performance_suggestions: int = 0
 
 
 @dataclass(frozen=True)
