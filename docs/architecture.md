@@ -6,7 +6,7 @@ CodeGuardian is an automated pull request review assistant designed to run insid
 
 The system was designed as a practical and reusable solution rather than as a language-specific prototype. For that reason, the architecture tries to keep the workflow generic enough to support different repositories and different technology stacks with minimal repository-specific changes.
 
-At a high level, the process starts when a pull request triggers Jenkins. Jenkins checks out the repository under review, runs static analysis with SonarQube, and then executes the AI agent. The agent collects the relevant findings, groups them by code scope, asks the language model for possible fixes, validates the generated patches, and finally synchronizes the results back into the pull request as inline comments. If the optional improvement review is enabled, the agent also detects static maintainability candidates in changed files and asks the model for small non-blocking improvements based on those candidates.
+At a high level, the process starts when a pull request triggers Jenkins. Jenkins checks out the repository under review, runs static analysis with SonarQube, and then executes the AI agent. The agent collects the relevant findings, groups them by code scope, asks the language model for possible fixes, validates the generated patches, and finally synchronizes the results back into the pull request as inline comments. The optional performance review can add extra comments after the same validation barrier by inspecting changed functions or methods for clear Big O improvements.
 
 ---
 
@@ -18,7 +18,7 @@ The architecture is based on five main building blocks:
 2. **Jenkins**, which orchestrates the pipeline execution.
 3. **SonarQube**, which provides the static analysis findings.
 4. **The CodeGuardian agent**, implemented in Python, which contains the orchestration and decision logic.
-5. **AI**, which generates fix proposals from the selected findings and optional improvement suggestions from static candidates.
+5. **AI**, which generates fix proposals from the selected findings and optional performance suggestions from explicit candidates.
 
 In addition to these main elements, the system also uses:
 - **Atlassian Rovo MCP**, to read pull request comments from Bitbucket.
@@ -53,7 +53,7 @@ One of the key architectural decisions in CodeGuardian is that findings are not 
 
 After batching, the agent sends the selected findings to the AI model. The prompt is strongly constrained: the model must return valid JSON, keep the original SonarQube key, propose only real code modifications, preserve concrete types when needed, avoid unsafe shorthand refactors, and return no issue at all if the replacement is not safe enough. The current implementation also supports prompt caching and batch-level caching to reduce repeated requests and lower execution cost.
 
-When improvement review is enabled, the agent follows a similar controlled pattern but with a different source of evidence. Instead of asking the model to inspect the diff freely, CodeGuardian first detects static candidates such as long Python functions, broad exception handlers in Python or Java, Java console prints, fragile shell loops, unquoted shell test variables and basic C/C++ maintainability signals. These candidates are included in the prompt so that improvement comments can be explained and bounded.
+When performance review is enabled, the agent uses the pull request diff to collect changed function or method scopes. Gemini receives one scope at a time and must justify a clear algorithmic improvement with current and proposed Big O estimates. The output is still normalized, validated and synchronized through the same publication pipeline as SonarQube-backed issues.
 
 ### 6. Validation of generated patches
 
@@ -102,7 +102,7 @@ This means the agent is the real decision layer of the architecture. It connects
 
 ## AI
 
-AI is used as the proposal engine, not as the only source of truth. For defect fixing, the model receives findings already detected by SonarQube and is asked to suggest small, concrete replacements. For improvement review, it receives static candidates detected by the agent and bounded diff context. This distinction keeps the architecture grounded and reduces hallucinations.
+AI is used as the proposal engine, not as the only source of truth. For defect fixing, the model receives findings already detected by SonarQube and is asked to suggest small, concrete replacements. For performance review, it receives changed scopes and must provide a direct replacement backed by asymptotic reasoning. This keeps the architecture grounded while avoiding broad repository-wide LLM review.
 
 ## Bitbucket
 
@@ -136,9 +136,9 @@ The agent does not recreate all comments on every execution. Instead, it compare
 
 The architecture includes both prompt cache metadata and batch cache storage. This reduces repeated calls to the model when the same or very similar findings are processed again. The batch signature also includes a hash of the real scope content, which makes the cache safer against stale reuse.
 
-## 7. Improvement review is candidate-driven
+## 7. Performance review is changed-scope and validation-gated
 
-Optional improvement comments are based on explicit static candidates before the model is called. This makes the feature more defensible than a pure LLM review of the diff, because each suggestion should be grounded in a detected maintainability or robustness signal.
+Optional performance comments are generated only from changed function or method scopes. Batch signatures include the review type, model, performance rules hash, file path, scope identity and scope content hash, which keeps them separate from SonarQube review cache entries. The feature is best-effort and does not replace benchmarks, profiling, compilation or tests.
 
 ---
 
@@ -163,9 +163,7 @@ The current architecture still has some limitations:
 - syntax validation is stronger for Python than for other ecosystems,
 - generated fixes are not compiled or tested before publication,
 - the system still depends on the quality of SonarQube findings,
-- improvement candidate detection is still heuristic and currently covers Python, shell/KSH, Java and basic C/C++ signals,
-- improvement candidates are not yet strictly filtered by changed line ranges,
-- model improvement responses are not yet validated against a candidate identifier,
+- performance candidate detection is based on changed function or method scopes and the existing scope parser,
 - and some languages rely on heuristic scope detection instead of full parsing.
 
 These limitations are acceptable for the current project stage, especially because the architecture already includes the right control points for future extensions.
@@ -179,9 +177,7 @@ This architecture leaves room for several future improvements:
 - ecosystem-specific validation, such as Maven or Gradle compilation,
 - export of structured results in formats such as JSON or SARIF,
 - project-specific review profiles,
-- more improvement detectors for XML, duplication and performance smells,
-- strict candidate-id validation for improvement responses,
-- filtering improvement candidates by changed line ranges,
+- richer performance candidate collection for languages and cases that need deeper parsing,
 - richer dashboards based on the exported metrics,
 - and integration of additional static analysis tools as complementary sources of findings.
 

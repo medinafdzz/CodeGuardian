@@ -241,6 +241,8 @@ This allows the agent to:
 - authenticate against Bitbucket REST,
 - and open the Atlassian Rovo MCP session.
 
+Optional review modes can be enabled through environment variables before launching the agent. Performance review is disabled unless `CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW=true` is set. Its scope is controlled by `CODEGUARDIAN_PERFORMANCE_MAX_SCOPES`, `CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN` and `CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW`.
+
 ## Pull request metadata
 
 Inside the script block, the pipeline creates a JSON structure containing:

@@ -50,7 +50,7 @@ The simplified order is:
 5. The agent validates the issues.
 6. Only the surviving issues are turned into inline comments.
 
-This means the model is allowed to propose fixes, but the agent still decides whether those proposals are safe enough to be published.
+The optional performance review mode enters the same normalization and validation path before publication. This means the model is allowed to propose fixes or performance replacements, but the agent still decides whether those proposals are safe enough to be published.
 
 ---
 
@@ -165,6 +165,12 @@ This step guarantees only that the patched Python file is syntactically valid. I
 - or project-level compatibility.
 
 Still, it is a meaningful improvement because it filters out one more class of obviously invalid suggestions.
+
+### Performance suggestions
+
+Performance suggestions use the same validation barriers. The additional Big O fields explain why a replacement may be faster, but they do not bypass applicability validation. The `original_code` still has to match the current file, the replacement must be directly applicable, and Python replacements must parse after patching.
+
+This is important because algorithmic reasoning is not enough on its own. A performance suggestion that cannot be safely applied is dropped before Bitbucket synchronization.
 
 ---
 

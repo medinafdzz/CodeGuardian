@@ -160,11 +160,12 @@ The agent exports:
 - `codeguardian_patch_invalid_issues_total`
 - `codeguardian_final_issues_total`
 - `codeguardian_blocking_findings`
-- `codeguardian_improvement_candidates_total`
+- `codeguardian_performance_candidates_total`
+- `codeguardian_performance_suggestions_total`
 
 These values make the validation effect visible in Prometheus. They show how many findings entered the agent, how many suggestions were generated, how many were discarded and how many survived.
 
-`codeguardian_improvement_candidates_total` tracks the number of static improvement candidates found before the AI review step. This helps separate "no improvement comments were published" from "no candidate improvement was detected".
+`codeguardian_performance_candidates_total` tracks changed function or method scopes considered by the optional performance review. `codeguardian_performance_suggestions_total` tracks how many performance suggestions were generated before validation.
 
 ---
 

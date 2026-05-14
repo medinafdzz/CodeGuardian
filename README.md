@@ -4,7 +4,7 @@ CodeGuardian is the system developed for the final degree project. Its objective
 
 The system does not use the AI model as the only source of truth. First, SonarQube detects issues in the target repository. After that, the CodeGuardian agent reads those findings, prepares the code context, asks the AI model for possible fixes, validates the generated suggestions and publishes the final feedback as inline comments in Bitbucket.
 
-CodeGuardian can also run an optional improvement review mode. This mode is separate from defect detection: it reads the pull request diff, detects static improvement candidates in changed Python and shell/KSH files, and asks the model for a small number of non-blocking maintainability suggestions based on that evidence.
+CodeGuardian can also run an optional performance review mode that is separate from defect detection. This mode focuses on changed functions or methods where Gemini can justify a safer algorithmic improvement with Big O reasoning.
 
 This repository, `codeguardian-core`, contains the main agent logic. At the same time, its README acts as the global entry point for the whole project because the agent is the central element of the system.
 
@@ -46,7 +46,8 @@ For this reason, the core logic and the current unit tests are designed to be ge
 | `codeguardian/input_contract.py` | Pipeline input JSON parsing |
 | `codeguardian/sonarqube.py` | SonarQube result parsing and retrieval helpers |
 | `codeguardian/ai.py` | AI batching, cache and generation helpers |
-| `codeguardian/improvements.py` | Optional diff-based maintainability improvement review |
+| `codeguardian/diff.py` | Shared git diff helpers for pull request scope detection |
+| `codeguardian/performance.py` | Optional Big O performance review mode |
 | `codeguardian/bitbucket.py` | Bitbucket REST and comment synchronization helpers |
 | `codeguardian/cli.py` | Command-line entrypoint helper |
 | `docs/` | Architecture, pipeline, validation, synchronization and metrics documentation |
@@ -66,7 +67,7 @@ Its main responsibilities are:
 - filtering and normalising findings,
 - resolving code scope,
 - grouping findings before sending them to the model,
-- optionally reviewing pull request diffs for maintainability improvements,
+- optionally reviewing changed scopes for Big O performance opportunities,
 - validating generated code replacements,
 - synchronising inline comments in Bitbucket,
 - exporting execution metrics.
@@ -108,7 +109,7 @@ The expected end-to-end flow is:
 7. The agent retrieves SonarQube issues.
 8. The agent prepares code context and groups findings.
 9. The AI model generates possible fix suggestions.
-10. If enabled, the agent reviews the pull request diff for maintainability improvements.
+10. If enabled, the agent reviews changed functions or methods for Big O performance opportunities.
 11. The agent validates the generated replacements.
 12. Valid suggestions are published as inline comments in Bitbucket.
 13. Execution metrics are pushed to Pushgateway.
@@ -121,7 +122,7 @@ The system clearly separates detection, generation and publication:
 
 - SonarQube detects problems.
 - The agent decides what to process and validates the results.
-- AI proposes concrete code changes and optional non-blocking improvements.
+- AI proposes concrete code changes and optional non-blocking performance suggestions.
 - Bitbucket displays the final feedback inside the pull request.
 
 This separation reduces operational risk compared to a direct LLM-only approach without validation barriers.
@@ -178,38 +179,27 @@ The agent includes safety barriers before publishing suggestions:
 
 These mechanisms do not guarantee perfect correctness, but they reduce the probability of publishing invalid suggestions.
 
-## Optional Improvement Review
+## Optional Performance Review
 
-The improvement review is disabled by default and can be enabled per pipeline or per repository:
+The performance review is disabled by default and can be enabled per pipeline or per repository:
 
 ```text
-CODEGUARDIAN_ENABLE_IMPROVEMENTS=true
-CODEGUARDIAN_MAX_IMPROVEMENTS=3
-CODEGUARDIAN_MAX_IMPROVEMENT_CANDIDATES=10
-CODEGUARDIAN_MAX_IMPROVEMENT_FILES=4
-CODEGUARDIAN_MAX_IMPROVEMENT_CHARS=18000
-CODEGUARDIAN_IMPROVEMENT_EXCLUDE=generated/,release/,*_pb2.py
+CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW=true
+CODEGUARDIAN_PERFORMANCE_MAX_SCOPES=10
+CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN=true
+CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW=20
 ```
 
-This mode is repository-independent but no longer relies only on the model reading the diff. The agent first detects static improvement candidates in supported changed files and then sends those candidates together with bounded diff context to the model.
+This mode analyses only changed pull request scopes. Candidate scopes are functions or methods resolved from changed lines in the diff. Generated files, dependency folders, build folders, caches and common test paths are excluded conservatively.
 
-The current candidate detectors cover:
+Gemini is asked for at most one performance suggestion per candidate scope. A suggestion must include the detected performance problem, current estimated complexity, proposed estimated complexity, a justification and direct replacement code. Suggestions still pass the same normalization, patch applicability and Python syntax validation barriers before Bitbucket publication.
 
-- Python functions that are long enough to be harder to maintain or test,
-- broad Python exception handlers such as `except:` or `except Exception`,
-- fragile shell loops based on command substitution,
-- unquoted variables in shell test expressions.
-
-These candidates make the improvement review more explainable: the model is asked to publish suggestions only when they are supported by detected evidence.
-
-The output is published as `Code Improvement` comments in Bitbucket. These comments are intentionally non-blocking and separate from the SonarQube-backed defect comments.
+This is a best-effort code review signal, not a replacement for benchmarks, profiling, compilation or tests.
 
 The token cost is controlled by:
 
 - limiting the number of changed files sent to the model,
-- limiting the number of static improvement candidates,
-- limiting the maximum diff size,
-- limiting the number of improvement suggestions,
+- limiting the number of performance scopes,
 - validating that proposed replacements match the current file before publication.
 
 ## Observability
@@ -245,7 +235,7 @@ Main environment variables:
 - `BITBUCKET_API_TOKEN`
 - `ATLASSIAN_MCP_AUTH_HEADER`
 
-Additional optional variables are available for cache configuration, endpoints, grouping behaviour and improvement review.
+Additional optional variables are available for cache configuration, endpoints, grouping behaviour and performance review.
 
 ## Minimal Agent Invocation
 
@@ -275,8 +265,8 @@ Current test coverage:
 - `tests/test_patch_validation.py`: checks patch application against real temporary files, `original_code` matching, Python syntax validation and dropping of invalid issues.
 - `tests/test_build_validation.py`: checks Maven compile validation, including skipped execution when no `pom.xml` exists and failure when Maven compilation fails.
 - `tests/test_comments.py`: checks hidden issue identifiers, CodeGuardian comment markers and generated inline comment content.
-- `tests/test_improvements.py`: checks improvement-review activation, configurable exclusions, static candidate detection, prompt construction and line alignment.
-- `tests/test_runtime.py`: checks aggregation of analysis metrics across static and improvement review stages.
+- `tests/test_performance.py`: checks performance-review activation, changed-scope candidate collection, stable internal keys, prompt construction and model fields.
+- `tests/test_runtime.py`: checks aggregation of analysis metrics across static and performance review stages.
 - `tests/test_scope_batching.py`: checks grouping of findings by function or global scope before sending them to the model.
 - `tests/test_sonar_results.py`: checks parsing of SonarQube JSON responses into the internal simplified format.
 
@@ -302,9 +292,7 @@ The current suite is mainly a characterization suite. It captures the present be
 - Java projects with Maven are also validated at project level with `mvn compile` when `pom.xml` is present.
 - Other ecosystems still use applicability validation without compilation or tests by default.
 - Part of scope detection in brace-based languages is heuristic.
-- Improvement candidates are currently implemented for Python and shell/KSH files.
-- Improvement comments are guided by static candidates, but there is not yet a strict candidate-id validation step on the model response.
-- Improvement candidates are selected from changed files; future work should filter them more tightly against changed line ranges.
+- Optional performance review is conservative and based on changed function or method scopes; it does not replace profiling or benchmarks.
 - The current automated tests focus on internal core logic, not on full external-service integration.
 
 ## Status
