@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as http from 'http';
+import * as https from 'https';
 import { execFile } from 'child_process';
+import { URL } from 'url';
 
 type Suggestion = {
   id: string;
@@ -84,6 +87,14 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.commands.registerCommand('codeguardian.refreshSuggestions', () => {
     provider.refresh();
   }));
+  context.subscriptions.push(vscode.commands.registerCommand('codeguardian.downloadLatestResults', async () => {
+    try {
+      await downloadLatestResults();
+      provider.refresh();
+    } catch (error) {
+      vscode.window.showErrorMessage(`CodeGuardian results download failed: ${String(error)}`);
+    }
+  }));
   context.subscriptions.push(vscode.commands.registerCommand('codeguardian.openSuggestion', (node?: SuggestionNode) => {
     if (node) {
       openSuggestion(node.suggestion);
@@ -152,6 +163,82 @@ function loadSuggestions(): Suggestion[] {
     vscode.window.showErrorMessage(`Failed to load CodeGuardian results: ${String(error)}`);
     return [];
   }
+}
+
+async function downloadLatestResults(): Promise<void> {
+  const url = buildJenkinsArtifactUrl();
+  const user = configValue('jenkinsUser');
+  const token = configValue('jenkinsApiToken');
+  const body = await downloadText(url, user && token ? { user, token } : undefined);
+
+  try {
+    JSON.parse(body);
+  } catch (error) {
+    throw new Error(`Downloaded Jenkins artifact is not valid JSON: ${String(error)}`);
+  }
+
+  fs.writeFileSync(resultsPath(), body, 'utf8');
+  vscode.window.showInformationMessage(`Downloaded CodeGuardian results to ${resultsPath()}`);
+}
+
+function buildJenkinsArtifactUrl(): string {
+  const directUrl = configValue('jenkinsArtifactUrl').trim();
+  if (directUrl) {
+    return directUrl;
+  }
+
+  const baseUrl = configValue('jenkinsUrl').trim().replace(/\/+$/, '');
+  const jobPath = configValue('jenkinsJobPath').trim();
+  const buildSelector = configValue('jenkinsBuildSelector').trim() || 'lastSuccessfulBuild';
+  const artifactName = configValue('jenkinsArtifactName').trim() || 'codeguardian-results.json';
+  if (!baseUrl || !jobPath) {
+    throw new Error(
+      'Configure codeguardian.jenkinsArtifactUrl, or configure both codeguardian.jenkinsUrl and codeguardian.jenkinsJobPath.'
+    );
+  }
+
+  const encodedJobPath = jobPath
+    .split('/')
+    .filter((part) => part.length > 0)
+    .map((part) => `job/${encodeURIComponent(part)}`)
+    .join('/');
+  return `${baseUrl}/${encodedJobPath}/${encodeURIComponent(buildSelector)}/artifact/${encodeURIComponent(artifactName)}`;
+}
+
+function downloadText(url: string, auth?: { user: string; token: string }, redirects = 0): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'https:' ? https : http;
+    const headers: Record<string, string> = {};
+    if (auth) {
+      headers.Authorization = `Basic ${Buffer.from(`${auth.user}:${auth.token}`).toString('base64')}`;
+    }
+
+    const request = client.get(parsed, { headers }, (response) => {
+      const status = response.statusCode || 0;
+      const location = response.headers.location;
+      if ([301, 302, 303, 307, 308].includes(status) && location) {
+        response.resume();
+        if (redirects >= 5) {
+          reject(new Error('Too many redirects while downloading Jenkins artifact.'));
+          return;
+        }
+        const redirected = new URL(location, parsed).toString();
+        downloadText(redirected, auth, redirects + 1).then(resolve, reject);
+        return;
+      }
+      if (status < 200 || status >= 300) {
+        response.resume();
+        reject(new Error(`Jenkins artifact download failed with HTTP ${status}.`));
+        return;
+      }
+
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk: Buffer) => chunks.push(chunk));
+      response.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    });
+    request.on('error', reject);
+  });
 }
 
 async function openSuggestion(suggestion: Suggestion): Promise<void> {

@@ -88,6 +88,7 @@ Then open the extension folder in VS Code and run an Extension Development Host.
 
 The extension contributes a `CodeGuardian Suggestions` tree view. It reads the configured results file from the current workspace root, groups suggestions by file and supports:
 
+- downloading the latest archived Jenkins results file,
 - refresh suggestions,
 - open the affected file and line,
 - preview original and proposed code,
@@ -107,8 +108,29 @@ VS Code settings:
 | `codeguardian.resultsFile` | `codeguardian-results.json` | Results JSON path relative to the workspace root |
 | `codeguardian.pythonPath` | `python` | Python executable used to run the CLI |
 | `codeguardian.cliPath` | `tools/codeguardian_cli.py` | CLI path relative to the workspace root |
+| `codeguardian.jenkinsArtifactUrl` | empty | Optional full Jenkins artifact URL; takes precedence over the Jenkins URL/job settings |
+| `codeguardian.jenkinsUrl` | empty | Base Jenkins URL, for example `http://localhost:8080` |
+| `codeguardian.jenkinsJobPath` | empty | Slash-separated Jenkins job path, for example `CodeGuardian/sample-mixed/PR-1` |
+| `codeguardian.jenkinsBuildSelector` | `lastSuccessfulBuild` | Build selector used in the artifact URL |
+| `codeguardian.jenkinsArtifactName` | `codeguardian-results.json` | Archived artifact name |
+| `codeguardian.jenkinsUser` | empty | Optional Jenkins user for Basic authentication |
+| `codeguardian.jenkinsApiToken` | empty | Optional Jenkins API token for Basic authentication |
 
 If `python` is unavailable, the extension tries `python3`.
+
+For a Jenkins multibranch job like `CodeGuardian / sample-mixed / PR-1`, the generated artifact URL is equivalent to:
+
+```text
+<jenkinsUrl>/job/CodeGuardian/job/sample-mixed/job/PR-1/lastSuccessfulBuild/artifact/codeguardian-results.json
+```
+
+From VS Code, run:
+
+```text
+CodeGuardian: Download Latest Results
+```
+
+The extension downloads the artifact into the local workspace as `codeguardian-results.json` and refreshes the suggestions tree.
 
 ---
 
@@ -124,9 +146,9 @@ Required imports are printed or displayed, but they are not inserted automatical
 
 ## Limitations
 
-- The assistant reads a local JSON file only.
+- The assistant reads a local JSON file and can download that file from an archived Jenkins artifact.
 - It does not fetch comments from Bitbucket.
-- It does not call Jenkins, SonarQube or Gemini.
+- It does not call SonarQube or Gemini.
 - It does not stage, commit, push or modify Git state.
 - It does not automatically insert imports outside the replacement block.
 - It is an MVP VS Code extension, not a full review platform.

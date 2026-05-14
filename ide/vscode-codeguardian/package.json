@@ -16,7 +16,8 @@
     "onCommand:codeguardian.openSuggestion",
     "onCommand:codeguardian.previewSuggestion",
     "onCommand:codeguardian.applySuggestion",
-    "onCommand:codeguardian.applySelectedSuggestion"
+    "onCommand:codeguardian.applySelectedSuggestion",
+    "onCommand:codeguardian.downloadLatestResults"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -41,6 +42,10 @@
       {
         "command": "codeguardian.refreshSuggestions",
         "title": "CodeGuardian: Refresh Suggestions"
+      },
+      {
+        "command": "codeguardian.downloadLatestResults",
+        "title": "CodeGuardian: Download Latest Results"
       },
       {
         "command": "codeguardian.openSuggestion",
@@ -76,10 +81,57 @@
           "type": "string",
           "default": "tools/codeguardian_cli.py",
           "description": "Path to the CodeGuardian CLI script, relative to the workspace root."
+        },
+        "codeguardian.jenkinsArtifactUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Optional full Jenkins artifact URL for codeguardian-results.json. When set, this takes precedence over jenkinsUrl and jenkinsJobPath."
+        },
+        "codeguardian.jenkinsUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base Jenkins URL, for example http://localhost:8080."
+        },
+        "codeguardian.jenkinsJobPath": {
+          "type": "string",
+          "default": "",
+          "description": "Jenkins job path using slash-separated names, for example CodeGuardian/sample-mixed/PR-1."
+        },
+        "codeguardian.jenkinsBuildSelector": {
+          "type": "string",
+          "default": "lastSuccessfulBuild",
+          "description": "Jenkins build selector used when building the artifact URL."
+        },
+        "codeguardian.jenkinsArtifactName": {
+          "type": "string",
+          "default": "codeguardian-results.json",
+          "description": "Archived Jenkins artifact name to download."
+        },
+        "codeguardian.jenkinsUser": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Jenkins user for Basic authentication."
+        },
+        "codeguardian.jenkinsApiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Jenkins API token for Basic authentication. Prefer storing this in user settings, not workspace settings."
         }
       }
     },
     "menus": {
+      "view/title": [
+        {
+          "command": "codeguardian.downloadLatestResults",
+          "when": "view == codeguardianSuggestions",
+          "group": "navigation"
+        },
+        {
+          "command": "codeguardian.refreshSuggestions",
+          "when": "view == codeguardianSuggestions",
+          "group": "navigation"
+        }
+      ],
       "view/item/context": [
         {
           "command": "codeguardian.openSuggestion",
