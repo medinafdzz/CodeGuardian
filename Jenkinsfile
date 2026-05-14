@@ -299,6 +299,7 @@ pipeline {
 
     post {
         always {
+            archiveArtifacts artifacts: 'codeguardian-results.json', allowEmptyArchive: true
             sh 'rm -rf AIagent data.json build.log test.log *-build-*.log *-test-*.log sonar-scanner.log || true'
         }
     }
