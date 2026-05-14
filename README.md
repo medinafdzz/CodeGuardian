@@ -50,7 +50,11 @@ For this reason, the core logic and the current unit tests are designed to be ge
 | `codeguardian/performance.py` | Optional optimization review mode |
 | `codeguardian/bitbucket.py` | Bitbucket REST and comment synchronization helpers |
 | `codeguardian/cli.py` | Command-line entrypoint helper |
+| `codeguardian/results_export.py` | Optional export of validated suggestions to `codeguardian-results.json` |
+| `tools/codeguardian_cli.py` | Local CLI for listing, validating and applying exported suggestions |
+| `ide/vscode-codeguardian/` | MVP VS Code extension for viewing and applying local suggestions |
 | `docs/` | Architecture, pipeline, validation, synchronization and metrics documentation |
+| `docs/ide-assistant.md` | IDE assistant usage and limitations |
 | `docs/copilot-mcp.md` | Copilot MCP integration guide |
 | `requirements.txt` | Python dependencies for runtime and testing |
 | `tests/` | Unit tests for internal agent behaviour |
@@ -71,6 +75,7 @@ Its main responsibilities are:
 - optionally reviewing changed scopes for optimization opportunities,
 - validating generated code replacements,
 - synchronising inline comments in Bitbucket,
+- optionally exporting validated suggestions for local IDE usage,
 - exporting execution metrics.
 
 ### codeguardian-infra
@@ -113,9 +118,20 @@ The expected end-to-end flow is:
 10. If enabled, the agent reviews changed functions, methods and selected build/configuration files for optimization opportunities.
 11. The agent validates the generated replacements.
 12. Valid suggestions are published as inline comments in Bitbucket.
-13. Execution metrics are pushed to Pushgateway.
-14. Prometheus and Grafana expose the metrics.
+13. If `CODEGUARDIAN_RESULTS_PATH` is set, the same final validated suggestions are exported to JSON for local IDE usage.
+14. Execution metrics are pushed to Pushgateway.
+15. Prometheus and Grafana expose the metrics.
 ```
+
+## IDE Assistant
+
+CodeGuardian can optionally export the final validated suggestions to a local `codeguardian-results.json` file. The export is disabled by default and is enabled with:
+
+```bash
+CODEGUARDIAN_RESULTS_PATH=codeguardian-results.json
+```
+
+The exported file can be consumed by `tools/codeguardian_cli.py` or by the MVP VS Code extension under `ide/vscode-codeguardian`. Both local tools apply suggestions only when the exported `original_code` still matches the current local file content.
 
 ## Core Design
 

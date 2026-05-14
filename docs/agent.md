@@ -22,6 +22,7 @@ The main responsibilities of the agent are:
 - optionally reviewing changed scopes for runtime, build-time and algorithmic optimization opportunities,
 - validating the generated patches before publishing them,
 - synchronizing inline comments in Bitbucket,
+- optionally exporting the final validated suggestions to a local JSON file,
 - and exporting execution metrics.
 
 The file is organised in blocks that reflect these responsibilities.
@@ -401,6 +402,16 @@ When enabled, it:
 - and reuses normalization, patch validation and Bitbucket synchronization.
 
 The model is instructed to return no issue unless there is a clear algorithmic improvement and a directly applicable replacement. This keeps the feature conservative enough for CI/CD review use. It should be treated as a best-effort review aid, not as a substitute for profiling, benchmarks or project test suites.
+
+---
+
+## Results Export
+
+The agent can export the final validated suggestions to a local JSON file for IDE usage. This is disabled by default and controlled by `CODEGUARDIAN_RESULTS_PATH`.
+
+When the variable is not set, the Jenkins, SonarQube and Bitbucket flow behaves as before. When it is set, the agent writes a UTF-8 `codeguardian-results.json` compatible file after suggestions have passed normalization and patch validation. The export includes repository metadata, summary counters, stable suggestion identifiers, original code, proposed code and content hashes.
+
+The export does not include credentials, tokens or authentication data. Export failures are logged but do not stop the main review flow.
 
 ---
 

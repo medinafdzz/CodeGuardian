@@ -1,0 +1,115 @@
+{
+  "name": "vscode-codeguardian",
+  "displayName": "CodeGuardian IDE Assistant",
+  "description": "View, preview and apply CodeGuardian suggestions from codeguardian-results.json.",
+  "version": "0.1.0",
+  "publisher": "codeguardian",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:codeguardianSuggestions",
+    "onCommand:codeguardian.refreshSuggestions",
+    "onCommand:codeguardian.openSuggestion",
+    "onCommand:codeguardian.previewSuggestion",
+    "onCommand:codeguardian.applySuggestion",
+    "onCommand:codeguardian.applySelectedSuggestion"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codeguardian",
+          "title": "CodeGuardian",
+          "icon": "resources/codeguardian.svg"
+        }
+      ]
+    },
+    "views": {
+      "codeguardian": [
+        {
+          "id": "codeguardianSuggestions",
+          "name": "CodeGuardian Suggestions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codeguardian.refreshSuggestions",
+        "title": "CodeGuardian: Refresh Suggestions"
+      },
+      {
+        "command": "codeguardian.openSuggestion",
+        "title": "CodeGuardian: Open Suggestion"
+      },
+      {
+        "command": "codeguardian.previewSuggestion",
+        "title": "CodeGuardian: Preview Suggestion"
+      },
+      {
+        "command": "codeguardian.applySuggestion",
+        "title": "CodeGuardian: Apply Suggestion"
+      },
+      {
+        "command": "codeguardian.applySelectedSuggestion",
+        "title": "CodeGuardian: Apply Selected Suggestions"
+      }
+    ],
+    "configuration": {
+      "title": "CodeGuardian",
+      "properties": {
+        "codeguardian.resultsFile": {
+          "type": "string",
+          "default": "codeguardian-results.json",
+          "description": "Path to the CodeGuardian results JSON file, relative to the workspace root."
+        },
+        "codeguardian.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python executable used to run the CodeGuardian CLI."
+        },
+        "codeguardian.cliPath": {
+          "type": "string",
+          "default": "tools/codeguardian_cli.py",
+          "description": "Path to the CodeGuardian CLI script, relative to the workspace root."
+        }
+      }
+    },
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "codeguardian.openSuggestion",
+          "when": "view == codeguardianSuggestions && viewItem == suggestion",
+          "group": "inline"
+        },
+        {
+          "command": "codeguardian.previewSuggestion",
+          "when": "view == codeguardianSuggestions && viewItem == suggestion",
+          "group": "inline"
+        },
+        {
+          "command": "codeguardian.applySuggestion",
+          "when": "view == codeguardianSuggestions && viewItem == suggestion",
+          "group": "inline"
+        },
+        {
+          "command": "codeguardian.applySelectedSuggestion",
+          "when": "view == codeguardianSuggestions && viewItem == suggestion",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

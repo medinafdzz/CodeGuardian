@@ -243,6 +243,8 @@ This allows the agent to:
 
 Optional review modes can be enabled through environment variables before launching the agent. Optimization review is disabled unless `CODEGUARDIAN_ENABLE_OPTIMIZATION_REVIEW=true` is set. Its scope is controlled by `CODEGUARDIAN_OPTIMIZATION_MAX_SCOPES`, `CODEGUARDIAN_OPTIMIZATION_REQUIRE_CLEAR_GAIN` and `CODEGUARDIAN_OPTIMIZATION_CONTEXT_WINDOW`. The previous `CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW`, `CODEGUARDIAN_PERFORMANCE_MAX_SCOPES`, `CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN` and `CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW` names are still accepted for existing pipelines.
 
+The pipeline can also enable the IDE assistant export by setting `CODEGUARDIAN_RESULTS_PATH`. A typical local or Jenkins value is `codeguardian-results.json`. If the variable is absent, no file is produced and the existing Bitbucket synchronization remains unchanged.
+
 ## Pull request metadata
 
 Inside the script block, the pipeline creates a JSON structure containing:
@@ -281,6 +283,7 @@ From there, the agent is responsible for:
 - grouping findings by scope,
 - generating proposals,
 - validating them,
+- optionally exporting validated suggestions to `CODEGUARDIAN_RESULTS_PATH`,
 - and synchronizing comments back into Bitbucket.
 
 ---
