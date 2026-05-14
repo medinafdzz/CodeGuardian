@@ -165,7 +165,7 @@ The agent exports:
 
 These values make the validation effect visible in Prometheus. They show how many findings entered the agent, how many suggestions were generated, how many were discarded and how many survived.
 
-`codeguardian_performance_candidates_total` tracks changed function or method scopes considered by the optional performance review. `codeguardian_performance_suggestions_total` tracks how many performance suggestions were generated before validation.
+`codeguardian_performance_candidates_total` tracks changed candidates considered by the optional optimization review. `codeguardian_performance_suggestions_total` tracks how many optimization suggestions were generated before validation. The metric names keep `performance` for dashboard compatibility.
 
 ---
 

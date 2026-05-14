@@ -6,7 +6,7 @@ CodeGuardian is an automated pull request review assistant designed to run insid
 
 The system was designed as a practical and reusable solution rather than as a language-specific prototype. For that reason, the architecture tries to keep the workflow generic enough to support different repositories and different technology stacks with minimal repository-specific changes.
 
-At a high level, the process starts when a pull request triggers Jenkins. Jenkins checks out the repository under review, runs static analysis with SonarQube, and then executes the AI agent. The agent collects the relevant findings, groups them by code scope, asks the language model for possible fixes, validates the generated patches, and finally synchronizes the results back into the pull request as inline comments. The optional performance review can add extra comments after the same validation barrier by inspecting changed functions or methods for clear Big O improvements.
+At a high level, the process starts when a pull request triggers Jenkins. Jenkins checks out the repository under review, runs static analysis with SonarQube, and then executes the AI agent. The agent collects the relevant findings, groups them by code scope, asks the language model for possible fixes, validates the generated patches, and finally synchronizes the results back into the pull request as inline comments. The optional optimization review can add extra comments after the same validation barrier by inspecting changed functions, methods and selected build/configuration files for clear runtime, build-time, IO, network, memory or algorithmic improvements.
 
 ---
 
@@ -18,7 +18,7 @@ The architecture is based on five main building blocks:
 2. **Jenkins**, which orchestrates the pipeline execution.
 3. **SonarQube**, which provides the static analysis findings.
 4. **The CodeGuardian agent**, implemented in Python, which contains the orchestration and decision logic.
-5. **AI**, which generates fix proposals from the selected findings and optional performance suggestions from explicit candidates.
+5. **AI**, which generates fix proposals from the selected findings and optional optimization suggestions from explicit candidates.
 
 In addition to these main elements, the system also uses:
 - **Atlassian Rovo MCP**, to read pull request comments from Bitbucket.
@@ -53,7 +53,7 @@ One of the key architectural decisions in CodeGuardian is that findings are not 
 
 After batching, the agent sends the selected findings to the AI model. The prompt is strongly constrained: the model must return valid JSON, keep the original SonarQube key, propose only real code modifications, preserve concrete types when needed, avoid unsafe shorthand refactors, and return no issue at all if the replacement is not safe enough. The current implementation also supports prompt caching and batch-level caching to reduce repeated requests and lower execution cost.
 
-When performance review is enabled, the agent uses the pull request diff to collect changed function or method scopes. Gemini receives one scope at a time and must justify a clear algorithmic improvement with current and proposed Big O estimates. The output is still normalized, validated and synchronized through the same publication pipeline as SonarQube-backed issues.
+When optimization review is enabled, the agent uses the pull request diff to collect changed function or method scopes and selected build/configuration files. Gemini receives one candidate at a time and must justify a clear improvement with current and proposed time/space or build/runtime cost estimates. The output is still normalized, validated and synchronized through the same publication pipeline as SonarQube-backed issues.
 
 ### 6. Validation of generated patches
 
@@ -102,7 +102,7 @@ This means the agent is the real decision layer of the architecture. It connects
 
 ## AI
 
-AI is used as the proposal engine, not as the only source of truth. For defect fixing, the model receives findings already detected by SonarQube and is asked to suggest small, concrete replacements. For performance review, it receives changed scopes and must provide a direct replacement backed by asymptotic reasoning. This keeps the architecture grounded while avoiding broad repository-wide LLM review.
+AI is used as the proposal engine, not as the only source of truth. For defect fixing, the model receives findings already detected by SonarQube and is asked to suggest small, concrete replacements. For optimization review, it receives changed candidates and must provide a direct replacement backed by explicit runtime, build-time, IO, network, memory or algorithmic reasoning. This keeps the architecture grounded while avoiding broad repository-wide LLM review.
 
 ## Bitbucket
 
@@ -136,9 +136,9 @@ The agent does not recreate all comments on every execution. Instead, it compare
 
 The architecture includes both prompt cache metadata and batch cache storage. This reduces repeated calls to the model when the same or very similar findings are processed again. The batch signature also includes a hash of the real scope content, which makes the cache safer against stale reuse.
 
-## 7. Performance review is changed-scope and validation-gated
+## 7. Optimization review is changed-scope and validation-gated
 
-Optional performance comments are generated only from changed function or method scopes. Batch signatures include the review type, model, performance rules hash, file path, scope identity and scope content hash, which keeps them separate from SonarQube review cache entries. The feature is best-effort and does not replace benchmarks, profiling, compilation or tests.
+Optional optimization comments are generated only from changed function/method scopes or selected changed build/configuration files. Batch signatures include the review type, model, optimization rules hash, file path, scope identity and scope content hash, which keeps them separate from SonarQube review cache entries. The feature is best-effort and does not replace benchmarks, profiling, compilation or tests.
 
 ---
 

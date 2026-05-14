@@ -73,7 +73,7 @@ In addition to the global marker, each generated comment also stores hidden issu
 
 This gives each comment an internal machine-readable identity that is later used during synchronization.
 
-SonarQube comments keep their SonarQube issue keys. Optional performance comments use generated `PERFORMANCE:` keys based on the review type, file, scope range and scope content hash. This makes them distinguishable from SonarQube-backed comments while still allowing the existing synchronization logic to reuse unchanged comments and delete obsolete ones.
+SonarQube comments keep their SonarQube issue keys. Optional optimization comments use generated `OPTIMIZATION:` keys based on the review type, file, scope range and scope content hash. This makes them distinguishable from SonarQube-backed comments while still allowing the existing synchronization logic to reuse unchanged comments and delete obsolete ones. Legacy `PERFORMANCE:` comments can still be recognized through the existing hidden metadata format during synchronization.
 
 ---
 

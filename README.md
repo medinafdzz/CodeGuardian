@@ -4,7 +4,7 @@ CodeGuardian is the system developed for the final degree project. Its objective
 
 The system does not use the AI model as the only source of truth. First, SonarQube detects issues in the target repository. After that, the CodeGuardian agent reads those findings, prepares the code context, asks the AI model for possible fixes, validates the generated suggestions and publishes the final feedback as inline comments in Bitbucket.
 
-CodeGuardian can also run an optional performance review mode that is separate from defect detection. This mode focuses on changed functions or methods where Gemini can justify a safer algorithmic improvement with Big O reasoning.
+CodeGuardian can also run an optional optimization review mode that is separate from defect detection. This mode focuses on changed functions, methods and selected build/configuration files where Gemini can justify a safer change that reduces runtime, build time, repeated IO/network/database work, memory pressure or algorithmic cost.
 
 This repository, `codeguardian-core`, contains the main agent logic. At the same time, its README acts as the global entry point for the whole project because the agent is the central element of the system.
 
@@ -47,7 +47,7 @@ For this reason, the core logic and the current unit tests are designed to be ge
 | `codeguardian/sonarqube.py` | SonarQube result parsing and retrieval helpers |
 | `codeguardian/ai.py` | AI batching, cache and generation helpers |
 | `codeguardian/diff.py` | Shared git diff helpers for pull request scope detection |
-| `codeguardian/performance.py` | Optional Big O performance review mode |
+| `codeguardian/performance.py` | Optional optimization review mode |
 | `codeguardian/bitbucket.py` | Bitbucket REST and comment synchronization helpers |
 | `codeguardian/cli.py` | Command-line entrypoint helper |
 | `docs/` | Architecture, pipeline, validation, synchronization and metrics documentation |
@@ -67,7 +67,7 @@ Its main responsibilities are:
 - filtering and normalising findings,
 - resolving code scope,
 - grouping findings before sending them to the model,
-- optionally reviewing changed scopes for Big O performance opportunities,
+- optionally reviewing changed scopes for optimization opportunities,
 - validating generated code replacements,
 - synchronising inline comments in Bitbucket,
 - exporting execution metrics.
@@ -109,7 +109,7 @@ The expected end-to-end flow is:
 7. The agent retrieves SonarQube issues.
 8. The agent prepares code context and groups findings.
 9. The AI model generates possible fix suggestions.
-10. If enabled, the agent reviews changed functions or methods for Big O performance opportunities.
+10. If enabled, the agent reviews changed functions, methods and selected build/configuration files for optimization opportunities.
 11. The agent validates the generated replacements.
 12. Valid suggestions are published as inline comments in Bitbucket.
 13. Execution metrics are pushed to Pushgateway.
@@ -122,7 +122,7 @@ The system clearly separates detection, generation and publication:
 
 - SonarQube detects problems.
 - The agent decides what to process and validates the results.
-- AI proposes concrete code changes and optional non-blocking performance suggestions.
+- AI proposes concrete code changes and optional non-blocking optimization suggestions.
 - Bitbucket displays the final feedback inside the pull request.
 
 This separation reduces operational risk compared to a direct LLM-only approach without validation barriers.
@@ -179,27 +179,29 @@ The agent includes safety barriers before publishing suggestions:
 
 These mechanisms do not guarantee perfect correctness, but they reduce the probability of publishing invalid suggestions.
 
-## Optional Performance Review
+## Optional Optimization Review
 
-The performance review is disabled by default and can be enabled per pipeline or per repository:
+The optimization review is disabled by default and can be enabled per pipeline or per repository:
 
 ```text
-CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW=true
-CODEGUARDIAN_PERFORMANCE_MAX_SCOPES=10
-CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN=true
-CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW=20
+CODEGUARDIAN_ENABLE_OPTIMIZATION_REVIEW=true
+CODEGUARDIAN_OPTIMIZATION_MAX_SCOPES=10
+CODEGUARDIAN_OPTIMIZATION_REQUIRE_CLEAR_GAIN=true
+CODEGUARDIAN_OPTIMIZATION_CONTEXT_WINDOW=20
 ```
 
-This mode analyses only changed pull request scopes. Candidate scopes are functions or methods resolved from changed lines in the diff. Generated files, dependency folders, build folders, caches and common test paths are excluded conservatively.
+The previous `CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW`, `CODEGUARDIAN_PERFORMANCE_MAX_SCOPES`, `CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN` and `CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW` names remain supported for existing pipelines.
 
-Gemini is asked for at most one performance suggestion per candidate scope. A suggestion must include the detected performance problem, current estimated complexity, proposed estimated complexity, a justification and direct replacement code. Suggestions still pass the same normalization, patch applicability and Python syntax validation barriers before Bitbucket publication.
+This mode analyses only changed pull request scopes. Candidate scopes are functions or methods resolved from changed lines in the diff, plus selected build/configuration files such as `Jenkinsfile`, `pom.xml`, `build.gradle`, `package.json`, Docker and CI files. Generated files, dependency folders, build folders, caches and common test paths are excluded conservatively.
+
+Gemini is asked for at most one optimization suggestion per candidate. A suggestion must include the detected runtime/build problem, current estimated time/space or build/runtime cost, proposed estimated cost, a justification and direct replacement code. Suggestions still pass the same normalization, patch applicability and Python syntax validation barriers before Bitbucket publication.
 
 This is a best-effort code review signal, not a replacement for benchmarks, profiling, compilation or tests.
 
 The token cost is controlled by:
 
 - limiting the number of changed files sent to the model,
-- limiting the number of performance scopes,
+- limiting the number of optimization scopes,
 - validating that proposed replacements match the current file before publication.
 
 ## Observability
@@ -235,7 +237,7 @@ Main environment variables:
 - `BITBUCKET_API_TOKEN`
 - `ATLASSIAN_MCP_AUTH_HEADER`
 
-Additional optional variables are available for cache configuration, endpoints, grouping behaviour and performance review.
+Additional optional variables are available for cache configuration, endpoints, grouping behaviour and optimization review.
 
 ## Minimal Agent Invocation
 
@@ -266,7 +268,7 @@ Current test coverage:
 - `tests/test_build_validation.py`: checks Maven compile validation, including skipped execution when no `pom.xml` exists and failure when Maven compilation fails.
 - `tests/test_comments.py`: checks hidden issue identifiers, CodeGuardian comment markers and generated inline comment content.
 - `tests/test_performance.py`: checks performance-review activation, changed-scope candidate collection, stable internal keys, prompt construction and model fields.
-- `tests/test_runtime.py`: checks aggregation of analysis metrics across static and performance review stages.
+- `tests/test_runtime.py`: checks aggregation of analysis metrics across static and optimization review stages.
 - `tests/test_scope_batching.py`: checks grouping of findings by function or global scope before sending them to the model.
 - `tests/test_sonar_results.py`: checks parsing of SonarQube JSON responses into the internal simplified format.
 
@@ -292,7 +294,7 @@ The current suite is mainly a characterization suite. It captures the present be
 - Java projects with Maven are also validated at project level with `mvn compile` when `pom.xml` is present.
 - Other ecosystems still use applicability validation without compilation or tests by default.
 - Part of scope detection in brace-based languages is heuristic.
-- Optional performance review is conservative and based on changed function or method scopes; it does not replace profiling or benchmarks.
+- Optional optimization review is conservative and based on changed function/method scopes and selected build/configuration files; it does not replace profiling or benchmarks.
 - The current automated tests focus on internal core logic, not on full external-service integration.
 
 ## Status

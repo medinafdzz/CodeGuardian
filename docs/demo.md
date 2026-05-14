@@ -16,12 +16,12 @@ Before the demo, prepare:
 - SonarQube available and configured for the target repository.
 - Bitbucket credentials and pull request access.
 - Prometheus, Pushgateway and Grafana running from the infrastructure repository.
-- `CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW=true` if the Big O performance review part will be shown.
+- `CODEGUARDIAN_ENABLE_OPTIMIZATION_REVIEW=true` if the optimization review part will be shown.
 
 Recommended performance configuration:
 
 ```text
-CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW=true
+CODEGUARDIAN_ENABLE_OPTIMIZATION_REVIEW=true
 CODEGUARDIAN_PERFORMANCE_MAX_SCOPES=10
 CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN=true
 CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW=20
@@ -63,11 +63,11 @@ CodeGuardian does not ask the LLM to inspect the whole repository freely. SonarQ
 
 ---
 
-## Scenario 2 - Big O Performance Review
+## Scenario 2 - Optimization Review
 
 ### Purpose
 
-Show that CodeGuardian can also publish non-blocking performance suggestions when a changed function or method has a clear algorithmic improvement.
+Show that CodeGuardian can also publish non-blocking optimization suggestions when a changed function, method or build/configuration file has a clear runtime, build-time, IO, network, memory or algorithmic improvement.
 
 ### Suggested Change
 
@@ -85,7 +85,7 @@ def find_matches(users, allowed_ids):
 Possible performance comment:
 
 ```text
-CodeGuardian performance suggestion
+CodeGuardian optimization suggestion
 
 Performance issue:
 The function performs a membership check against a list for every user.
@@ -99,15 +99,15 @@ Building a set once makes membership checks average O(1), avoiding repeated line
 
 ### What To Show
 
-1. Show that performance review is enabled through environment variables.
+1. Show that optimization review is enabled through environment variables.
 2. Show the changed function in the pull request.
 3. Show Jenkins logs with the number of performance candidate scopes.
-4. Show the final `CodeGuardian performance suggestion` comment in Bitbucket.
+4. Show the final `CodeGuardian optimization suggestion` comment in Bitbucket.
 5. Explain that this mode is best-effort and does not replace profiling, benchmarks or tests.
 
 ### Message To Explain
 
-The performance flow is complementary to SonarQube. It only reviews changed function or method scopes and publishes a comment when the model can justify a direct replacement with better estimated Big O complexity.
+The optimization flow is complementary to SonarQube. It only reviews changed candidates and publishes a comment when the model can justify a direct replacement with better estimated runtime, build-time or complexity cost.
 
 ---
 
@@ -140,7 +140,7 @@ The TFG can be evaluated not only by looking at comments, but also by measuring 
 
 ### Current Limitations
 
-- Performance review is best-effort and based on changed function or method scopes.
+- Optimization review is best-effort and based on changed function/method scopes and selected build/configuration files.
 - Scope detection for brace-based languages is heuristic.
 - Validation checks applicability and Python syntax, but does not prove semantic correctness.
 - Full external integration tests still depend on Jenkins, Bitbucket, SonarQube and credentials.
@@ -165,7 +165,7 @@ The final presentation can be summarized as:
 1. SonarQube detects defects.
 2. CodeGuardian prepares context and calls the LLM in a controlled way.
 3. Generated replacements are validated before publication.
-4. Optional performance review can add Big O suggestions for changed scopes.
+4. Optional optimization review can add runtime, build-time or algorithmic suggestions for changed scopes.
 5. Bitbucket comments are synchronized incrementally.
 6. Metrics make the process observable in Grafana.
 
