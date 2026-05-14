@@ -272,7 +272,11 @@ pipeline {
 
                         withEnv([
                             "AGENT_REPO_HOST_PATH=${agentRepoHostPath}",
-                            'ATLASSIAN_MCP_URL=https://mcp.atlassian.com/v1/mcp'
+                            'ATLASSIAN_MCP_URL=https://mcp.atlassian.com/v1/mcp',
+                            'CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW=true',
+                            'CODEGUARDIAN_PERFORMANCE_MAX_SCOPES=30',
+                            'CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN=true',
+                            'CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW=20'
                         ]) {
                             sh '''
                             #!/bin/bash
@@ -280,6 +284,8 @@ pipeline {
                             set +x
                             git clone --quiet --depth 1 --single-branch -b "$AGENT_REPO_REF" \
                             "https://x-bitbucket-api-token-auth:${BITBUCKET_API_TOKEN}@${AGENT_REPO_HOST_PATH}" AIagent > /dev/null 2>&1
+
+                            git fetch --quiet origin "${CHANGE_TARGET:-main}:refs/remotes/origin/${CHANGE_TARGET:-main}" || true
 
                             python3 -u AIagent/agent.py --file data.json
                             '''
