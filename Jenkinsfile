@@ -276,7 +276,8 @@ pipeline {
                             'CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW=true',
                             'CODEGUARDIAN_PERFORMANCE_MAX_SCOPES=30',
                             'CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN=true',
-                            'CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW=20'
+                            'CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW=20',
+                            "CODEGUARDIAN_RESULTS_PATH=${env.WORKSPACE}/codeguardian-results.json"
                         ]) {
                             sh '''
                             #!/bin/bash
