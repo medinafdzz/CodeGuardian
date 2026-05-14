@@ -256,10 +256,10 @@ async def list_comments_for_open_pr_async(workspace: str, repo_slug: str) -> str
         return "\n".join(lines)
 
     pr_id = int(open_prs[0]["id"])
-    comments = await list_bitbucket_codeguardian_comments_async(workspace, prs["repo_slug"], pr_id)
-    return (
-        f"Open PR selected: PR {pr_id} - {open_prs[0]['title']}\n\n"
-        f"{comments['markdown']}"
+    return await review_codeguardian_suggestions_async(
+        workspace=workspace,
+        repo_slug=prs["repo_slug"],
+        pr_id=pr_id,
     )
 
 
@@ -314,15 +314,10 @@ async def list_comments_for_detected_open_pr_async(workspace: str = "") -> str:
         return "\n".join(lines)
 
     pr = open_matches[0]
-    comments = await list_bitbucket_codeguardian_comments_async(
-        pr["workspace"],
-        pr["repo_slug"],
-        int(pr["id"]),
-    )
-    return (
-        f"Open PR selected: {pr['workspace']}/{pr['repo_slug']} "
-        f"PR {pr['id']} - {pr['title']}\n\n"
-        f"{comments['markdown']}"
+    return await review_codeguardian_suggestions_async(
+        workspace=pr["workspace"],
+        repo_slug=pr["repo_slug"],
+        pr_id=int(pr["id"]),
     )
 
 
@@ -512,6 +507,47 @@ def list_codeguardian_comment_summaries(workspace: str, repo_slug: str, pr_id: i
     }
 
 
+def _summary_matches_review_type(summary: dict[str, Any], review_type: str) -> bool:
+    normalized = review_type.strip().lower()
+    if normalized in {"improvement", "improvements", "optimization", "optimizations"}:
+        return bool(summary.get("is_optimization"))
+    if normalized in {"review", "sonarqube", "issue", "issues", "problem", "problems"}:
+        return not bool(summary.get("is_optimization"))
+    return True
+
+
+def _summary_is_pending(summary: dict[str, Any], repo_slug: str, local_repo_path: str = "") -> bool:
+    if not summary.get("replaceable"):
+        return False
+    file_path = str(summary.get("file") or "").strip()
+    original_code = str(summary.get("original_code") or "")
+    if not file_path or not original_code:
+        return False
+    try:
+        repo_path = _resolve_local_repo_path(repo_slug, local_repo_path)
+        target_path = (repo_path / file_path).resolve()
+        if repo_path not in target_path.parents or not target_path.is_file():
+            return False
+        content = target_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    return original_code in content
+
+
+def _pending_summaries(
+    summaries: list[dict[str, Any]],
+    repo_slug: str,
+    review_type: str,
+    local_repo_path: str = "",
+) -> list[dict[str, Any]]:
+    return [
+        summary
+        for summary in summaries
+        if _summary_matches_review_type(summary, review_type)
+        and _summary_is_pending(summary, repo_slug, local_repo_path)
+    ]
+
+
 async def _resolve_single_open_pr_target(workspace: str = "", repo_slug: str = "") -> dict[str, Any]:
     if repo_slug.strip():
         prs = await list_open_pull_requests_async(workspace, repo_slug)
@@ -629,6 +665,108 @@ def review_codeguardian_suggestions(
     return _run_async(review_codeguardian_suggestions_async(workspace, repo_slug, pr_id, limit, start, count))
 
 
+async def _load_pr_target_and_comments(
+    workspace: str = "",
+    repo_slug: str = "",
+    pr_id: int = 0,
+    limit: int = 100,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if pr_id:
+        workspace = _resolve_workspace(workspace)
+        repo_slug = _resolve_repo_slug(repo_slug)
+        target = {"workspace": workspace, "repo_slug": repo_slug, "id": pr_id, "title": ""}
+    else:
+        target = await _resolve_single_open_pr_target(workspace, repo_slug)
+
+    comments = await list_bitbucket_codeguardian_comments_async(
+        target["workspace"],
+        target["repo_slug"],
+        int(target["id"]),
+        limit,
+    )
+    return target, comments
+
+
+def _review_type_title(review_type: str) -> str:
+    return "Code improvements" if _summary_matches_review_type({"is_optimization": True}, review_type) else "Code review"
+
+
+async def codeguardian_batch_async(
+    review_type: str,
+    workspace: str = "",
+    repo_slug: str = "",
+    pr_id: int = 0,
+    limit: int = 100,
+    count: int = 3,
+    local_repo_path: str = "",
+) -> str:
+    target, comments = await _load_pr_target_and_comments(workspace, repo_slug, pr_id, limit)
+    pending = _pending_summaries(
+        comments["comment_summaries"],
+        target["repo_slug"],
+        review_type,
+        local_repo_path,
+    )
+    safe_count = max(1, min(count, 3))
+    selected = pending[:safe_count]
+    title = _review_type_title(review_type)
+
+    if not selected:
+        return (
+            f"No pending {title.lower()} suggestions found for "
+            f"{target['workspace']}/{target['repo_slug']} PR {target['id']}. "
+            "A suggestion is considered solved when its original code block is no longer present "
+            "in the local workspace."
+        )
+
+    blocks = []
+    for display_index, summary in enumerate(selected, start=1):
+        blocks.append(_format_comment_markdown(
+            index=display_index,
+            comment_id=summary.get("id"),
+            workspace=target["workspace"],
+            repo_slug=target["repo_slug"],
+            pr_id=int(target["id"]),
+            file=str(summary.get("file") or ""),
+            line=summary.get("line"),
+            problem=str(summary.get("problem") or ""),
+            proposal=str(summary.get("proposal") or ""),
+            original_code=str(summary.get("original_code") or ""),
+            proposed_code=str(summary.get("proposed_code") or ""),
+        ))
+
+    return (
+        f"# {title} for {target['workspace']}/{target['repo_slug']} PR {target['id']}\n\n"
+        f"Showing {len(selected)} pending item(s) out of {len(pending)}. "
+        "Already applied items are skipped automatically because their original code no longer exists locally.\n\n"
+        + "\n\n---\n\n".join(blocks)
+        + "\n\nNext step: ask the developer which of these visible suggestions to apply. "
+        "The valid answers are `1`, `2`, `3`, combinations like `1 and 3`, or `all`. "
+        f"After the developer answers, call the apply tool for `{review_type}` with that selection. "
+        "Apply directly to the local workspace; do not use dry-run and do not ask the developer to open Bitbucket."
+    )
+
+
+def codeguardian_batch(
+    review_type: str,
+    workspace: str = "",
+    repo_slug: str = "",
+    pr_id: int = 0,
+    limit: int = 100,
+    count: int = 3,
+    local_repo_path: str = "",
+) -> str:
+    return _run_async(codeguardian_batch_async(
+        review_type,
+        workspace,
+        repo_slug,
+        pr_id,
+        limit,
+        count,
+        local_repo_path,
+    ))
+
+
 def _parse_selection(selection: str, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     cleaned = selection.strip().lower()
     if cleaned in {"all", "todos", "todas", "*"}:
@@ -641,7 +779,7 @@ def _parse_selection(selection: str, suggestions: list[dict[str, Any]]) -> list[
     }
     selected = []
     for suggestion in suggestions:
-        index = int(suggestion.get("index") or 0)
+        index = int(suggestion.get("display_index") or suggestion.get("index") or 0)
         comment_id = int(suggestion.get("id") or 0)
         if index in numeric_tokens or comment_id in numeric_tokens or comment_id in selected_ids:
             selected.append(suggestion)
@@ -746,7 +884,6 @@ async def apply_codeguardian_comment_replacement_async(
     pr_id: int,
     comment_id: int,
     local_repo_path: str = "",
-    dry_run: bool = True,
 ) -> dict[str, Any]:
     workspace = _resolve_workspace(workspace)
     repo_slug = _resolve_repo_slug(repo_slug)
@@ -781,7 +918,6 @@ async def apply_codeguardian_comment_replacement_async(
 
     new_content = content.replace(original_code, proposed_code, 1)
     result = {
-        "dry_run": dry_run,
         "comment_id": comment_id,
         "repo_path": str(repo_path),
         "file": file_path,
@@ -790,11 +926,8 @@ async def apply_codeguardian_comment_replacement_async(
         "changed": content != new_content,
     }
 
-    if not dry_run:
-        target_path.write_text(new_content, encoding="utf-8")
-        result["applied"] = True
-    else:
-        result["applied"] = False
+    target_path.write_text(new_content, encoding="utf-8")
+    result["applied"] = True
 
     return result
 
@@ -805,7 +938,6 @@ def apply_codeguardian_comment_replacement(
     pr_id: int,
     comment_id: int,
     local_repo_path: str = "",
-    dry_run: bool = True,
 ) -> dict[str, Any]:
     return _run_async(apply_codeguardian_comment_replacement_async(
         workspace,
@@ -813,7 +945,6 @@ def apply_codeguardian_comment_replacement(
         pr_id,
         comment_id,
         local_repo_path,
-        dry_run,
     ))
 
 
@@ -823,7 +954,6 @@ async def apply_approved_codeguardian_suggestions_async(
     repo_slug: str = "",
     pr_id: int = 0,
     local_repo_path: str = "",
-    dry_run: bool = False,
 ) -> dict[str, Any]:
     if pr_id:
         workspace = _resolve_workspace(workspace)
@@ -858,7 +988,6 @@ async def apply_approved_codeguardian_suggestions_async(
                 int(target["id"]),
                 int(suggestion["id"]),
                 local_repo_path,
-                dry_run,
             )
             applied["suggestion_index"] = suggestion.get("index")
             results.append(applied)
@@ -875,7 +1004,6 @@ async def apply_approved_codeguardian_suggestions_async(
         "workspace": target["workspace"],
         "repo_slug": target["repo_slug"],
         "pr_id": int(target["id"]),
-        "dry_run": dry_run,
         "requested_selection": selection,
         "matched_suggestions": len(selected),
         "applied_count": len([result for result in results if result.get("applied")]),
@@ -884,13 +1012,101 @@ async def apply_approved_codeguardian_suggestions_async(
     }
 
 
+async def apply_codeguardian_batch_selection_async(
+    review_type: str,
+    selection: str,
+    workspace: str = "",
+    repo_slug: str = "",
+    pr_id: int = 0,
+    local_repo_path: str = "",
+    limit: int = 100,
+    count: int = 3,
+) -> dict[str, Any]:
+    target, comments = await _load_pr_target_and_comments(workspace, repo_slug, pr_id, limit)
+    pending = _pending_summaries(
+        comments["comment_summaries"],
+        target["repo_slug"],
+        review_type,
+        local_repo_path,
+    )
+    visible = []
+    for display_index, summary in enumerate(pending[:max(1, min(count, 3))], start=1):
+        item = dict(summary)
+        item["display_index"] = display_index
+        visible.append(item)
+
+    selected = _parse_selection(selection, visible)
+    if not selected:
+        raise RuntimeError(
+            "No visible pending suggestions matched the approved selection. "
+            "Use 1, 2, 3, combinations like 1 and 3, or all."
+        )
+
+    results = []
+    for suggestion in selected:
+        try:
+            applied = await apply_codeguardian_comment_replacement_async(
+                target["workspace"],
+                target["repo_slug"],
+                int(target["id"]),
+                int(suggestion["id"]),
+                local_repo_path,
+            )
+            applied["selection_number"] = suggestion.get("display_index")
+            applied["suggestion_index"] = suggestion.get("index")
+            results.append(applied)
+        except Exception as exc:
+            results.append({
+                "selection_number": suggestion.get("display_index"),
+                "suggestion_index": suggestion.get("index"),
+                "comment_id": suggestion.get("id"),
+                "file": suggestion.get("file"),
+                "applied": False,
+                "error": str(exc),
+            })
+
+    return {
+        "workspace": target["workspace"],
+        "repo_slug": target["repo_slug"],
+        "pr_id": int(target["id"]),
+        "review_type": review_type,
+        "requested_selection": selection,
+        "visible_pending_count": len(visible),
+        "matched_suggestions": len(selected),
+        "applied_count": len([result for result in results if result.get("applied")]),
+        "failed_count": len([result for result in results if result.get("error")]),
+        "results": results,
+    }
+
+
+def apply_codeguardian_batch_selection(
+    review_type: str,
+    selection: str,
+    workspace: str = "",
+    repo_slug: str = "",
+    pr_id: int = 0,
+    local_repo_path: str = "",
+    limit: int = 100,
+    count: int = 3,
+) -> dict[str, Any]:
+    return _run_async(apply_codeguardian_batch_selection_async(
+        review_type,
+        selection,
+        workspace,
+        repo_slug,
+        pr_id,
+        local_repo_path,
+        limit,
+        count,
+    ))
+
+
 def apply_approved_codeguardian_suggestions(
     selection: str,
     workspace: str = "",
     repo_slug: str = "",
     pr_id: int = 0,
     local_repo_path: str = "",
-    dry_run: bool = False,
 ) -> dict[str, Any]:
     return _run_async(apply_approved_codeguardian_suggestions_async(
         selection,
@@ -898,7 +1114,6 @@ def apply_approved_codeguardian_suggestions(
         repo_slug,
         pr_id,
         local_repo_path,
-        dry_run,
     ))
 
 

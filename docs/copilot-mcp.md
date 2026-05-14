@@ -49,9 +49,13 @@ JENKINS_API_TOKEN=your_jenkins_api_token
 - `list_codeguardian_comments`: lists every CodeGuardian inline comment in a PR with file, line, problem, original code, proposal and proposed code.
 - `list_open_pull_requests`: lists open Bitbucket pull requests in a repository through Atlassian MCP.
 - `list_comments_for_open_pr`: lists every CodeGuardian comment from the only open PR, or asks the user to choose when more than one PR is open.
+- `code_review`: use when the developer writes `code review`. It shows up to 3 pending SonarQube problem fixes, skipping items already applied locally.
+- `code_improvement` / `code_improvements`: use when the developer writes `code improvement` or `code improvements`. It shows up to 3 pending optimization suggestions, skipping items already applied locally.
+- `apply_code_review_changes`: applies the selected visible `code review` items directly to the mounted local repository.
+- `apply_code_improvement_changes`: applies the selected visible `code improvements` items directly to the mounted local repository.
 - `review_codeguardian_suggestions`: shows replaceable suggestions numbered for editor approval. It defaults to one complete suggestion at a time so Copilot does not summarize away the original code.
 - `apply_approved_codeguardian_suggestions`: applies the suggestion numbers approved by the developer to the mounted local repository.
-- `apply_codeguardian_comment_replacement`: low-level tool that applies one comment replacement by Bitbucket comment ID. It defaults to `dry_run=true`.
+- `apply_codeguardian_comment_replacement`: low-level tool that applies one comment replacement by Bitbucket comment ID.
 - `get_codeguardian_metrics`: reads CodeGuardian metrics from Prometheus.
 - `query_prometheus`: runs a read-only Prometheus instant query.
 - `get_jenkins_build_summary`: reads a Jenkins build summary.
@@ -96,11 +100,15 @@ Use CodeGuardian. List the comments from the open PR of sample-mixed in workspac
 ```
 
 ```text
-Use CodeGuardian. Review the CodeGuardian suggestions for PR 1 of sample-mixed in workspace medinafdzz and ask me which ones I want to accept.
+Use CodeGuardian. code review for PR 1 of sample-mixed in workspace medinafdzz.
 ```
 
 ```text
-Accept suggestions 1, 3 and 5.
+Use CodeGuardian. code improvements for PR 1 of sample-mixed in workspace medinafdzz.
+```
+
+```text
+Apply 1 and 3.
 ```
 
 ```text
@@ -113,14 +121,16 @@ Show the latest Jenkins build result for the sample-mixed organization folder jo
 
 ## Replacement safety model
 
-Most tools are read-only. `apply_approved_codeguardian_suggestions` and `apply_codeguardian_comment_replacement` are the only tools that can write files, and they only write to the mounted local workspace configured by `CODEGUARDIAN_WORKSPACE_ROOT`.
+Most tools are read-only. `apply_code_review_changes`, `apply_code_improvement_changes`, `apply_approved_codeguardian_suggestions` and `apply_codeguardian_comment_replacement` are the only tools that can write files, and they only write to the mounted local workspace configured by `CODEGUARDIAN_WORKSPACE_ROOT`.
 
 The editor approval flow is:
 
-- Copilot calls `review_codeguardian_suggestions`.
-- CodeGuardian returns a small page of numbered suggestions with original code, explanation and proposed code. By default it returns one complete suggestion at a time.
-- The developer chooses which suggestion numbers to accept or skip.
-- Copilot calls `apply_approved_codeguardian_suggestions` with the accepted numbers.
+- For SonarQube problems, the developer writes `code review` and Copilot calls `code_review`.
+- For optimization suggestions, the developer writes `code improvement` or `code improvements` and Copilot calls `code_improvements`.
+- CodeGuardian returns the first 3 pending items with file, line, original code, explanation and proposed code.
+- Items already applied locally are skipped because their original code block no longer exists in the workspace.
+- The developer chooses `1`, `2`, `3`, combinations like `1 and 3`, or `all`.
+- Copilot calls `apply_code_review_changes` or `apply_code_improvement_changes` with the accepted selection.
 - VS Code/Copilot asks for tool execution approval before files are modified.
 
 The replacement tools:
@@ -129,5 +139,4 @@ The replacement tools:
 - extracts `Block to substitute` and `Proposed Code`,
 - resolves the target file inside the mounted local repository,
 - requires the current code block to appear exactly once,
-- can run as `dry_run=true` for preview,
 - does not commit, push, approve PRs, create Bitbucket comments or trigger Jenkins jobs.

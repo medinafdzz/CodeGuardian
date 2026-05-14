@@ -204,7 +204,8 @@ def test_list_comments_for_open_pr_uses_single_open_pr(monkeypatch):
 
     result = mcp_tools.list_comments_for_open_pr("ws", "codeguardian-sample-mixed")
 
-    assert "Open PR selected: PR 1 - Demo PR" in result
+    assert "# CodeGuardian review suggestions for ws/sample-mixed PR 1" in result
+    assert "Showing suggestion 1 of 1" in result
     assert "Comment ID: `10`" in result
 
 
@@ -259,7 +260,8 @@ def test_list_comments_for_open_pr_detects_repo_from_git_remote(monkeypatch, tmp
 
     result = mcp_tools.list_comments_for_open_pr("", "")
 
-    assert "Open PR selected: medinafdzz/sample-mixed PR 1 - Detected PR" in result
+    assert "# CodeGuardian review suggestions for medinafdzz/sample-mixed PR 1" in result
+    assert "Showing suggestion 1 of 1" in result
     assert "Comment ID: `10`" in result
 
 
@@ -330,7 +332,7 @@ def test_get_jenkins_build_summary_returns_core_fields(monkeypatch):
     assert result["changes"] == [{"msg": "change"}]
 
 
-def test_apply_codeguardian_comment_replacement_supports_dry_run_and_apply(monkeypatch, tmp_path):
+def test_apply_codeguardian_comment_replacement_applies_immediately(monkeypatch, tmp_path):
     repo = tmp_path / "codeguardian-sample"
     repo.mkdir()
     source = repo / "app.py"
@@ -359,12 +361,7 @@ def test_apply_codeguardian_comment_replacement_supports_dry_run_and_apply(monke
     monkeypatch.setenv("CODEGUARDIAN_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setattr(mcp_tools, "fetch_atlassian_pr_comments", fake_comments)
 
-    dry_run = mcp_tools.apply_codeguardian_comment_replacement("ws", "sample", 7, 10)
-
-    assert dry_run["applied"] is False
-    assert source.read_text(encoding="utf-8") == "def run():\n    return item in values\n"
-
-    applied = mcp_tools.apply_codeguardian_comment_replacement("ws", "sample", 7, 10, dry_run=False)
+    applied = mcp_tools.apply_codeguardian_comment_replacement("ws", "sample", 7, 10)
 
     assert applied["applied"] is True
     assert source.read_text(encoding="utf-8") == "def run():\n    return item in values_set\n"
@@ -526,3 +523,112 @@ def test_apply_approved_codeguardian_suggestions_accepts_raw_comment_id(monkeypa
     assert result["applied_count"] == 1
     assert result["results"][0]["comment_id"] == 796961607
     assert source.read_text(encoding="utf-8") == "def run():\n    return y\n"
+
+
+def test_codeguardian_batch_filters_type_and_skips_solved(monkeypatch, tmp_path):
+    repo = tmp_path / "codeguardian-sample"
+    repo.mkdir()
+    source = repo / "app.py"
+    source.write_text("def sonar():\n    return insecure\n\ndef opt():\n    return slow\n", encoding="utf-8")
+
+    sonar_body = (
+        f"{CODEGUARDIAN_AGENT_MARKER}\n"
+        "**Problems:**\n\nSecurity issue.\n\n"
+        "**Solutions:**\n\nUse safe value.\n\n"
+        "**Block to substitute:**\n```python\nreturn insecure\n```\n\n"
+        "**Proposed Code:**\n```python\nreturn safe\n```\n\n"
+        f"{hidden_ids(['SONAR:1'])}"
+    )
+    optimization_body = (
+        f"{CODEGUARDIAN_AGENT_MARKER}\n"
+        "**Optimization opportunity:**\n\nSlow lookup.\n\n"
+        "**Suggested optimization:**\n\nUse fast lookup.\n\n"
+        "**Block to substitute:**\n```python\nreturn slow\n```\n\n"
+        "**Proposed Code:**\n```python\nreturn fast\n```\n\n"
+        f"{hidden_ids(['OPTIMIZATION:1'])}"
+    )
+    solved_body = (
+        f"{CODEGUARDIAN_AGENT_MARKER}\n"
+        "**Optimization opportunity:**\n\nAlready solved.\n\n"
+        "**Suggested optimization:**\n\nUse new code.\n\n"
+        "**Block to substitute:**\n```python\nreturn old_missing\n```\n\n"
+        "**Proposed Code:**\n```python\nreturn new_code\n```\n\n"
+        f"{hidden_ids(['OPTIMIZATION:2'])}"
+    )
+
+    async def fake_comments(workspace, repo_slug, pr_id):
+        return [{
+            "id": 10,
+            "content": {"raw": sonar_body},
+            "inline": {"path": "app.py", "to": 2},
+            "deleted": False,
+        }, {
+            "id": 11,
+            "content": {"raw": optimization_body},
+            "inline": {"path": "app.py", "to": 5},
+            "deleted": False,
+        }, {
+            "id": 12,
+            "content": {"raw": solved_body},
+            "inline": {"path": "app.py", "to": 8},
+            "deleted": False,
+        }]
+
+    monkeypatch.setenv("CODEGUARDIAN_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(mcp_tools, "fetch_atlassian_pr_comments", fake_comments)
+
+    review = mcp_tools.codeguardian_batch("review", "ws", "sample", 7)
+    improvements = mcp_tools.codeguardian_batch("improvements", "ws", "sample", 7)
+
+    assert "# Code review" in review
+    assert "Security issue." in review
+    assert "Slow lookup." not in review
+    assert "# Code improvements" in improvements
+    assert "Slow lookup." in improvements
+    assert "Already solved." not in improvements
+
+
+def test_apply_codeguardian_batch_selection_uses_visible_numbers(monkeypatch, tmp_path):
+    repo = tmp_path / "codeguardian-sample"
+    repo.mkdir()
+    source = repo / "app.py"
+    source.write_text("def one():\n    return a\n\ndef two():\n    return c\n", encoding="utf-8")
+
+    body_one = (
+        f"{CODEGUARDIAN_AGENT_MARKER}\n"
+        "**Optimization opportunity:**\n\nFirst.\n\n"
+        "**Suggested optimization:**\n\nUse b.\n\n"
+        "**Block to substitute:**\n```python\nreturn a\n```\n\n"
+        "**Proposed Code:**\n```python\nreturn b\n```\n\n"
+        f"{hidden_ids(['OPTIMIZATION:1'])}"
+    )
+    body_two = (
+        f"{CODEGUARDIAN_AGENT_MARKER}\n"
+        "**Optimization opportunity:**\n\nSecond.\n\n"
+        "**Suggested optimization:**\n\nUse d.\n\n"
+        "**Block to substitute:**\n```python\nreturn c\n```\n\n"
+        "**Proposed Code:**\n```python\nreturn d\n```\n\n"
+        f"{hidden_ids(['OPTIMIZATION:2'])}"
+    )
+
+    async def fake_comments(workspace, repo_slug, pr_id):
+        return [{
+            "id": 20,
+            "content": {"raw": body_one},
+            "inline": {"path": "app.py", "to": 2},
+            "deleted": False,
+        }, {
+            "id": 21,
+            "content": {"raw": body_two},
+            "inline": {"path": "app.py", "to": 5},
+            "deleted": False,
+        }]
+
+    monkeypatch.setenv("CODEGUARDIAN_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(mcp_tools, "fetch_atlassian_pr_comments", fake_comments)
+
+    result = mcp_tools.apply_codeguardian_batch_selection("improvements", "1 and 2", "ws", "sample", 7)
+
+    assert result["applied_count"] == 2
+    assert [item["selection_number"] for item in result["results"]] == [1, 2]
+    assert source.read_text(encoding="utf-8") == "def one():\n    return b\n\ndef two():\n    return d\n"
