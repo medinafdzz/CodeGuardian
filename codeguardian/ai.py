@@ -21,6 +21,7 @@ from codeguardian.config import (
 from codeguardian.logging_utils import logger
 from codeguardian.models import AnalysisMetrics, Decision, Issue, IssueBatchDecision
 from codeguardian.text import read_file_lines
+from codeguardian.tokens import token_count
 
 
 def ensure_prompt_cache(client: genai.Client) -> str:
@@ -250,13 +251,11 @@ def analyze_code_with_gemini(project_key: str, issues: list[dict]) -> Decision:
                 config=generate_config,
             )
 
-            try:
-                total_prompt_tokens += int(response.usage_metadata.prompt_token_count)
-                total_response_tokens += int(response.usage_metadata.candidates_token_count)
-                total_tokens += int(response.usage_metadata.total_token_count)
-                total_cached_tokens += int(getattr(response.usage_metadata, "cached_content_token_count", 0) or 0)
-            except Exception:
-                pass
+            if response.usage_metadata:
+                total_prompt_tokens += token_count(response.usage_metadata.prompt_token_count)
+                total_response_tokens += token_count(response.usage_metadata.candidates_token_count)
+                total_tokens += token_count(response.usage_metadata.total_token_count)
+                total_cached_tokens += token_count(response.usage_metadata.cached_content_token_count)
 
             response_text = response.text
 
