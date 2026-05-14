@@ -117,8 +117,8 @@ def get_atlassian_mcp_auth() -> httpx.Auth:
     if not auth_header:
         raise AgentExecutionError("Missing ATLASSIAN_MCP_AUTH_HEADER for Atlassian Rovo MCP")
 
-    if auth_header.startswith("Basic "):
-        token = auth_header[len("Basic "):].strip()
+    if auth_header.startswith("Basic ") or " " not in auth_header:
+        token = auth_header[len("Basic "):].strip() if auth_header.startswith("Basic ") else auth_header
         try:
             decoded = base64.b64decode(token).decode("utf-8")
             username, password = decoded.split(":", 1)
