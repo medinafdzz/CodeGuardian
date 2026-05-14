@@ -7,6 +7,7 @@ from codeguardian.logging_utils import logger
 from codeguardian.metrics import push_execution_metrics
 from codeguardian.models import AgentExecutionError, AnalysisMetrics, Decision, ExecutionMetrics
 from codeguardian.performance import analyze_performance, performance_enabled
+from codeguardian.results_export import export_results_if_enabled
 from codeguardian.sonarqube import fetch_sonar_issues
 from codeguardian.validation import filter_valid_issues, normalize_issues, validate_maven_compile
 
@@ -100,6 +101,14 @@ async def main() -> None:
     )
 
     comments = await report_to_bitbucket(pr_id, repo_slug, workspace, decision)
+    export_results_if_enabled(
+        decision=decision,
+        project_key=project_key,
+        repository=repo_slug,
+        workspace=workspace,
+        pull_request=pr_id,
+        blocking_findings=has_blocking_findings,
+    )
     push_execution_metrics(
         project_key,
         analysis_metrics,
