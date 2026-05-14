@@ -90,24 +90,24 @@ def comment_content(issues: list[Issue]) -> str:
                          f"```{file_extension}\n" +
                          "\n".join(required_import for required_import in all_required_imports) + "\n```\n\n")
 
-    is_performance = all((issue.source or "").lower() == "performance" for issue in issues)
+    is_optimization = all((issue.source or "").lower() in {"performance", "optimization"} for issue in issues)
 
     complexity_block = ""
-    if is_performance:
+    if is_optimization:
         base_original_complexity = base_issue.original_complexity or "Not provided"
         base_proposed_complexity = base_issue.proposed_complexity or "Not provided"
         base_complexity_justification = base_issue.complexity_justification or "Not provided"
         complexity_block = (
-            f"**Current estimated complexity:** {base_original_complexity}\n\n"
-            f"**Proposed estimated complexity:** {base_proposed_complexity}\n\n"
-            f"**Complexity justification:**\n\n{base_complexity_justification}\n\n"
+            f"**Current estimated cost:** {base_original_complexity}\n\n"
+            f"**Proposed estimated cost:** {base_proposed_complexity}\n\n"
+            f"**Optimization justification:**\n\n{base_complexity_justification}\n\n"
         )
 
     if len(issues) == 1:
         issue = issues[0]
-        title = "CodeGuardian performance suggestion" if is_performance else "Code Issue"
-        problem_label = "Performance issue" if is_performance else "Problems"
-        solution_label = "Suggested performance improvement" if is_performance else "Solutions"
+        title = "CodeGuardian optimization suggestion" if is_optimization else "Code Issue"
+        problem_label = "Optimization opportunity" if is_optimization else "Problems"
+        solution_label = "Suggested optimization" if is_optimization else "Solutions"
 
         body = (f"### {title}\n\n"
                 f"**File:** {issue.file}\n\n"
@@ -153,10 +153,10 @@ def comment_content(issues: list[Issue]) -> str:
         seen_solutions.add(normalized_solution)
         unique_solutions.append(issue.solution.strip())
 
-    title = "CodeGuardian performance suggestions" if is_performance else "Code Issues"
-    problems_label = "Performance issues" if is_performance else "Detected problems"
-    single_solution_label = "Suggested performance improvement" if is_performance else "Suggested solution"
-    solution_label = "Suggested performance improvements" if is_performance else "Suggested actions"
+    title = "CodeGuardian optimization suggestions" if is_optimization else "Code Issues"
+    problems_label = "Optimization opportunities" if is_optimization else "Detected problems"
+    single_solution_label = "Suggested optimization" if is_optimization else "Suggested solution"
+    solution_label = "Suggested optimizations" if is_optimization else "Suggested actions"
 
     if len(unique_solutions) == 1:
         solution_block = f"**{single_solution_label}:**\n{unique_solutions[0]}\n\n"

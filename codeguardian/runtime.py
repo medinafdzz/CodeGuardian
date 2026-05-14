@@ -66,7 +66,7 @@ async def main() -> None:
         logger.info("No relevant issues found by SonarQube.")
 
     performance_review_enabled = performance_enabled()
-    logger.info("Performance review enabled: %s", performance_review_enabled)
+    logger.info("Optimization review enabled: %s", performance_review_enabled)
 
     if performance_review_enabled:
         performance_decision = analyze_performance(project_key)
@@ -74,29 +74,29 @@ async def main() -> None:
         performance_decision.issues, performance_patch_invalid_count = filter_valid_issues(performance_decision.issues)
 
         if performance_invalid_count:
-            logger.info("Dropped %s invalid performance suggestions", performance_invalid_count)
+            logger.info("Dropped %s invalid optimization suggestions", performance_invalid_count)
 
         if performance_patch_invalid_count:
             logger.info(
-                "Dropped %s performance suggestions after patch validation",
+                "Dropped %s optimization suggestions after patch validation",
                 performance_patch_invalid_count,
             )
 
-        logger.info("Final performance comments: %s", len(performance_decision.issues))
+        logger.info("Final optimization comments: %s", len(performance_decision.issues))
         decision.issues.extend(performance_decision.issues)
         analysis_metrics = combine_analysis_metrics(analysis_metrics, performance_decision.metrics)
 
     validate_maven_compile()
 
     logger.info(
-        "Execution summary: sonar_findings=%s generated_issues=%s dropped_invalid=%s dropped_patch_validation=%s final_issues=%s blocking_findings=%s performance_suggestions=%s",
+        "Execution summary: sonar_findings=%s generated_issues=%s dropped_invalid=%s dropped_patch_validation=%s final_issues=%s blocking_findings=%s optimization_suggestions=%s",
         len(sonar_issues),
         generated_static_count,
         invalid_count,
         patch_invalid_count,
         len(decision.issues),
         has_blocking_findings,
-        len([issue for issue in decision.issues if issue.source == "performance"]),
+        len([issue for issue in decision.issues if issue.source in {"performance", "optimization"}]),
     )
 
     comments = await report_to_bitbucket(pr_id, repo_slug, workspace, decision)

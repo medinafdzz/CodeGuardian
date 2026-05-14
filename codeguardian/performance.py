@@ -17,29 +17,33 @@ from codeguardian.tokens import token_count
 
 
 PERFORMANCE_REVIEW_RULES = """
-You are CodeGuardian Performance Review.
+You are CodeGuardian Optimization Review.
 
 Goal:
-- Suggest performance-oriented improvements for changed functions or methods only.
-- Focus on inefficient logic where algorithmic complexity can be improved with Big O reasoning.
+- Suggest performance-oriented optimizations for changed functions, methods or build/configuration files.
+- Focus on reducing execution time, build time, network/database overhead, repeated IO, memory pressure or algorithmic cost.
+- Estimate both time complexity and space complexity when they apply.
 - This review is complementary to SonarQube and must not report general SonarQube-style defects.
 
 Strict rules:
 - Only suggest a change when there is a clear expected efficiency improvement.
-- Prefer asymptotic improvements such as O(n^2) to O(n), O(n log n) to O(n), or repeated linear search to hash-based lookup.
+- Prefer substantial optimizations over small cleanups: better algorithms, fewer repeated passes, lower IO/network/database calls, reduced build work, or safer reuse of already available data.
+- Analyze the candidate itself. Do not assume a fixed pattern such as nested loops or repeated membership checks.
+- Consider these generic optimization families when relevant: algorithmic complexity, data structure choice, repeated computation, repeated sorting, repeated parsing/serialization, unnecessary materialization, avoidable IO inside loops, avoidable remote calls inside loops, redundant build steps, missing incremental build/cache usage, and expensive work done eagerly instead of lazily.
+- Include both current and proposed estimates in original_complexity and proposed_complexity. Use a concise format such as "Time: O(n^2), Space: O(n)" or "Build: repeated dependency download, Runtime: unchanged" when Big O is not the right model.
 - Do not suggest style-only refactors.
-- Do not suggest micro-optimizations unless they are clearly justified.
+- Do not suggest micro-optimizations unless they materially reduce runtime, build time, IO, network/database calls or memory use.
 - Preserve observable behaviour.
 - Do not invent APIs, imports, dependencies or unavailable data structures.
 - Do not change public method signatures unless absolutely necessary and safe.
 - Do not introduce concurrency, caching, global state or memoization unless it is clearly safe in the local context.
 - Do not trade correctness for speed.
-- If complexity cannot be confidently improved from the provided context, return an empty issues list.
+- If no meaningful optimization can be confidently proposed from the provided context, return an empty issues list.
 - If the proposed code may not compile or parse, return an empty issues list.
 - Return only valid JSON.
-- Use source "performance".
-- Use severity "PERFORMANCE".
-- Use sonar_key values starting with "PERFORMANCE:".
+- Use source "optimization".
+- Use severity "OPTIMIZATION".
+- Use sonar_key values starting with "OPTIMIZATION:".
 - original_code must be copied exactly from the candidate code.
 - proposed_code must be a direct replacement for original_code.
 - Include original_complexity, proposed_complexity and complexity_justification.
@@ -55,31 +59,89 @@ PERFORMANCE_EXCLUSIONS = (
     "*_test.py",
 )
 
+OPTIMIZATION_FILE_PATTERNS = {
+    "Jenkinsfile": "groovy",
+    "Dockerfile": "dockerfile",
+    "docker-compose.yml": "yaml",
+    "docker-compose.yaml": "yaml",
+    "pom.xml": "xml",
+    "build.gradle": "gradle",
+    "build.gradle.kts": "kotlin",
+    "package.json": "json",
+    "requirements.txt": "requirements",
+    "pyproject.toml": "toml",
+    "go.mod": "go-mod",
+    "Makefile": "makefile",
+}
 
-def performance_enabled() -> bool:
-    return os.getenv("CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW", "false").strip().lower() in {
+
+def env_bool(primary: str, default: str = "false", fallback: str | None = None) -> bool:
+    raw_value = os.getenv(primary)
+    if raw_value is None and fallback:
+        raw_value = os.getenv(fallback)
+    return (raw_value if raw_value is not None else default).strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
+
+
+def env_int(primary: str, default: int, fallback: str | None = None) -> int:
+    raw_value = os.getenv(primary)
+    if raw_value is None and fallback:
+        raw_value = os.getenv(fallback)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+def performance_enabled() -> bool:
+    return env_bool(
+        "CODEGUARDIAN_ENABLE_OPTIMIZATION_REVIEW",
+        fallback="CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW",
+    )
 
 
 def performance_max_scopes() -> int:
-    return int(os.getenv("CODEGUARDIAN_PERFORMANCE_MAX_SCOPES", "10"))
+    return env_int(
+        "CODEGUARDIAN_OPTIMIZATION_MAX_SCOPES",
+        10,
+        fallback="CODEGUARDIAN_PERFORMANCE_MAX_SCOPES",
+    )
 
 
 def performance_min_complexity_gain() -> bool:
-    return os.getenv("CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN", "true").strip().lower() in {
-        "1",
+    return env_bool(
+        "CODEGUARDIAN_OPTIMIZATION_REQUIRE_CLEAR_GAIN",
         "true",
-        "yes",
-        "on",
-    }
+        fallback="CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN",
+    )
 
 
 def performance_context_window() -> int:
-    return int(os.getenv("CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW", "20"))
+    return env_int(
+        "CODEGUARDIAN_OPTIMIZATION_CONTEXT_WINDOW",
+        20,
+        fallback="CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW",
+    )
+
+
+def optimization_file_language(path: str) -> str:
+    normalized_path = path.replace("\\", "/")
+    name = os.path.basename(normalized_path)
+    if name in OPTIMIZATION_FILE_PATTERNS:
+        return OPTIMIZATION_FILE_PATTERNS[name]
+    if normalized_path.endswith(".github/workflows/") or "/.github/workflows/" in normalized_path:
+        return "yaml"
+    if name.endswith((".yml", ".yaml")) and any(part in normalized_path for part in ("jenkins", "pipeline", "workflow", "ci")):
+        return "yaml"
+    if name.endswith((".sh", ".ps1", ".bat", ".cmd")):
+        return "shell"
+    return "unknown"
 
 
 def performance_rules_hash() -> str:
@@ -126,6 +188,9 @@ def collect_performance_candidates(max_scopes: int | None = None) -> list[Perfor
             continue
 
         language = detect_language(file_path)
+        file_level_language = optimization_file_language(file_path)
+        if language == "unknown":
+            language = file_level_language
         if language == "unknown":
             continue
 
@@ -134,7 +199,25 @@ def collect_performance_candidates(max_scopes: int | None = None) -> list[Perfor
         except Exception:
             continue
 
-        for line_number in changed_line_numbers(base_ref, file_path):
+        changed_lines = changed_line_numbers(base_ref, file_path)
+        if file_level_language != "unknown" and language == file_level_language:
+            key = (file_path, "file", os.path.basename(file_path), 1, len(file_lines))
+            if key not in seen and file_lines:
+                seen.add(key)
+                candidates.append(PerformanceCandidate(
+                    file=file_path,
+                    target_type="file",
+                    target_name=os.path.basename(file_path),
+                    start_line=1,
+                    end_line=len(file_lines),
+                    language=language,
+                    code="".join(file_lines).rstrip(),
+                ))
+                if len(candidates) >= max_scope_count:
+                    return candidates
+            continue
+
+        for line_number in changed_lines:
             scope = resolve_scope(file_path, line_number)
             if scope.kind not in {"function", "method"}:
                 continue
@@ -164,7 +247,7 @@ def collect_performance_candidates(max_scopes: int | None = None) -> list[Perfor
 
 def performance_issue_key(candidate: PerformanceCandidate) -> str:
     payload = {
-        "review_type": "performance",
+        "review_type": "optimization",
         "file": candidate.file,
         "target_type": candidate.target_type,
         "target_name": candidate.target_name,
@@ -173,12 +256,12 @@ def performance_issue_key(candidate: PerformanceCandidate) -> str:
         "scope_content_hash": hashlib.sha256(candidate.code.encode("utf-8")).hexdigest(),
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-    return f"PERFORMANCE:{hashlib.sha256(raw.encode('utf-8')).hexdigest()}"
+    return f"OPTIMIZATION:{hashlib.sha256(raw.encode('utf-8')).hexdigest()}"
 
 
 def performance_batch_signature(project_key: str, candidate: PerformanceCandidate) -> str:
     payload = {
-        "review_type": "performance",
+        "review_type": "optimization",
         "project_key": project_key,
         "model": CACHE_MODEL,
         "rules_hash": performance_rules_hash(),
@@ -202,15 +285,15 @@ def build_performance_prompt(project_key: str, candidate: PerformanceCandidate) 
 Project:
 {project_key}
 
-Performance review settings:
-- minimum asymptotic complexity gain required: {complexity_gain_required}
+Optimization review settings:
+- clear efficiency gain required: {complexity_gain_required}
 - context window: {context_window}
 
-Return one issue at most. If no safe performance improvement is clear, return an empty issues list.
-The response must include the current complexity estimate, proposed complexity estimate,
-complexity justification and minimal direct replacement code.
+Return one issue at most. If no safe optimization is clear, return an empty issues list.
+The response must include current time/space or build/runtime cost estimates, proposed estimates,
+optimization justification and minimal direct replacement code.
 
-PERFORMANCE CANDIDATE:
+OPTIMIZATION CANDIDATE:
 {json.dumps({
     "internal_key": performance_issue_key(candidate),
     "file": candidate.file,
@@ -238,7 +321,7 @@ def analyze_performance(project_key: str) -> Decision:
         return Decision(issues=[])
 
     candidates = collect_performance_candidates()
-    logger.info("Performance review enabled: candidate scopes=%s", len(candidates))
+    logger.info("Optimization review enabled: candidate scopes=%s", len(candidates))
 
     if not candidates:
         return Decision(
@@ -257,7 +340,7 @@ def analyze_performance(project_key: str) -> Decision:
     total_tokens = 0
     start_time = time.time()
 
-    logger.info("Performance review batches: %s", len(candidates))
+    logger.info("Optimization review batches: %s", len(candidates))
 
     for candidate in candidates:
         cache_key = performance_batch_signature(project_key, candidate)
@@ -293,7 +376,7 @@ def analyze_performance(project_key: str) -> Decision:
             response_text = response.text
             if response_text is None:
                 logger.error(
-                    "Performance review response for %s:%s did not contain text",
+                    "Optimization review response for %s:%s did not contain text",
                     candidate.file,
                     candidate.start_line,
                 )
@@ -302,7 +385,7 @@ def analyze_performance(project_key: str) -> Decision:
             try:
                 decision = IssueBatchDecision.model_validate_json(response_text)
             except Exception as e:
-                logger.error("Failed to parse performance review response for %s:%s: %s",
+                logger.error("Failed to parse optimization review response for %s:%s: %s",
                              candidate.file, candidate.start_line, e)
                 logger.error("The response from the model was: %s", response_text)
                 continue
@@ -313,14 +396,14 @@ def analyze_performance(project_key: str) -> Decision:
         for issue in decision.issues[:1]:
             if not has_required_performance_metadata(issue):
                 logger.info(
-                    "Dropped performance suggestion for %s:%s because complexity metadata is incomplete",
+                    "Dropped optimization suggestion for %s:%s because cost metadata is incomplete",
                     candidate.file,
                     candidate.start_line,
                 )
                 continue
 
-            issue.source = "performance"
-            issue.severity = "PERFORMANCE"
+            issue.source = "optimization"
+            issue.severity = "OPTIMIZATION"
             issue.sonar_key = performance_issue_key(candidate)
             issue.file = candidate.file
             issue.target_type = candidate.target_type
@@ -333,9 +416,9 @@ def analyze_performance(project_key: str) -> Decision:
     if batch_cache_changed:
         save_batch_cache(batch_cache)
 
-    logger.info("Performance batch cache hits: %s", batch_cache_hits)
-    logger.info("Performance batch cache misses: %s", batch_cache_misses)
-    logger.info("Performance suggestions generated: %s", len(issues))
+    logger.info("Optimization batch cache hits: %s", batch_cache_hits)
+    logger.info("Optimization batch cache misses: %s", batch_cache_misses)
+    logger.info("Optimization suggestions generated: %s", len(issues))
 
     return Decision(
         issues=issues,

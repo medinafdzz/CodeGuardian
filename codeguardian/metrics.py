@@ -86,7 +86,7 @@ def build_metrics_registry(
     _set_gauge(
         registry,
         "codeguardian_performance_suggestions_total",
-        "Number of performance suggestions generated before validation",
+        "Number of optimization suggestions generated before validation",
         analysis.performance_suggestions,
     )
     _set_gauge(

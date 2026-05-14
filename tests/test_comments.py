@@ -77,22 +77,22 @@ def test_comment_content_combines_multiple_issues_for_same_block():
     assert "ID: S2" in content
 
 
-def test_comment_content_formats_performance_suggestion():
+def test_comment_content_formats_optimization_suggestion():
     content = comment_content([make_issue(
-        sonar_key="PERFORMANCE:1",
-        source="performance",
-        severity="PERFORMANCE",
+        sonar_key="OPTIMIZATION:1",
+        source="optimization",
+        severity="OPTIMIZATION",
         problem="Repeated membership checks scan the list for every item.",
         solution="Build a set once and use constant-time membership checks.",
-        original_complexity="O(n*m)",
-        proposed_complexity="O(n+m)",
+        original_complexity="Time: O(n*m), Space: O(1)",
+        proposed_complexity="Time: O(n+m), Space: O(m)",
         complexity_justification="Creating a set avoids the repeated linear search inside the loop.",
     )])
 
-    assert "### CodeGuardian performance suggestion" in content
-    assert "**Performance issue:**" in content
-    assert "**Current estimated complexity:** O(n*m)" in content
-    assert "**Proposed estimated complexity:** O(n+m)" in content
-    assert "**Complexity justification:**" in content
-    assert "**Suggested performance improvement:**" in content
-    assert "ID: PERFORMANCE:1" in content
+    assert "### CodeGuardian optimization suggestion" in content
+    assert "**Optimization opportunity:**" in content
+    assert "**Current estimated cost:** Time: O(n*m), Space: O(1)" in content
+    assert "**Proposed estimated cost:** Time: O(n+m), Space: O(m)" in content
+    assert "**Optimization justification:**" in content
+    assert "**Suggested optimization:**" in content
+    assert "ID: OPTIMIZATION:1" in content
