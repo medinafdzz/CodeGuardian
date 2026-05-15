@@ -57,24 +57,131 @@ def _with_original_trailing_newline(proposed: str, original_block: str) -> str:
     return proposed
 
 
+def _first_line_indent(text: str) -> str:
+    first_line = text.splitlines()[0] if text.splitlines() else ""
+    return first_line[:len(first_line) - len(first_line.lstrip())]
+
+
+def _leading_indent_agnostic_match(current: str, expected: str) -> bool:
+    current_lines = current.rstrip("\r\n").splitlines()
+    expected_lines = expected.rstrip("\r\n").splitlines()
+    if not current_lines or len(current_lines) != len(expected_lines):
+        return False
+
+    return all(current_line.lstrip() == expected_line.lstrip()
+               for current_line, expected_line in zip(current_lines, expected_lines))
+
+
+def _normalized_block_lines(text: str) -> list[str]:
+    return [line.lstrip().rstrip() for line in text.rstrip("\r\n").splitlines()]
+
+
+def _first_non_empty_indent(text: str) -> str:
+    for line in text.splitlines():
+        if line.strip():
+            return line[:len(line) - len(line.lstrip())]
+    return ""
+
+
+def _rebase_proposed_indent(proposed: str, expected: str, current: str) -> str:
+    expected_base = _first_non_empty_indent(expected)
+    current_base = _first_non_empty_indent(current)
+    if expected_base == current_base:
+        return proposed
+
+    lines = proposed.splitlines(keepends=True)
+    rebased = []
+    for line in lines:
+        if not line.strip():
+            rebased.append(line)
+        elif expected_base and line.startswith(expected_base):
+            rebased.append(current_base + line[len(expected_base):])
+        elif current_base and not line.startswith(current_base):
+            rebased.append(current_base + line)
+        else:
+            rebased.append(line)
+    return "".join(rebased)
+
+
+def _line_range(suggestion: dict[str, Any]) -> tuple[int, int]:
+    start = int(suggestion.get("original_start_line") or suggestion.get("line") or 0)
+    end = int(suggestion.get("original_end_line") or suggestion.get("line") or 0)
+    return start, end
+
+
+def _blocks_match(current: str, expected: str) -> bool:
+    return (
+        current.rstrip("\r\n") == expected.rstrip("\r\n")
+        or _leading_indent_agnostic_match(current, expected)
+    )
+
+
+def _find_matching_range(lines: list[str], expected: str, preferred_start: int) -> tuple[int, int, str] | None:
+    expected_lines = expected.rstrip("\r\n").splitlines()
+    if not expected_lines:
+        return None
+
+    window_size = len(expected_lines)
+    expected_normalized = _normalized_block_lines(expected)
+    matches: list[tuple[int, int, str]] = []
+    for index in range(0, len(lines) - window_size + 1):
+        current = "".join(lines[index:index + window_size])
+        if _normalized_block_lines(current) == expected_normalized:
+            matches.append((index + 1, index + window_size, current))
+
+    if not matches:
+        return None
+
+    matches.sort(key=lambda item: abs(item[0] - preferred_start))
+    return matches[0]
+
+
+def _locate_block(
+    suggestion: dict[str, Any],
+    block: str,
+    root: Path | None = None,
+) -> tuple[Path, int, int, str, str] | None:
+    path = _repo_path(str(suggestion.get("file", "")), root)
+    if not path.is_file():
+        return None
+
+    start, end = _line_range(suggestion)
+    if start < 1 or end < start:
+        return None
+
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    if end <= len(lines):
+        current = "".join(lines[start - 1:end])
+        if _blocks_match(current, block):
+            return path, start, end, current, block
+
+    found = _find_matching_range(lines, block, start)
+    if found:
+        found_start, found_end, current = found
+        return path, found_start, found_end, current, block
+
+    return None
+
+
+def _locate_original_block(suggestion: dict[str, Any], root: Path | None = None) -> tuple[Path, int, int, str, str] | None:
+    return _locate_block(suggestion, str(suggestion.get("original_code") or ""), root)
+
+
+def _locate_proposed_block(suggestion: dict[str, Any], root: Path | None = None) -> tuple[Path, int, int, str, str] | None:
+    return _locate_block(suggestion, str(suggestion.get("proposed_code") or ""), root)
+
+
 def validate_local_match(suggestion: dict[str, Any], root: Path | None = None) -> tuple[bool, str]:
     path = _repo_path(str(suggestion.get("file", "")), root)
     if not path.is_file():
         return False, f"File not found: {path}"
 
-    start = int(suggestion.get("original_start_line") or suggestion.get("line") or 0)
-    end = int(suggestion.get("original_end_line") or suggestion.get("line") or 0)
+    start, end = _line_range(suggestion)
     if start < 1 or end < start:
         return False, "Invalid original line range"
 
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    if end > len(lines):
-        return False, "Original line range is outside the current file"
-
-    current = "".join(lines[start - 1:end])
-    expected = str(suggestion.get("original_code") or "")
-    if current.rstrip("\r\n") != expected.rstrip("\r\n"):
-        return False, "original_code does not match the current file content in the expected line range"
+    if _locate_original_block(suggestion, root) is None and _locate_proposed_block(suggestion, root) is None:
+        return False, "original_code does not match the current file content"
 
     return True, ""
 
@@ -84,15 +191,35 @@ def apply_suggestion(suggestion: dict[str, Any], root: Path | None = None) -> tu
     if not ok:
         return False, reason
 
-    path = _repo_path(str(suggestion.get("file", "")), root)
-    start = int(suggestion.get("original_start_line") or suggestion.get("line") or 0)
-    end = int(suggestion.get("original_end_line") or suggestion.get("line") or 0)
+    located = _locate_original_block(suggestion, root)
+    if located is None:
+        if _locate_proposed_block(suggestion, root) is not None:
+            return True, "already applied"
+        return False, "original_code does not match the current file content"
+
+    path, start, end, original_block, expected = located
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    original_block = "".join(lines[start - 1:end])
-    proposed = _with_original_trailing_newline(str(suggestion.get("proposed_code") or ""), original_block)
+    proposed = _rebase_proposed_indent(str(suggestion.get("proposed_code") or ""), expected, original_block)
+    proposed = _with_original_trailing_newline(proposed, original_block)
     new_content = "".join(lines[:start - 1]) + proposed + "".join(lines[end:])
     path.write_text(new_content, encoding="utf-8")
     return True, "applied"
+
+
+def undo_suggestion(suggestion: dict[str, Any], root: Path | None = None) -> tuple[bool, str]:
+    located = _locate_proposed_block(suggestion, root)
+    if located is None:
+        if _locate_original_block(suggestion, root) is not None:
+            return True, "already open"
+        return False, "proposed_code does not match the current file content"
+
+    path, start, end, proposed_block, expected = located
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    original = _rebase_proposed_indent(str(suggestion.get("original_code") or ""), expected, proposed_block)
+    original = _with_original_trailing_newline(original, proposed_block)
+    new_content = "".join(lines[:start - 1]) + original + "".join(lines[end:])
+    path.write_text(new_content, encoding="utf-8")
+    return True, "undone"
 
 
 def apply_suggestions(suggestions: list[dict[str, Any]], root: Path | None = None) -> dict[str, Any]:
@@ -116,6 +243,48 @@ def apply_suggestions(suggestions: list[dict[str, Any]], root: Path | None = Non
         "failed": 0,
         "results": results,
     }
+
+
+def undo_suggestions(suggestions: list[dict[str, Any]], root: Path | None = None) -> dict[str, Any]:
+    ordered = sorted(
+        suggestions,
+        key=lambda item: (str(item.get("file", "")), int(item.get("original_start_line") or item.get("line") or 0)),
+        reverse=True,
+    )
+    results = []
+    for suggestion in ordered:
+        undone, message = undo_suggestion(suggestion, root)
+        results.append({
+            "id": suggestion.get("id"),
+            "file": suggestion.get("file"),
+            "applied": undone,
+            "message": message,
+        })
+    return {
+        "applied": len([item for item in results if item["applied"]]),
+        "skipped": len([item for item in results if not item["applied"]]),
+        "failed": 0,
+        "results": results,
+    }
+
+
+def suggestion_status(suggestion: dict[str, Any], root: Path | None = None) -> str:
+    if _locate_proposed_block(suggestion, root) is not None:
+        return "applied"
+    if _locate_original_block(suggestion, root) is not None:
+        return "open"
+    return "changed"
+
+
+def suggestion_statuses(suggestions: list[dict[str, Any]], root: Path | None = None) -> list[dict[str, str]]:
+    return [
+        {
+            "id": str(suggestion.get("id") or ""),
+            "file": str(suggestion.get("file") or ""),
+            "status": suggestion_status(suggestion, root),
+        }
+        for suggestion in suggestions
+    ]
 
 
 def print_summary(summary: dict[str, Any]) -> None:
@@ -180,6 +349,15 @@ def command_validate(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def command_status(args: argparse.Namespace) -> int:
+    data = load_results_file(args.file)
+    suggestions = data.get("suggestions", [])
+    if args.id:
+        suggestions = [find_suggestion(data, args.id)]
+    print(json.dumps({"suggestions": suggestion_statuses(suggestions)}, indent=2))
+    return 0
+
+
 def command_apply(args: argparse.Namespace) -> int:
     data = load_results_file(args.file)
     item = find_suggestion(data, args.id)
@@ -195,6 +373,14 @@ def command_apply_selected(args: argparse.Namespace) -> int:
     summary = apply_suggestions(suggestions)
     print_summary(summary)
     return 0 if summary["applied"] > 0 else 1
+
+
+def command_undo(args: argparse.Namespace) -> int:
+    data = load_results_file(args.file)
+    item = find_suggestion(data, args.id)
+    summary = undo_suggestions([item])
+    print_summary(summary)
+    return 0 if summary["applied"] == 1 else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -225,10 +411,20 @@ def build_parser() -> argparse.ArgumentParser:
     selected_parser.add_argument("--ids", required=True)
     selected_parser.set_defaults(func=command_apply_selected)
 
+    undo_parser = subparsers.add_parser("undo", help="Undo one applied suggestion")
+    undo_parser.add_argument("--file", required=True)
+    undo_parser.add_argument("--id", required=True)
+    undo_parser.set_defaults(func=command_undo)
+
     validate_parser = subparsers.add_parser("validate", help="Validate one suggestion")
     validate_parser.add_argument("--file", required=True)
     validate_parser.add_argument("--id", required=True)
     validate_parser.set_defaults(func=command_validate)
+
+    status_parser = subparsers.add_parser("status", help="Return suggestion apply status")
+    status_parser.add_argument("--file", required=True)
+    status_parser.add_argument("--id")
+    status_parser.set_defaults(func=command_status)
 
     return parser
 
