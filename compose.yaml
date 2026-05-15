@@ -111,10 +111,16 @@ services:
       - services-net
     ports:
       - "8010:8010"
+    volumes:
+      - ..:/workspace
     environment:
       - CODEGUARDIAN_MCP_HOST=0.0.0.0
       - CODEGUARDIAN_MCP_PORT=8010
       - CODEGUARDIAN_MCP_PATH=/mcp
+      - CODEGUARDIAN_WORKSPACE_ROOT=/workspace
+      - BITBUCKET_WORKSPACE=${BITBUCKET_WORKSPACE:-}
+      - ATLASSIAN_MCP_URL=https://mcp.atlassian.com/v1/mcp
+      - ATLASSIAN_MCP_AUTH_HEADER=${ATLASSIAN_MCP_AUTH_HEADER:-}
       - BITBUCKET_URL=https://api.bitbucket.org/2.0
       - BITBUCKET_EMAIL=${BITBUCKET_EMAIL:-}
       - BITBUCKET_API_TOKEN=${BITBUCKET_API_TOKEN:-}
