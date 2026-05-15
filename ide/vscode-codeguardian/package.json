@@ -11,13 +11,19 @@
     "Other"
   ],
   "activationEvents": [
+    "onView:codeguardianDashboard",
     "onView:codeguardianSuggestions",
     "onCommand:codeguardian.refreshSuggestions",
     "onCommand:codeguardian.openSuggestion",
     "onCommand:codeguardian.previewSuggestion",
+    "onCommand:codeguardian.diffSuggestion",
     "onCommand:codeguardian.applySuggestion",
     "onCommand:codeguardian.applySelectedSuggestion",
-    "onCommand:codeguardian.downloadLatestResults"
+    "onCommand:codeguardian.downloadLatestResults",
+    "onCommand:codeguardian.selectPullRequest",
+    "onCommand:codeguardian.importCredentialsFromEnv",
+    "onCommand:codeguardian.clearStoredCredentials",
+    "onCommand:codeguardian.showCredentialStatus"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -33,8 +39,13 @@
     "views": {
       "codeguardian": [
         {
+          "id": "codeguardianDashboard",
+          "name": "Review Dashboard",
+          "type": "webview"
+        },
+        {
           "id": "codeguardianSuggestions",
-          "name": "CodeGuardian Suggestions"
+          "name": "File Tree"
         }
       ]
     },
@@ -48,6 +59,10 @@
         "title": "CodeGuardian: Download Latest Results"
       },
       {
+        "command": "codeguardian.selectPullRequest",
+        "title": "CodeGuardian: Select Pull Request"
+      },
+      {
         "command": "codeguardian.openSuggestion",
         "title": "CodeGuardian: Open Suggestion"
       },
@@ -56,12 +71,28 @@
         "title": "CodeGuardian: Preview Suggestion"
       },
       {
+        "command": "codeguardian.diffSuggestion",
+        "title": "CodeGuardian: Diff Suggestion"
+      },
+      {
         "command": "codeguardian.applySuggestion",
         "title": "CodeGuardian: Apply Suggestion"
       },
       {
         "command": "codeguardian.applySelectedSuggestion",
         "title": "CodeGuardian: Apply Selected Suggestions"
+      },
+      {
+        "command": "codeguardian.importCredentialsFromEnv",
+        "title": "CodeGuardian: Import Credentials From .env"
+      },
+      {
+        "command": "codeguardian.clearStoredCredentials",
+        "title": "CodeGuardian: Clear Stored Credentials"
+      },
+      {
+        "command": "codeguardian.showCredentialStatus",
+        "title": "CodeGuardian: Show Credential Status"
       }
     ],
     "configuration": {
@@ -95,12 +126,12 @@
         "codeguardian.jenkinsJobPath": {
           "type": "string",
           "default": "",
-          "description": "Jenkins job path using slash-separated names, for example CodeGuardian/sample-mixed/PR-1."
+          "description": "Jenkins job path using slash-separated names. Use the repository multibranch path, for example CodeGuardian/sample-mixed, to enable PR selection. Use CodeGuardian/sample-mixed/PR-1 to pin one PR."
         },
         "codeguardian.jenkinsBuildSelector": {
           "type": "string",
-          "default": "lastSuccessfulBuild",
-          "description": "Jenkins build selector used when building the artifact URL."
+          "default": "lastBuild",
+          "description": "Jenkins build selector used when building the artifact URL. lastBuild lets CodeGuardian check whether the latest build has finished and contains the artifact."
         },
         "codeguardian.jenkinsArtifactName": {
           "type": "string",
@@ -116,6 +147,32 @@
           "type": "string",
           "default": "",
           "description": "Optional Jenkins API token for Basic authentication. Prefer storing this in user settings, not workspace settings."
+        },
+        "codeguardian.bitbucketEmail": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Bitbucket email for discovering the open PR associated with the current branch."
+        },
+        "codeguardian.bitbucketApiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Bitbucket API token or app password for discovering the open PR associated with the current branch. Prefer user settings."
+        },
+        "codeguardian.autoDownload": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically poll Jenkins and download codeguardian-results.json when a completed build artifact is available for the current branch PR."
+        },
+        "codeguardian.pollIntervalSeconds": {
+          "type": "number",
+          "default": 45,
+          "minimum": 15,
+          "description": "Polling interval in seconds used when codeguardian.autoDownload is enabled."
+        },
+        "codeguardian.allowApplyWithUnknownArtifact": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow Apply when codeguardian-results.json lacks enough metadata to validate repository, PR and commit context. Disabled by default for safety."
         }
       }
     },
@@ -123,12 +180,17 @@
       "view/title": [
         {
           "command": "codeguardian.downloadLatestResults",
-          "when": "view == codeguardianSuggestions",
+          "when": "view == codeguardianSuggestions || view == codeguardianDashboard",
+          "group": "navigation"
+        },
+        {
+          "command": "codeguardian.selectPullRequest",
+          "when": "view == codeguardianSuggestions || view == codeguardianDashboard",
           "group": "navigation"
         },
         {
           "command": "codeguardian.refreshSuggestions",
-          "when": "view == codeguardianSuggestions",
+          "when": "view == codeguardianSuggestions || view == codeguardianDashboard",
           "group": "navigation"
         }
       ],
@@ -140,6 +202,11 @@
         },
         {
           "command": "codeguardian.previewSuggestion",
+          "when": "view == codeguardianSuggestions && viewItem == suggestion",
+          "group": "inline"
+        },
+        {
+          "command": "codeguardian.diffSuggestion",
           "when": "view == codeguardianSuggestions && viewItem == suggestion",
           "group": "inline"
         },

@@ -86,16 +86,23 @@ npm run compile
 
 Then open the extension folder in VS Code and run an Extension Development Host.
 
-The extension contributes a `CodeGuardian Suggestions` tree view. It reads the configured results file from the current workspace root, groups suggestions by file and supports:
+The extension contributes a main `Review Dashboard` view and a secondary `File Tree` view. It reads the configured results file from the current workspace root, groups suggestions by file and supports:
 
 - downloading the latest archived Jenkins results file,
+- selecting an open PR job from Jenkins and downloading its artifact,
+- validating that the artifact belongs to the current repository and commit before applying,
 - refresh suggestions,
+- viewing summary counters,
+- filtering by severity, source, status, current file and free text,
 - open the affected file and line,
 - preview original and proposed code,
 - apply one selected suggestion,
 - apply multiple selected suggestions.
+- dismiss suggestions locally.
 
 The extension calls the Python CLI for application so that local patch safety has one source of truth.
+
+The dashboard is the primary workflow surface. It contains a compact toolbar, summary metrics, filters, grouped suggestions and a detail panel for the selected suggestion. The file tree remains available for users who prefer native VS Code tree navigation.
 
 ---
 
@@ -110,11 +117,16 @@ VS Code settings:
 | `codeguardian.cliPath` | `tools/codeguardian_cli.py` | CLI path relative to the workspace root |
 | `codeguardian.jenkinsArtifactUrl` | empty | Optional full Jenkins artifact URL; takes precedence over the Jenkins URL/job settings |
 | `codeguardian.jenkinsUrl` | empty | Base Jenkins URL, for example `http://localhost:8080` |
-| `codeguardian.jenkinsJobPath` | empty | Slash-separated Jenkins job path, for example `CodeGuardian/sample-mixed/PR-1` |
-| `codeguardian.jenkinsBuildSelector` | `lastSuccessfulBuild` | Build selector used in the artifact URL |
+| `codeguardian.jenkinsJobPath` | empty | Slash-separated Jenkins job path. Use `CodeGuardian/sample-mixed` to select PRs, or `CodeGuardian/sample-mixed/PR-1` to pin one PR |
+| `codeguardian.jenkinsBuildSelector` | `lastBuild` | Build selector used in the artifact URL |
 | `codeguardian.jenkinsArtifactName` | `codeguardian-results.json` | Archived artifact name |
 | `codeguardian.jenkinsUser` | empty | Optional Jenkins user for Basic authentication |
 | `codeguardian.jenkinsApiToken` | empty | Optional Jenkins API token for Basic authentication |
+| `codeguardian.bitbucketEmail` | empty | Optional Bitbucket email used to discover the open PR for the current branch |
+| `codeguardian.bitbucketApiToken` | empty | Optional Bitbucket API token or app password used to discover the open PR for the current branch |
+| `codeguardian.autoDownload` | `false` | Poll Jenkins automatically and download the artifact when a completed build is available |
+| `codeguardian.pollIntervalSeconds` | `45` | Polling interval used by automatic download |
+| `codeguardian.allowApplyWithUnknownArtifact` | `false` | Allows apply when artifact metadata is incomplete. Keep disabled unless manually verified |
 
 If `python` is unavailable, the extension tries `python3`.
 
@@ -130,7 +142,117 @@ From VS Code, run:
 CodeGuardian: Download Latest Results
 ```
 
-The extension downloads the artifact into the local workspace as `codeguardian-results.json` and refreshes the suggestions tree.
+The extension first tries to detect the PR associated with the current local Git branch using Bitbucket Cloud REST when Bitbucket credentials are configured. It reads `git remote get-url origin`, extracts the workspace and repository, lists open PRs, and matches `source.branch.name` against the local branch.
+
+If Bitbucket detection is not configured or no unique PR is found, the extension tries Jenkins metadata. If it still cannot decide safely, it opens the PR selector. The extension then checks `lastBuild/api/json`, verifies that the build is not running, verifies that the result is `SUCCESS`, verifies that `codeguardian-results.json` is archived, and downloads that artifact into the local workspace.
+
+To make this automatic, enable:
+
+```json
+{
+  "codeguardian.autoDownload": true,
+  "codeguardian.pollIntervalSeconds": 45
+}
+```
+
+With this mode, the extension polls Jenkins while VS Code is open and refreshes the results when a new completed artifact is available.
+
+---
+
+## Artifact Context Validation
+
+The extension validates `codeguardian-results.json` against the current local workspace before enabling `Apply`, `Undo` or `Apply Selected`.
+
+It uses artifact metadata when present:
+
+- `repository`
+- `workspace`
+- `pull_request`
+- `head_commit`
+- source branch
+- `build_number` or `run_id`
+
+It compares that metadata with local Git context:
+
+```bash
+git remote get-url origin
+git branch --show-current
+git rev-parse HEAD
+```
+
+The dashboard banner reports one of:
+
+- `VALID`: artifact metadata exists and matches the current repository and `HEAD`.
+- `STALE`: artifact commit differs from local `HEAD`.
+- `MISMATCH`: artifact repository, workspace or selected PR differs.
+- `UNKNOWN`: metadata is missing or local Git context could not be detected.
+
+`STALE` and `MISMATCH` always disable apply actions. `UNKNOWN` disables apply by default. The override setting is:
+
+```json
+{
+  "codeguardian.allowApplyWithUnknownArtifact": true
+}
+```
+
+Use the override only for legacy artifacts without metadata and after manually confirming that the artifact belongs to the current PR.
+
+---
+
+## Credentials and SecretStorage
+
+The extension supports importing credentials from `.env` or `.codeguardian.env` in the workspace root. It does not recursively scan directories and does not read env files outside the workspace.
+
+Supported keys:
+
+```env
+CODEGUARDIAN_JENKINS_USER=my-user
+CODEGUARDIAN_JENKINS_API_TOKEN=my-jenkins-token
+CODEGUARDIAN_BITBUCKET_EMAIL=my-email@example.com
+CODEGUARDIAN_BITBUCKET_API_TOKEN=my-bitbucket-token
+```
+
+Run:
+
+```text
+CodeGuardian: Import Credentials From .env
+```
+
+The extension stores imported values in VS Code SecretStorage and uses those values for Jenkins and Bitbucket REST calls. Token values are never printed in logs, shown in the UI or written to `codeguardian-results.json`.
+
+Credential precedence:
+
+1. VS Code SecretStorage
+2. `.env` / `.codeguardian.env` import
+3. Existing VS Code settings fallback
+
+Settings fallback exists only for compatibility. Prefer SecretStorage instead of storing tokens in `settings.json`.
+
+Other credential commands:
+
+```text
+CodeGuardian: Clear Stored Credentials
+CodeGuardian: Show Credential Status
+```
+
+`.env` and `.codeguardian.env` must not be committed. The repository `.gitignore` excludes both.
+
+If several PR jobs are open, configure the repository multibranch path, for example:
+
+```json
+{
+  "codeguardian.jenkinsUrl": "http://localhost:8080",
+  "codeguardian.jenkinsJobPath": "CodeGuardian/sample-mixed"
+}
+```
+
+Then run:
+
+```text
+CodeGuardian: Select Pull Request
+```
+
+The extension reads the Jenkins child jobs, lists jobs named `PR-*`, lets the developer choose one, and downloads that PR artifact.
 
 ---
 
@@ -139,6 +261,8 @@ The extension downloads the artifact into the local workspace as `codeguardian-r
 The IDE assistant never applies a suggestion automatically.
 
 Before applying a suggestion, the CLI checks that `original_code` still matches the current local file content in the expected line range. If the file has changed or the range no longer matches, the suggestion is skipped.
+
+The extension also blocks apply actions when the downloaded artifact is not validated for the current repository and commit.
 
 Required imports are printed or displayed, but they are not inserted automatically unless they are already part of the `original_code` and `proposed_code` replacement block.
 
