@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import subprocess
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,6 +9,22 @@ from typing import Any
 
 from codeguardian.logging_utils import logger
 from codeguardian.models import Decision, Issue
+
+
+def current_git_head() -> str:
+    for env_name in ("GIT_COMMIT", "BITBUCKET_COMMIT"):
+        value = (os.getenv(env_name) or "").strip()
+        if value:
+            return value
+
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ""
 
 
 def stable_suggestion_id(issue: Issue) -> str:
@@ -84,7 +101,7 @@ def build_results_export(
         "workspace": workspace or "",
         "pull_request": str(pull_request or ""),
         "build_number": os.getenv("BUILD_NUMBER") or "",
-        "head_commit": os.getenv("GIT_COMMIT") or os.getenv("BITBUCKET_COMMIT") or "",
+        "head_commit": current_git_head(),
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "summary": {
             "total_suggestions": len(suggestions),

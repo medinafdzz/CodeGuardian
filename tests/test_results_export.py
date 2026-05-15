@@ -37,3 +37,12 @@ def test_build_results_export_creates_stable_valid_json(tmp_path):
     assert loaded["suggestions"][0]["id"]
     assert loaded["suggestions"][0]["content_hash"]
     assert loaded["suggestions"][0]["status"] == "open"
+
+
+def test_build_results_export_uses_git_commit_env(monkeypatch):
+    monkeypatch.setenv("GIT_COMMIT", "abc123")
+    decision = Decision(issues=[make_issue()])
+
+    data = build_results_export(decision, "project", "repo", "workspace", "7", True)
+
+    assert data["head_commit"] == "abc123"
