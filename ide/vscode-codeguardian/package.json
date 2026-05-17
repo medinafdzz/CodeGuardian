@@ -23,7 +23,11 @@
     "onCommand:codeguardian.selectPullRequest",
     "onCommand:codeguardian.importCredentialsFromEnv",
     "onCommand:codeguardian.clearStoredCredentials",
-    "onCommand:codeguardian.showCredentialStatus"
+    "onCommand:codeguardian.showCredentialStatus",
+    "onCommand:codeguardian.watchJenkinsBuild",
+    "onCommand:codeguardian.stopJenkinsBuildWatch",
+    "onCommand:codeguardian.openGitDiff",
+    "onCommand:codeguardian.openActivityLog"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -93,6 +97,22 @@
       {
         "command": "codeguardian.showCredentialStatus",
         "title": "CodeGuardian: Show Credential Status"
+      },
+      {
+        "command": "codeguardian.watchJenkinsBuild",
+        "title": "CodeGuardian: Watch Jenkins Build"
+      },
+      {
+        "command": "codeguardian.stopJenkinsBuildWatch",
+        "title": "CodeGuardian: Stop Jenkins Build Watch"
+      },
+      {
+        "command": "codeguardian.openGitDiff",
+        "title": "CodeGuardian: Open Git Diff"
+      },
+      {
+        "command": "codeguardian.openActivityLog",
+        "title": "CodeGuardian: Open Activity Log"
       }
     ],
     "configuration": {
@@ -160,7 +180,7 @@
         },
         "codeguardian.autoDownload": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Automatically poll Jenkins and download codeguardian-results.json when a completed build artifact is available for the current branch PR."
         },
         "codeguardian.pollIntervalSeconds": {
@@ -173,6 +193,22 @@
           "type": "boolean",
           "default": false,
           "description": "Allow Apply when codeguardian-results.json lacks enough metadata to validate repository, PR and commit context. Disabled by default for safety."
+        },
+        "codeguardian.watchBuildOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, CodeGuardian starts watching the Jenkins PR build on activation if the local artifact is missing or stale."
+        },
+        "codeguardian.watchBuildOnGitChange": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, CodeGuardian watches for local Git HEAD or branch changes and refreshes the Jenkins build watcher."
+        },
+        "codeguardian.maxBuildWatchMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "description": "Maximum number of minutes to watch a Jenkins PR build before timing out."
         }
       }
     },
@@ -180,17 +216,17 @@
       "view/title": [
         {
           "command": "codeguardian.downloadLatestResults",
-          "when": "view == codeguardianSuggestions || view == codeguardianDashboard",
+          "when": "view == codeguardianSuggestions",
           "group": "navigation"
         },
         {
           "command": "codeguardian.selectPullRequest",
-          "when": "view == codeguardianSuggestions || view == codeguardianDashboard",
+          "when": "view == codeguardianSuggestions",
           "group": "navigation"
         },
         {
           "command": "codeguardian.refreshSuggestions",
-          "when": "view == codeguardianSuggestions || view == codeguardianDashboard",
+          "when": "view == codeguardianSuggestions",
           "group": "navigation"
         }
       ],

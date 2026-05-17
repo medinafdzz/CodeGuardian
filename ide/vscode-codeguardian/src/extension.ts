@@ -32,9 +32,14 @@ type ResultsData = {
   suggestions: Suggestion[];
   dismissedIds: string[];
   artifact: ArtifactState;
+  jenkinsWatch: JenkinsWatchStatus;
+  autoDownload: boolean;
   applyAllowed: boolean;
   applyDisabledReason: string;
   credentialStatus: CredentialStatus;
+  selectedPr: SelectedPullRequestState;
+  profile: ProjectProfile;
+  gitState: GitChangeState;
 };
 
 type ArtifactState = {
@@ -58,6 +63,13 @@ type LocalGitContext = {
   warnings: string[];
 };
 
+type GitChangeState = {
+  isGitRepository: boolean;
+  hasChanges: boolean;
+  changeCount: number;
+  message: string;
+};
+
 type JenkinsAuth = {
   user: string;
   token: string;
@@ -79,8 +91,37 @@ type JenkinsBuild = {
   result?: string | null;
   number?: number;
   url?: string;
+  timestamp?: number;
+  duration?: number;
+  estimatedDuration?: number;
   artifacts?: JenkinsArtifact[];
   actions?: Array<Record<string, unknown>>;
+};
+
+type JenkinsWatchState =
+  | 'idle'
+  | 'waiting_pr'
+  | 'waiting_job'
+  | 'queued'
+  | 'running'
+  | 'success'
+  | 'artifact_ready'
+  | 'artifact_downloaded'
+  | 'failed'
+  | 'timeout'
+  | 'error'
+  | 'unknown';
+
+type JenkinsWatchStatus = {
+  state: JenkinsWatchState;
+  progress?: number;
+  message: string;
+  buildNumber?: number;
+  jobUrl?: string;
+  artifactUrl?: string;
+  artifactReady: boolean;
+  lastUpdatedAt: number;
+  error?: string;
 };
 
 type JenkinsJobCandidate = JenkinsJob & {
@@ -110,6 +151,11 @@ type BitbucketPullRequest = {
   id: number;
   title?: string;
   state?: string;
+  links?: {
+    html?: {
+      href?: string;
+    };
+  };
   source?: {
     branch?: {
       name?: string;
@@ -122,9 +168,35 @@ type BitbucketPullRequest = {
   };
 };
 
+type SelectedPullRequestState = {
+  id?: string;
+  title?: string;
+  sourceBranch?: string;
+  destinationBranch?: string;
+  url?: string;
+};
+
+type ProjectProfile = {
+  profile: string;
+  validationCommand?: string;
+  defaultTab: 'all' | 'issues' | 'optimizations' | 'applied' | 'changed' | 'dismissed';
+  maxRecommended: number;
+  allowApply: boolean;
+  showOptimizations: boolean;
+};
+
+const DEFAULT_PROJECT_PROFILE: ProjectProfile = {
+  profile: 'default',
+  defaultTab: 'all',
+  maxRecommended: 3,
+  allowApply: true,
+  showOptimizations: true,
+};
+
 const DISMISSED_KEY = 'codeguardian.dismissedSuggestionIds';
 const ARTIFACT_STATE_KEY = 'codeguardian.artifactState';
 const SELECTED_PR_KEY = 'codeguardian.selectedPrId';
+const SELECTED_PR_DETAILS_KEY = 'codeguardian.selectedPrDetails';
 const DIFF_SCHEME = 'codeguardian-diff';
 const SECRET_KEYS = {
   jenkinsUser: 'codeguardian.jenkinsUser',
@@ -136,6 +208,11 @@ const SECRET_KEYS = {
 let extensionContext: vscode.ExtensionContext | undefined;
 let diffContentProvider: DiffContentProvider | undefined;
 let credentialCache: CodeGuardianCredentials = { source: 'missing' };
+let buildWatcher: JenkinsBuildWatcher | undefined;
+let envConfigCache: Record<string, string> | undefined;
+let envConfigCachePath: string | undefined;
+let envConfigCacheMtime = 0;
+let outputChannel: vscode.OutputChannel | undefined;
 
 class DiffContentProvider implements vscode.TextDocumentContentProvider {
   private readonly documents = new Map<string, string>();
@@ -202,6 +279,7 @@ class SuggestionsProvider implements vscode.TreeDataProvider<FileNode | Suggesti
 
 class DashboardProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
+  private artifactReadyDownloadInProgress = false;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -241,14 +319,55 @@ class DashboardProvider implements vscode.WebviewViewProvider {
       case 'refresh':
         this.refresh();
         this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
+        void buildWatcher?.start('refresh');
         break;
       case 'download':
-        await downloadLatestResults();
-        this.refresh();
+        if (isDownloadArtifactBlocked(buildWatcher?.status)) {
+          vscode.window.showInformationMessage(downloadArtifactTooltip(buildWatcher?.status));
+          break;
+        }
+        try {
+          if (buildWatcher?.status.artifactReady && buildWatcher.status.artifactUrl) {
+            await downloadResultsFromUrl(buildWatcher.status.artifactUrl, {
+              buildNumber: buildWatcher.status.buildNumber ? String(buildWatcher.status.buildNumber) : undefined,
+            });
+          } else {
+            await downloadLatestResults();
+          }
+          this.refresh();
+        } finally {
+          void buildWatcher?.start('download');
+        }
+        break;
+      case 'downloadReadyArtifact':
+        if (this.artifactReadyDownloadInProgress) {
+          break;
+        }
+        this.artifactReadyDownloadInProgress = true;
+        try {
+          if (buildWatcher?.status.artifactReady && buildWatcher.status.artifactUrl) {
+            await downloadResultsFromUrl(buildWatcher.status.artifactUrl, {
+              buildNumber: buildWatcher.status.buildNumber ? String(buildWatcher.status.buildNumber) : undefined,
+            });
+            buildWatcher.markArtifactDownloaded();
+          } else {
+            const downloaded = await tryDownloadReadyArtifact();
+            if (downloaded) {
+              buildWatcher?.markArtifactDownloaded();
+            }
+          }
+          this.refresh();
+        } finally {
+          this.artifactReadyDownloadInProgress = false;
+        }
         break;
       case 'selectPr':
         await selectPullRequestAndDownload();
         this.refresh();
+        void buildWatcher?.start('selectPr');
+        break;
+      case 'openPr':
+        await openSelectedPullRequest();
         break;
       case 'loadStatuses':
         this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
@@ -272,16 +391,29 @@ class DashboardProvider implements vscode.WebviewViewProvider {
         if (suggestion) {
           await applyOpenSuggestion(suggestion);
           this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
+          this.refresh();
         }
         break;
       case 'undo':
         if (suggestion) {
           await undoAppliedSuggestion(suggestion);
           this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
+          this.refresh();
         }
         break;
       case 'applySelected':
         await applySelectedOpenSuggestions(message.ids || []);
+        this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
+        this.refresh();
+        break;
+      case 'openGitDiff':
+        await openGitDiff();
+        break;
+      case 'openLog':
+        await openActivityLog();
+        break;
+      case 'undoSelected':
+        await undoSelectedAppliedSuggestions(message.ids || []);
         this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
         this.refresh();
         break;
@@ -301,17 +433,204 @@ class DashboardProvider implements vscode.WebviewViewProvider {
         await clearDismissedSuggestions();
         this.refresh();
         break;
+      case 'watchBuild':
+        await buildWatcher?.start('manual');
+        this.refresh();
+        break;
+      case 'stopWatch':
+        buildWatcher?.stop('Stopped by user.');
+        this.refresh();
+        break;
     }
+  }
+}
+
+class JenkinsBuildWatcher {
+  private timer?: NodeJS.Timeout;
+  private startedAt = 0;
+  private activeKey = '';
+  status: JenkinsWatchStatus = idleJenkinsWatchStatus();
+
+  constructor(
+    private readonly provider: SuggestionsProvider,
+    private readonly dashboard: DashboardProvider,
+  ) {}
+
+  async start(reason: string): Promise<void> {
+    if (this.timer) {
+      this.clearTimer();
+    }
+    this.startedAt = Date.now();
+    this.activeKey = reason;
+    this.setStatus({
+      state: 'waiting_pr',
+      message: 'Resolving Bitbucket pull request.',
+      artifactReady: false,
+      lastUpdatedAt: Date.now(),
+    });
+    await this.tick();
+  }
+
+  stop(message = 'Build watcher stopped.'): void {
+    this.clearTimer();
+    this.setStatus({
+      ...this.status,
+      state: 'idle',
+      message,
+      artifactReady: false,
+      lastUpdatedAt: Date.now(),
+    });
+  }
+
+  dispose(): void {
+    this.clearTimer();
+  }
+
+  private async tick(): Promise<void> {
+    if (this.hasTimedOut()) {
+      this.clearTimer();
+      this.setStatus({
+        ...this.status,
+        state: 'timeout',
+        message: 'Jenkins build watch timed out.',
+        artifactReady: false,
+        lastUpdatedAt: Date.now(),
+      });
+      return;
+    }
+
+    try {
+      const local = getLocalGitContext();
+      if (!local.repository || !local.branch || !local.headCommit) {
+        this.setStatus({
+          state: 'unknown',
+          message: local.warnings.join(', ') || 'Local Git context is unavailable.',
+          artifactReady: false,
+          lastUpdatedAt: Date.now(),
+        });
+        this.schedule();
+        return;
+      }
+
+      const pr = await findCurrentBranchPullRequest();
+      if (!pr) {
+        this.setStatus({
+          state: 'waiting_pr',
+          message: 'No open PR found for current branch.',
+          artifactReady: false,
+          lastUpdatedAt: Date.now(),
+        });
+        this.schedule();
+        return;
+      }
+
+      await setSelectedPullRequest(pr);
+      const jobPath = [...baseJobParts(), `PR-${pr.id}`].join('/');
+      const jobUrl = buildJobUrl(jobPathParts(jobPath));
+      logInfo(`Jenkins job resolved: ${jobPath}`);
+      const apiUrl = buildJenkinsJobApiUrl(configValue('jenkinsUrl'), jobPath, 'lastBuild/api/json');
+      const build = await fetchJenkinsBuild(apiUrl);
+      const next = jenkinsStatusFromBuild(build, jobUrl);
+      this.setStatus(next);
+
+      if (next.state === 'artifact_ready' && next.artifactUrl) {
+        if (configBoolean('autoDownload', true)) {
+          await downloadResultsFromUrl(next.artifactUrl, {
+            commit: extractBuildCommit(build),
+            buildNumber: build.number ? String(build.number) : undefined,
+          });
+          this.provider.refresh();
+          this.setStatus({
+            ...next,
+            state: 'artifact_downloaded',
+            message: `Build #${build.number || ''} results downloaded.`,
+            artifactReady: false,
+            progress: 100,
+            lastUpdatedAt: Date.now(),
+          });
+          this.dashboard.refresh();
+          vscode.window.showInformationMessage(`CodeGuardian results downloaded for build #${build.number || 'latest'}.`);
+          this.clearTimer();
+          return;
+        }
+        vscode.window.showInformationMessage('CodeGuardian artifact is ready.');
+        this.clearTimer();
+        return;
+      }
+
+      if (['failed', 'success', 'artifact_downloaded'].includes(next.state)) {
+        this.clearTimer();
+        return;
+      }
+      this.schedule(next.state === 'running');
+    } catch (error) {
+      const message = errorMessage(error);
+      const state: JenkinsWatchState = /404|not found/i.test(message) ? 'waiting_job' : 'error';
+      this.setStatus({
+        state,
+        message: state === 'waiting_job' ? 'Waiting for Jenkins PR job.' : 'Could not reach Jenkins.',
+        artifactReady: false,
+        error: state === 'error' ? message : undefined,
+        lastUpdatedAt: Date.now(),
+      });
+      this.schedule();
+    }
+  }
+
+  private schedule(running = false): void {
+    this.clearTimer();
+    const intervalSeconds = running
+      ? Math.min(Math.max(10, configNumber('pollIntervalSeconds', 45)), 15)
+      : Math.max(15, configNumber('pollIntervalSeconds', 45));
+    this.timer = setTimeout(() => void this.tick(), intervalSeconds * 1000);
+  }
+
+  private clearTimer(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+  }
+
+  private hasTimedOut(): boolean {
+    const maxMs = Math.max(1, configNumber('maxBuildWatchMinutes', 30)) * 60 * 1000;
+    return Boolean(this.startedAt && Date.now() - this.startedAt > maxMs);
+  }
+
+  private setStatus(status: JenkinsWatchStatus): void {
+    if (status.state !== this.status.state || status.buildNumber !== this.status.buildNumber) {
+      logInfo(`Jenkins status: ${status.state}${status.buildNumber ? ` build #${status.buildNumber}` : ''}`);
+    }
+    this.status = status;
+    this.dashboard.refresh();
+  }
+
+  markArtifactDownloaded(): void {
+    this.clearTimer();
+    this.setStatus({
+      ...this.status,
+      state: 'artifact_downloaded',
+      message: this.status.buildNumber ? `Build #${this.status.buildNumber} results downloaded.` : 'Results downloaded.',
+      artifactReady: false,
+      progress: 100,
+      lastUpdatedAt: Date.now(),
+    });
   }
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   extensionContext = context;
+  outputChannel = vscode.window.createOutputChannel('CodeGuardian');
+  context.subscriptions.push(outputChannel);
+  logInfo('Extension activated.');
   diffContentProvider = new DiffContentProvider();
   context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(DIFF_SCHEME, diffContentProvider));
   await initializeCredentials();
+  logInfo(`Credentials source: ${credentialCache.source}`);
+  loadProjectProfile();
   const provider = new SuggestionsProvider();
   const dashboard = new DashboardProvider(context);
+  buildWatcher = new JenkinsBuildWatcher(provider, dashboard);
   const tree = vscode.window.createTreeView('codeguardianSuggestions', {
     treeDataProvider: provider,
     canSelectMany: true,
@@ -322,14 +641,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(vscode.commands.registerCommand('codeguardian.refreshSuggestions', () => {
     provider.refresh();
     dashboard.refresh();
+    void buildWatcher?.start('refresh');
   }));
   context.subscriptions.push(vscode.commands.registerCommand('codeguardian.downloadLatestResults', async () => {
     try {
+      if (isDownloadArtifactBlocked(buildWatcher?.status)) {
+        vscode.window.showInformationMessage(downloadArtifactTooltip(buildWatcher?.status));
+        return;
+      }
       await downloadLatestResults();
       provider.refresh();
       dashboard.refresh();
+      void buildWatcher?.start('download');
     } catch (error) {
       vscode.window.showErrorMessage(`CodeGuardian results download failed: ${String(error)}`);
+      void buildWatcher?.start('download');
     }
   }));
   context.subscriptions.push(vscode.commands.registerCommand('codeguardian.selectPullRequest', async () => {
@@ -337,10 +663,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await selectPullRequestAndDownload();
       provider.refresh();
       dashboard.refresh();
+      void buildWatcher?.start('selectPr');
     } catch (error) {
       vscode.window.showErrorMessage(`CodeGuardian PR selection failed: ${errorMessage(error)}`);
     }
   }));
+  context.subscriptions.push(vscode.commands.registerCommand('codeguardian.watchJenkinsBuild', async () => {
+    await buildWatcher?.start('manual');
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('codeguardian.stopJenkinsBuildWatch', () => {
+    buildWatcher?.stop('Stopped by user.');
+    dashboard.refresh();
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('codeguardian.openGitDiff', () => openGitDiff()));
+  context.subscriptions.push(vscode.commands.registerCommand('codeguardian.openActivityLog', () => openActivityLog()));
   context.subscriptions.push(vscode.commands.registerCommand('codeguardian.openSuggestion', (node?: SuggestionNode) => {
     if (node) {
       openSuggestion(node.suggestion);
@@ -412,10 +748,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     dashboard.refresh();
   });
   context.subscriptions.push(refreshStatuses);
-  startAutoDownloadPolling(context, provider, dashboard);
+  startGitHeadWatcher(context, provider, dashboard);
+  startGitStatusWatcher(context, dashboard);
+  if (configBoolean('watchBuildOnStartup', true) && shouldWatchBuildOnStartup()) {
+    void buildWatcher.start('startup');
+  }
 }
 
-export function deactivate(): void {}
+export function deactivate(): void {
+  buildWatcher?.dispose();
+}
+
+function logInfo(message: string): void {
+  outputChannel?.appendLine(`[${new Date().toISOString()}] INFO ${message}`);
+}
+
+function logWarn(message: string): void {
+  outputChannel?.appendLine(`[${new Date().toISOString()}] WARN ${message}`);
+}
+
+function logError(message: string): void {
+  outputChannel?.appendLine(`[${new Date().toISOString()}] ERROR ${message}`);
+}
 
 function workspaceRoot(): vscode.WorkspaceFolder {
   const folder = vscode.workspace.workspaceFolders?.[0];
@@ -426,15 +780,102 @@ function workspaceRoot(): vscode.WorkspaceFolder {
 }
 
 function configValue(name: string): string {
+  const envValue = envConfigValue(name);
+  if (envValue) {
+    return envValue;
+  }
   return vscode.workspace.getConfiguration('codeguardian').get<string>(name) || '';
 }
 
-function configBoolean(name: string): boolean {
-  return vscode.workspace.getConfiguration('codeguardian').get<boolean>(name) || false;
+function configBoolean(name: string, fallback = false): boolean {
+  const envValue = envConfigValue(name);
+  if (envValue) {
+    return ['1', 'true', 'yes', 'on'].includes(envValue.toLowerCase());
+  }
+  return vscode.workspace.getConfiguration('codeguardian').get<boolean>(name) ?? fallback;
 }
 
 function configNumber(name: string, fallback: number): number {
+  const envValue = envConfigValue(name);
+  if (envValue && !Number.isNaN(Number(envValue))) {
+    return Number(envValue);
+  }
   return vscode.workspace.getConfiguration('codeguardian').get<number>(name) || fallback;
+}
+
+function envConfigValue(name: string): string {
+  const mappings: Record<string, string> = {
+    resultsFile: 'CODEGUARDIAN_RESULTS_FILE',
+    pythonPath: 'CODEGUARDIAN_PYTHON_PATH',
+    cliPath: 'CODEGUARDIAN_CLI_PATH',
+    jenkinsArtifactUrl: 'CODEGUARDIAN_JENKINS_ARTIFACT_URL',
+    jenkinsUrl: 'CODEGUARDIAN_JENKINS_URL',
+    jenkinsJobPath: 'CODEGUARDIAN_JENKINS_JOB_PATH',
+    jenkinsBuildSelector: 'CODEGUARDIAN_JENKINS_BUILD_SELECTOR',
+    jenkinsArtifactName: 'CODEGUARDIAN_JENKINS_ARTIFACT_NAME',
+    autoDownload: 'CODEGUARDIAN_AUTO_DOWNLOAD',
+    pollIntervalSeconds: 'CODEGUARDIAN_POLL_INTERVAL_SECONDS',
+    watchBuildOnStartup: 'CODEGUARDIAN_WATCH_BUILD_ON_STARTUP',
+    watchBuildOnGitChange: 'CODEGUARDIAN_WATCH_BUILD_ON_GIT_CHANGE',
+    maxBuildWatchMinutes: 'CODEGUARDIAN_MAX_BUILD_WATCH_MINUTES',
+    allowApplyWithUnknownArtifact: 'CODEGUARDIAN_ALLOW_APPLY_WITH_UNKNOWN_ARTIFACT',
+  };
+  const key = mappings[name];
+  const value = key ? getWorkspaceEnvConfig()[key] || '' : '';
+  return ['resultsFile', 'pythonPath', 'cliPath'].includes(name) ? normalizeEnvPathValue(value) : value;
+}
+
+function getWorkspaceEnvConfig(): Record<string, string> {
+  const envFile = findWorkspaceEnvFile();
+  const mtime = envFile ? fs.statSync(envFile).mtimeMs : 0;
+  if (envConfigCache && envConfigCachePath === envFile && envConfigCacheMtime === mtime) {
+    return envConfigCache;
+  }
+  envConfigCache = envFile ? parseEnvFile(envFile) : {};
+  envConfigCachePath = envFile;
+  envConfigCacheMtime = mtime;
+  return envConfigCache;
+}
+
+function normalizeEnvPathValue(value: string): string {
+  return value.replace(/\\\\/g, '\\');
+}
+
+function idleJenkinsWatchStatus(): JenkinsWatchStatus {
+  return {
+    state: 'idle',
+    message: 'Jenkins watcher idle.',
+    artifactReady: false,
+    lastUpdatedAt: Date.now(),
+  };
+}
+
+function shouldWatchBuildOnStartup(): boolean {
+  const data = loadResultsData(false);
+  return !data.suggestions.length || ['stale', 'mismatch', 'unknown'].includes(data.artifact.validation);
+}
+
+function startGitHeadWatcher(
+  context: vscode.ExtensionContext,
+  provider: SuggestionsProvider,
+  dashboard: DashboardProvider,
+): void {
+  if (!configBoolean('watchBuildOnGitChange', true)) {
+    return;
+  }
+  let lastHead = `${currentGitBranchSync() || ''}:${currentGitHeadSync() || ''}`;
+  const interval = setInterval(() => {
+    const currentHead = currentGitHeadSync() || '';
+    const currentBranch = currentGitBranchSync() || '';
+    const key = `${currentBranch}:${currentHead}`;
+    if (currentHead && key !== lastHead) {
+      lastHead = key;
+      provider.refresh();
+      dashboard.refresh();
+      void buildWatcher?.start('git-change');
+    }
+  }, Math.max(15, configNumber('pollIntervalSeconds', 45)) * 1000);
+  context.subscriptions.push({ dispose: () => clearInterval(interval) });
 }
 
 function startAutoDownloadPolling(
@@ -472,6 +913,22 @@ function startAutoDownloadPolling(
   const intervalMs = Math.max(15, configNumber('pollIntervalSeconds', 45)) * 1000;
   const timer = setInterval(() => void poll(), intervalMs);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
+}
+
+function startGitStatusWatcher(context: vscode.ExtensionContext, dashboard: DashboardProvider): void {
+  let lastState = gitChangeStateKey(currentGitChangeState());
+  const timer = setInterval(() => {
+    const nextState = gitChangeStateKey(currentGitChangeState());
+    if (nextState !== lastState) {
+      lastState = nextState;
+      dashboard.refresh();
+    }
+  }, 5000);
+  context.subscriptions.push({ dispose: () => clearInterval(timer) });
+}
+
+function gitChangeStateKey(state: GitChangeState): string {
+  return `${state.isGitRepository}:${state.hasChanges}:${state.changeCount}`;
 }
 
 function runWorkspaceCommand(command: string, args: string[]): Promise<string> {
@@ -520,6 +977,27 @@ function currentRepositoryInfoSync(): RepositoryInfo | undefined {
   } catch {
     return undefined;
   }
+}
+
+function currentGitChangeState(): GitChangeState {
+  try {
+    runWorkspaceCommandSync('git', ['rev-parse', '--is-inside-work-tree']);
+  } catch {
+    return {
+      isGitRepository: false,
+      hasChanges: false,
+      changeCount: 0,
+      message: 'Current workspace is not a Git repository',
+    };
+  }
+  const status = runWorkspaceCommandSync('git', ['status', '--porcelain']);
+  const changes = status.split(/\r?\n/).filter((line) => line.trim()).length;
+  return {
+    isGitRepository: true,
+    hasChanges: changes > 0,
+    changeCount: changes,
+    message: changes > 0 ? `${changes} local Git change${changes === 1 ? '' : 's'}` : 'No local Git changes to show',
+  };
 }
 
 async function currentRepositorySlug(): Promise<string> {
@@ -571,6 +1049,48 @@ function getLocalGitContext(): LocalGitContext {
   };
 }
 
+function loadProjectProfile(): ProjectProfile {
+  const file = path.join(workspaceRoot().uri.fsPath, '.codeguardian.json');
+  if (!fs.existsSync(file)) {
+    logInfo('Project profile missing; using defaults.');
+    return DEFAULT_PROJECT_PROFILE;
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    const profile = normalizeProjectProfile(raw);
+    logInfo(`Project profile loaded: ${profile.profile}`);
+    return profile;
+  } catch (error) {
+    logWarn(`Invalid .codeguardian.json; using defaults. ${errorMessage(error)}`);
+    return DEFAULT_PROJECT_PROFILE;
+  }
+}
+
+function normalizeProjectProfile(raw: Record<string, unknown>): ProjectProfile {
+  const profile = typeof raw.profile === 'string' && raw.profile.trim() ? raw.profile.trim() : DEFAULT_PROJECT_PROFILE.profile;
+  const defaultTab = normalizeTab(String(raw.defaultTab || DEFAULT_PROJECT_PROFILE.defaultTab));
+  const maxRecommended = typeof raw.maxRecommended === 'number' && Number.isFinite(raw.maxRecommended)
+    ? Math.max(0, Math.min(20, Math.floor(raw.maxRecommended)))
+    : DEFAULT_PROJECT_PROFILE.maxRecommended;
+  return {
+    profile,
+    validationCommand: typeof raw.validationCommand === 'string' ? raw.validationCommand : undefined,
+    defaultTab,
+    maxRecommended,
+    allowApply: typeof raw.allowApply === 'boolean' ? raw.allowApply : DEFAULT_PROJECT_PROFILE.allowApply,
+    showOptimizations: typeof raw.showOptimizations === 'boolean' ? raw.showOptimizations : DEFAULT_PROJECT_PROFILE.showOptimizations,
+  };
+}
+
+function normalizeTab(value: string): ProjectProfile['defaultTab'] {
+  const normalized = value.toLowerCase().replace(/\s+/g, '');
+  if (['all', 'issues', 'optimizations', 'applied', 'changed', 'dismissed'].includes(normalized)) {
+    return normalized as ProjectProfile['defaultTab'];
+  }
+  logWarn(`Invalid defaultTab in .codeguardian.json: ${value}`);
+  return DEFAULT_PROJECT_PROFILE.defaultTab;
+}
+
 function absoluteWorkspacePath(relativePath: string): string {
   if (path.isAbsolute(relativePath)) {
     return relativePath;
@@ -587,13 +1107,19 @@ function loadSuggestions(): Suggestion[] {
 }
 
 function loadResultsData(showMessage = true): ResultsData {
+  const profile = loadProjectProfile();
   const empty = (): ResultsData => ({
     suggestions: [],
     dismissedIds: dismissedSuggestionIds(),
     artifact: { status: 'missing', validation: 'unknown', message: 'no local results file' },
+    jenkinsWatch: buildWatcher?.status || idleJenkinsWatchStatus(),
+    autoDownload: configBoolean('autoDownload', true),
     applyAllowed: false,
     applyDisabledReason: 'No CodeGuardian results artifact is loaded.',
     credentialStatus: getCredentialStatus(),
+    selectedPr: selectedPullRequestState(),
+    profile,
+    gitState: currentGitChangeState(),
   });
   try {
     const file = resultsPath();
@@ -605,15 +1131,23 @@ function loadResultsData(showMessage = true): ResultsData {
     }
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     const artifact = currentArtifactState(data);
+    const applyAllowed = profile.allowApply && isApplyAllowedForArtifact(artifact);
+    logInfo(`Suggestions loaded: ${Array.isArray(data.suggestions) ? data.suggestions.length : 0}. Artifact validation: ${artifact.validation}.`);
     return {
       suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
       dismissedIds: dismissedSuggestionIds(),
       artifact,
-      applyAllowed: isApplyAllowedForArtifact(artifact),
-      applyDisabledReason: applyDisabledReason(artifact),
+      jenkinsWatch: buildWatcher?.status || idleJenkinsWatchStatus(),
+      autoDownload: configBoolean('autoDownload', true),
+      applyAllowed,
+      applyDisabledReason: profile.allowApply ? applyDisabledReason(artifact) : 'Apply is disabled by .codeguardian.json.',
       credentialStatus: getCredentialStatus(),
+      selectedPr: selectedPullRequestState(),
+      profile,
+      gitState: currentGitChangeState(),
     };
   } catch (error) {
+    logError(`Failed to load CodeGuardian results: ${errorMessage(error)}`);
     vscode.window.showErrorMessage(`Failed to load CodeGuardian results: ${String(error)}`);
     return empty();
   }
@@ -627,16 +1161,19 @@ async function dismissSuggestion(id: string): Promise<void> {
   const ids = new Set(dismissedSuggestionIds());
   ids.add(id);
   await extensionContext?.workspaceState.update(DISMISSED_KEY, Array.from(ids));
+  logInfo(`Dismissed suggestion: ${id}`);
 }
 
 async function restoreDismissedSuggestion(id: string): Promise<void> {
   const ids = new Set(dismissedSuggestionIds());
   ids.delete(id);
   await extensionContext?.workspaceState.update(DISMISSED_KEY, Array.from(ids));
+  logInfo(`Restored dismissed suggestion: ${id}`);
 }
 
 async function clearDismissedSuggestions(): Promise<void> {
   await extensionContext?.workspaceState.update(DISMISSED_KEY, []);
+  logInfo('Cleared dismissed suggestions.');
 }
 
 function currentArtifactState(data?: Record<string, unknown>): ArtifactState {
@@ -663,6 +1200,7 @@ function currentArtifactState(data?: Record<string, unknown>): ArtifactState {
 
 async function setArtifactState(state: ArtifactState): Promise<void> {
   await extensionContext?.workspaceState.update(ARTIFACT_STATE_KEY, state);
+  logInfo(`Artifact state: ${state.status}, validation: ${state.validation}.`);
 }
 
 function stringFromMetadata(data: Record<string, unknown>, keys: string[]): string | undefined {
@@ -812,6 +1350,56 @@ function applyDisabledReason(artifact: ArtifactState): string {
   return `Apply disabled because artifact validation is UNKNOWN: ${artifact.message || 'missing metadata'}.`;
 }
 
+function isDownloadArtifactBlocked(status?: JenkinsWatchStatus): boolean {
+  return ['running', 'queued', 'waiting_job', 'waiting_pr'].includes(status?.state || '');
+}
+
+function downloadArtifactTooltip(status?: JenkinsWatchStatus): string {
+  return isDownloadArtifactBlocked(status) ? 'Blocked while Jenkins build is running' : 'Download latest CodeGuardian artifact';
+}
+
+function selectedPullRequestState(): SelectedPullRequestState {
+  return extensionContext?.workspaceState.get<SelectedPullRequestState>(SELECTED_PR_DETAILS_KEY, {}) || {};
+}
+
+async function setSelectedPullRequest(pr: BitbucketPullRequest | SelectedPullRequestState): Promise<void> {
+  const id = String(pr.id || '');
+  if (!id) {
+    return;
+  }
+  const isBitbucketPr = 'source' in pr || 'destination' in pr;
+  const selected = pr as SelectedPullRequestState;
+  const details: SelectedPullRequestState = {
+    id,
+    title: pr.title,
+    sourceBranch: isBitbucketPr ? (pr as BitbucketPullRequest).source?.branch?.name : selected.sourceBranch,
+    destinationBranch: isBitbucketPr ? (pr as BitbucketPullRequest).destination?.branch?.name : selected.destinationBranch,
+    url: isBitbucketPr ? (pr as BitbucketPullRequest).links?.html?.href : selected.url,
+  };
+  await extensionContext?.workspaceState.update(SELECTED_PR_KEY, id);
+  await extensionContext?.workspaceState.update(SELECTED_PR_DETAILS_KEY, details);
+  logInfo(`Pull request selected: PR #${id}${details.title ? ` ${details.title}` : ''}`);
+}
+
+async function openSelectedPullRequest(): Promise<void> {
+  const selected = selectedPullRequestState();
+  if (!selected.id) {
+    vscode.window.showInformationMessage('No pull request selected.');
+    return;
+  }
+  let url = selected.url;
+  if (!url) {
+    try {
+      const repo = await currentRepositoryInfo();
+      url = `https://bitbucket.org/${repo.workspace}/${repo.repo}/pull-requests/${selected.id}`;
+    } catch {
+      vscode.window.showWarningMessage('No pull request URL available.');
+      return;
+    }
+  }
+  await vscode.env.openExternal(vscode.Uri.parse(url));
+}
+
 async function initializeCredentials(): Promise<void> {
   credentialCache = await getCodeGuardianCredentials();
   warnIfEnvFileIsNotIgnored();
@@ -829,12 +1417,6 @@ async function getCodeGuardianCredentials(): Promise<CodeGuardianCredentials> {
     return { ...importedSecrets, source: 'env' };
   }
 
-  const fromSettings = credentialsFromSettings();
-  if (hasAnyCredential(fromSettings)) {
-    void vscode.window.showWarningMessage('CodeGuardian is using credentials from settings. Import them into SecretStorage for safer storage.');
-    return { ...fromSettings, source: 'settings' };
-  }
-
   return { source: 'missing' };
 }
 
@@ -850,15 +1432,6 @@ async function credentialsFromSecretStorage(): Promise<Partial<CodeGuardianCrede
   };
 }
 
-function credentialsFromSettings(): Partial<CodeGuardianCredentials> {
-  return {
-    jenkinsUser: configValue('jenkinsUser'),
-    jenkinsApiToken: configValue('jenkinsApiToken'),
-    bitbucketEmail: configValue('bitbucketEmail'),
-    bitbucketApiToken: configValue('bitbucketApiToken'),
-  };
-}
-
 function hasAnyCredential(credentials: Partial<CodeGuardianCredentials>): boolean {
   return Boolean(credentials.jenkinsUser || credentials.jenkinsApiToken || credentials.bitbucketEmail || credentials.bitbucketApiToken);
 }
@@ -867,6 +1440,7 @@ async function importCredentialsFromEnv(showMessages: boolean): Promise<boolean>
   if (!extensionContext) {
     return false;
   }
+  envConfigCache = undefined;
   const envFile = findWorkspaceEnvFile();
   if (!envFile) {
     if (showMessages) {
@@ -1003,6 +1577,7 @@ async function tryDownloadReadyArtifact(): Promise<string | undefined> {
 }
 
 async function downloadResultsFromUrl(url: string, metadata: Partial<ArtifactState> = {}): Promise<void> {
+  logInfo('Artifact download started.');
   const body = await downloadText(url, jenkinsAuth());
   let parsed: Record<string, unknown>;
 
@@ -1010,6 +1585,7 @@ async function downloadResultsFromUrl(url: string, metadata: Partial<ArtifactSta
     parsed = JSON.parse(body);
   } catch (error) {
     await setArtifactState({ status: 'error', validation: 'unknown', downloadedAt: new Date().toISOString(), message: `invalid JSON from ${url}` });
+    logError(`Artifact download failed: invalid JSON. ${errorMessage(error)}`);
     throw new Error(`Downloaded Jenkins artifact is not valid JSON: ${String(error)}`);
   }
 
@@ -1027,6 +1603,7 @@ async function downloadResultsFromUrl(url: string, metadata: Partial<ArtifactSta
     downloadedAt: new Date().toISOString(),
     message: 'downloaded from Jenkins artifact',
   });
+  logInfo(`Artifact downloaded to ${resultsPath()}.`);
   vscode.window.showInformationMessage(`Downloaded CodeGuardian results to ${resultsPath()}`);
 }
 
@@ -1044,11 +1621,16 @@ async function selectPullRequestAndDownload(): Promise<void> {
 
   const match = selected.name.match(/PR-(\d+)/i);
   if (match) {
-    await extensionContext?.workspaceState.update(SELECTED_PR_KEY, match[1]);
+    const bitbucketPr = await findOpenBitbucketPullRequestById(Number(match[1]));
+    await setSelectedPullRequest(bitbucketPr || { id: match[1] });
   }
-  const ready = selected.url ? await readyArtifactForJob(selected.url, true) : undefined;
+  const ready = selected.url ? await readyArtifactForJob(selected.url, false) : undefined;
   if (ready) {
     await downloadResultsFromUrl(ready.artifactUrl, { commit: ready.commit, buildNumber: ready.buildNumber });
+    return;
+  }
+  if (selected.url) {
+    vscode.window.showInformationMessage('Selected pull request. CodeGuardian artifact is not ready yet.');
     return;
   }
   const url = buildArtifactUrlForJobCandidate(selected);
@@ -1085,7 +1667,7 @@ async function resolveReadyArtifact(allowPrompt: boolean): Promise<{ artifactUrl
 async function resolveCurrentBranchJobUrl(allowPrompt: boolean): Promise<string | undefined> {
   const bitbucketPr = await findCurrentBranchPullRequest();
   if (bitbucketPr) {
-    await extensionContext?.workspaceState.update(SELECTED_PR_KEY, String(bitbucketPr.id));
+    await setSelectedPullRequest(bitbucketPr);
     const job = await findJenkinsJobForPrId(bitbucketPr.id);
     return job ? jobUrlFromCandidate(job) : jobUrlForPrId(bitbucketPr.id);
   }
@@ -1178,6 +1760,20 @@ async function findCurrentBranchPullRequest(): Promise<BitbucketPullRequest | un
     return selected?.pr;
   }
   return undefined;
+}
+
+async function findOpenBitbucketPullRequestById(id: number): Promise<BitbucketPullRequest | undefined> {
+  const auth = bitbucketAuth();
+  if (!auth) {
+    return undefined;
+  }
+  try {
+    const repo = await currentRepositoryInfo();
+    const prs = await listOpenBitbucketPullRequests(repo, auth);
+    return prs.find((pr) => pr.id === id);
+  } catch {
+    return undefined;
+  }
 }
 
 async function listOpenBitbucketPullRequests(
@@ -1340,6 +1936,95 @@ function buildJobUrl(parts: string[]): string {
   return `${baseUrl}/${jenkinsJobUrlPath(parts)}`;
 }
 
+function buildJenkinsJobApiUrl(jenkinsUrl: string, jobPath: string, apiPath = 'lastBuild/api/json'): string {
+  const baseUrl = jenkinsUrl.trim().replace(/\/+$/, '');
+  const parts = jobPath.split('/').map((part) => part.trim()).filter(Boolean);
+  const suffix = apiPath.split('/').map(encodeURIComponent).join('/');
+  if (!baseUrl || !parts.length) {
+    throw new Error('Configure codeguardian.jenkinsUrl and codeguardian.jenkinsJobPath first.');
+  }
+  return `${baseUrl}/${jenkinsJobUrlPath(parts)}/${suffix}`;
+}
+
+async function fetchJenkinsBuild(apiUrl: string): Promise<JenkinsBuild> {
+  const tree = 'number,building,result,timestamp,duration,estimatedDuration,url,artifacts[fileName,relativePath],actions[lastBuiltRevision[SHA1],buildsByBranchName[*],parameters[name,value]]';
+  const separator = apiUrl.includes('?') ? '&' : '?';
+  return await downloadJson(`${apiUrl}${separator}tree=${encodeURIComponent(tree)}`) as JenkinsBuild;
+}
+
+function jenkinsStatusFromBuild(build: JenkinsBuild, jobUrl: string): JenkinsWatchStatus {
+  const artifact = findCodeGuardianArtifact(build);
+  const buildNumber = build.number;
+  const base: JenkinsWatchStatus = {
+    state: 'unknown',
+    message: 'Jenkins build status unknown.',
+    buildNumber,
+    jobUrl,
+    artifactReady: false,
+    lastUpdatedAt: Date.now(),
+  };
+
+  if (!buildNumber) {
+    return { ...base, state: 'queued', message: 'Waiting for Jenkins build to start.' };
+  }
+  if (build.building) {
+    const progress = estimatedBuildProgress(build);
+    return {
+      ...base,
+      state: 'running',
+      progress,
+      message: progress ? `Build #${buildNumber} running - ${progress}%` : `Build #${buildNumber} running.`,
+    };
+  }
+  if (build.result === 'SUCCESS') {
+    if (artifact?.relativePath) {
+      const buildUrl = (build.url || `${jobUrl.replace(/\/+$/, '')}/${build.number}`).replace(/\/+$/, '');
+      return {
+        ...base,
+        state: 'artifact_ready',
+        progress: 100,
+        artifactReady: true,
+        artifactUrl: `${buildUrl}/artifact/${artifact.relativePath.split('/').map(encodeURIComponent).join('/')}`,
+        message: `Build #${buildNumber} artifact ready.`,
+      };
+    }
+    return {
+      ...base,
+      state: 'success',
+      progress: 100,
+      message: `Build #${buildNumber} completed but codeguardian-results.json was not archived.`,
+    };
+  }
+  if (['FAILURE', 'ABORTED', 'UNSTABLE'].includes(String(build.result || '').toUpperCase())) {
+    return {
+      ...base,
+      state: 'failed',
+      progress: 100,
+      message: `Build #${buildNumber} ${build.result}.`,
+    };
+  }
+  return {
+    ...base,
+    state: 'queued',
+    message: `Build #${buildNumber} queued.`,
+  };
+}
+
+function findCodeGuardianArtifact(build: JenkinsBuild): JenkinsArtifact | undefined {
+  const artifactName = configValue('jenkinsArtifactName').trim() || 'codeguardian-results.json';
+  return (build.artifacts || []).find((item) =>
+    item.fileName === artifactName || Boolean(item.relativePath?.endsWith(artifactName))
+  );
+}
+
+function estimatedBuildProgress(build: JenkinsBuild): number | undefined {
+  if (!build.timestamp || !build.estimatedDuration || build.estimatedDuration <= 0) {
+    return undefined;
+  }
+  const elapsed = Date.now() - build.timestamp;
+  return Math.max(1, Math.min(95, Math.floor((elapsed / build.estimatedDuration) * 100)));
+}
+
 async function readyArtifactForJob(
   jobUrl: string,
   throwWhenNotReady: boolean,
@@ -1407,7 +2092,15 @@ function extractBuildCommit(build: JenkinsBuild): string | undefined {
 }
 
 function jenkinsJobUrlPath(parts: string[]): string {
-  return parts.map((part) => `job/${encodeURIComponent(part)}`).join('/');
+  return parts.map((part) => `job/${encodeURIComponent(decodePathSegment(part))}`).join('/');
+}
+
+function decodePathSegment(part: string): string {
+  try {
+    return decodeURIComponent(part);
+  } catch {
+    return part;
+  }
 }
 
 function prNumber(name: string): number {
@@ -1474,9 +2167,13 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     suggestions: data.suggestions,
     dismissedIds: data.dismissedIds,
     artifact: data.artifact,
+    jenkinsWatch: data.jenkinsWatch,
     applyAllowed: data.applyAllowed,
     applyDisabledReason: data.applyDisabledReason,
     credentialStatus: data.credentialStatus,
+    selectedPr: data.selectedPr,
+    profile: data.profile,
+    gitState: data.gitState,
     activeFile,
   }).replace(/</g, '\\u003c');
   return `<!DOCTYPE html>
@@ -1503,74 +2200,230 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     .shell {
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      padding: 10px;
+      gap: 8px;
+      padding: 8px;
     }
-    .toolbar {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
+    .header-card {
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      padding: 6px;
+      background: var(--vscode-editorWidget-background);
+      display: flex;
+      flex-direction: column;
       gap: 6px;
+    }
+    .context-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .context-line {
+      color: var(--vscode-sideBarTitle-foreground);
+      font-weight: 700;
+      font-size: 13px;
+      line-height: 18px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .actions-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .next-step {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      line-height: 1.35;
+      padding-top: 2px;
     }
     .wide-action {
       grid-column: 1 / -1;
     }
-    .banner {
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 4px;
-      padding: 7px;
-      background: var(--vscode-editorWidget-background);
-      color: var(--vscode-descriptionForeground);
-      line-height: 1.35;
+    .pr-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      grid-column: 1 / -1;
     }
-    .banner strong {
+    .compact-action {
+      min-width: 72px;
+      white-space: nowrap;
+    }
+    .banner {
+      padding: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      align-items: center;
+      max-height: 52px;
+      overflow: hidden;
+    }
+    .banner-tag {
+      border: 1px solid var(--vscode-badge-background);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 16px;
+      color: var(--vscode-badge-foreground);
+      background: var(--vscode-badge-background);
+      white-space: nowrap;
+    }
+    .banner-tag.success {
+      border-color: var(--vscode-testing-iconPassed);
+      background: color-mix(in srgb, var(--vscode-testing-iconPassed) 24%, transparent);
       color: var(--vscode-foreground);
     }
+    .banner-tag.warning {
+      border-color: var(--vscode-editorWarning-foreground);
+      background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 24%, transparent);
+      color: var(--vscode-foreground);
+    }
+    .banner-tag.error {
+      border-color: var(--vscode-testing-iconFailed);
+      background: color-mix(in srgb, var(--vscode-testing-iconFailed) 24%, transparent);
+      color: var(--vscode-foreground);
+    }
+    .banner-tag.unknown {
+      border-color: var(--vscode-descriptionForeground);
+      background: var(--vscode-input-background);
+      color: var(--vscode-descriptionForeground);
+    }
+    .build-status {
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .build-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      min-width: 0;
+    }
+    .build-line .message {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .progress {
+      height: 5px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--vscode-editorWidget-border, var(--vscode-panel-border));
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0;
+      background: var(--vscode-progressBar-background, var(--vscode-button-background));
+      transition: width .2s ease;
+    }
     .button {
-      border: 1px solid var(--vscode-button-border, transparent);
-      color: var(--vscode-button-foreground);
-      background: var(--vscode-button-background);
+      border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
       border-radius: 3px;
       padding: 5px 8px;
       cursor: pointer;
       text-align: center;
     }
     .button:hover {
-      background: var(--vscode-button-hoverBackground);
-    }
-    .button.secondary {
-      color: var(--vscode-button-secondaryForeground);
-      background: var(--vscode-button-secondaryBackground);
-    }
-    .button.secondary:hover {
       background: var(--vscode-button-secondaryHoverBackground);
     }
+    .button:focus {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
+    }
     .summary {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 6px;
-    }
-    .metric {
-      border: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border));
-      border-radius: 4px;
-      padding: 7px;
-      background: var(--vscode-editorWidget-background);
-    }
-    .metric-value {
-      font-weight: 700;
-      font-size: 18px;
-      line-height: 22px;
-    }
-    .metric-label {
       color: var(--vscode-descriptionForeground);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: .04em;
+      font-size: 12px;
+      line-height: 1.35;
     }
     .filters {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 6px;
     }
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
+    .filter-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .advanced-header {
+      border: 0;
+      padding: 0;
+      color: var(--vscode-textLink-foreground);
+      background: transparent;
+      cursor: pointer;
+      text-align: left;
+      font-size: 12px;
+    }
+    .advanced-header:hover {
+      color: var(--vscode-textLink-activeForeground);
+    }
+    .advanced-filters.collapsed {
+      display: none;
+    }
+    .link-button {
+      border: 0;
+      padding: 0;
+      color: var(--vscode-textLink-foreground);
+      background: transparent;
+      cursor: pointer;
+    }
+    .link-button:hover {
+      color: var(--vscode-textLink-activeForeground);
+    }
+    .link-button:disabled {
+      color: var(--vscode-disabledForeground);
+      cursor: not-allowed;
+    }
+    .tabs {
+      display: flex;
+      gap: 4px;
+      overflow-x: auto;
+      padding-bottom: 1px;
+    }
+    .filter-label {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      margin-top: -2px;
+    }
+    .tab {
+      border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
+      border-radius: 999px;
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+      padding: 3px 9px;
+      cursor: pointer;
+      white-space: nowrap;
+      font-size: 12px;
+    }
+    .tab:hover {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+    .tab.active {
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      border-color: var(--vscode-focusBorder);
+    }
+    #search,
     .filters input,
     .filters select {
       min-width: 0;
@@ -1579,6 +2432,13 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       background: var(--vscode-input-background);
       border-radius: 3px;
       padding: 4px 6px;
+    }
+    #search {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .filters-header {
+      margin-top: 2px;
     }
     .filters .wide {
       grid-column: 1 / -1;
@@ -1609,6 +2469,68 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       font-size: 11px;
       letter-spacing: .05em;
     }
+    .section-title.collapsible {
+      cursor: pointer;
+    }
+    .section-title-main {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .section-chevron {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      width: 10px;
+    }
+    .file-tree-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding-top: 6px;
+    }
+    .file-tree-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .file-tree-item span:first-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .section-heading {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .section-subtitle {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .recommended {
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editorWidget-background);
+      padding: 6px;
+      margin-top: 4px;
+    }
+    .recommended .section-title {
+      margin-top: 0;
+      border-top: 0;
+      padding-top: 0;
+    }
+    .recommended-list {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
     .file-header {
       display: flex;
       align-items: center;
@@ -1631,8 +2553,8 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     }
     .suggestion {
       display: grid;
-      grid-template-columns: 16px 18px 1fr auto;
-      gap: 3px;
+      grid-template-columns: 16px 18px minmax(0, 1fr) auto;
+      gap: 4px;
       align-items: center;
       border-radius: 4px;
       padding: 6px;
@@ -1654,6 +2576,12 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       font-size: 11px;
     }
     .title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+    }
+    .compact-path {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -1680,12 +2608,16 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       border-radius: 3px;
       background: var(--vscode-badge-background);
       color: var(--vscode-badge-foreground);
+      white-space: nowrap;
     }
     .status.applied {
       color: var(--vscode-testing-iconPassed);
     }
     .status.changed {
       color: var(--vscode-testing-iconFailed);
+    }
+    .status.dismissed {
+      color: var(--vscode-descriptionForeground);
     }
     .meta {
       grid-column: 3 / 5;
@@ -1726,6 +2658,10 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     .detail p {
       margin: 6px 0;
       line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
     }
     pre {
       margin: 6px 0;
@@ -1743,8 +2679,14 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       margin-top: 8px;
     }
     .button:disabled {
-      opacity: .45;
+      border-color: var(--vscode-panel-border);
+      color: var(--vscode-disabledForeground);
+      background: var(--vscode-input-background);
+      opacity: 1;
       cursor: not-allowed;
+    }
+    .button:disabled:hover {
+      background: var(--vscode-input-background);
     }
     .selection-summary {
       color: var(--vscode-descriptionForeground);
@@ -1757,21 +2699,62 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       text-align: center;
       line-height: 1.4;
     }
+    .results-placeholder {
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      padding: 12px;
+      background: var(--vscode-editorWidget-background);
+      color: var(--vscode-descriptionForeground);
+      line-height: 1.4;
+    }
+    .results-placeholder h3 {
+      margin: 0 0 6px;
+      color: var(--vscode-sideBarTitle-foreground);
+      font-size: 13px;
+    }
+    .results-placeholder p {
+      margin: 0;
+    }
+    .show-more {
+      width: 100%;
+      margin-top: 8px;
+    }
+    .paging-info {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      margin-top: 6px;
+    }
   </style>
 </head>
 <body>
   <div class="shell">
-    <div class="toolbar">
-      <button class="button" id="download">Download Artifact</button>
-      <button class="button secondary" id="refresh">Refresh Suggestions</button>
-      <button class="button secondary wide-action" id="selectPr">Select Open PR</button>
-      <button class="button wide-action" id="applySelected" disabled>Apply Selected</button>
+    <div class="header-card">
+      <div class="context-row">
+        <div class="context-line" id="contextLine">CodeGuardian &middot; PR: Not selected &middot; Profile: default</div>
+        <button class="button dashboard-action compact-action" id="openPr" disabled>Open PR</button>
+        <button class="button secondary compact-action" id="selectPr">Select PR</button>
+      </div>
+      <div class="banner" id="artifactBanner"></div>
+      <div class="build-status" id="buildStatus"></div>
+      <div class="actions-row">
+        <button class="button dashboard-action" id="refresh">Refresh</button>
+        <button class="button dashboard-action" id="download">Download Results</button>
+        <button class="button secondary" id="openGitDiff">Open Git Diff</button>
+        <button class="button" id="applySelected" disabled>Apply Selected</button>
+        <button class="button secondary" id="undoSelected" disabled>Undo Selected</button>
+        <button class="button secondary" id="openLog">Activity Log</button>
+      </div>
+      <div class="selection-summary" id="selectionSummary"></div>
+      <div class="next-step" id="nextStep"></div>
     </div>
-    <div class="banner" id="artifactBanner"></div>
-    <div class="selection-summary" id="selectionSummary"></div>
+    <div id="recommended"></div>
     <div class="summary" id="summary"></div>
-    <div class="filters">
-      <input class="wide" id="search" type="search" placeholder="Search file, function or text">
+    <div class="filter-bar filters-header"><span id="filterCount">Filters &middot; 0 active</span><div class="filter-actions"><button class="link-button" id="clearFilters">Clear filters</button><button class="link-button" id="clearDismissed">Clear dismissed</button></div></div>
+    <input class="wide" id="search" type="search" placeholder="Search file">
+    <div class="filter-label">Filter by type</div>
+    <div class="tabs" id="tabs"></div>
+    <button class="advanced-header" id="advancedToggle">Advanced filters</button>
+    <div class="filters advanced-filters collapsed" id="advancedFilters">
       <select id="severity"></select>
       <select id="source"></select>
       <select id="limit">
@@ -1783,7 +2766,6 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       <select id="status"></select>
       <label class="check"><input id="currentFile" type="checkbox"> Current file only</label>
       <label class="check"><input id="showDismissed" type="checkbox"> Show dismissed</label>
-      <button class="button secondary wide-action" id="clearDismissed">Clear dismissed</button>
     </div>
     <div id="list"></div>
   </div>
@@ -1795,10 +2777,16 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       severity: 'all',
       source: 'all',
       status: 'all',
+      tab: 'all',
       limit: 0,
       currentFile: false,
       showDismissed: false,
+      advancedExpanded: false,
+      fileTreeExpanded: false,
+      allSuggestionsExpanded: true,
+      visibleLimit: 50,
       expandedId: '',
+      scrollToId: '',
       statuses: {},
       selectedIds: new Set()
     };
@@ -1808,15 +2796,29 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     const norm = (value) => String(value || '').toLowerCase();
     const titleOf = (item) => item.target_name || item.problem || item.solution || item.id;
     const severityOf = (item) => item.severity || item.source || 'info';
+    let artifactReadyDownloadRequested = false;
 
-    byId('download').addEventListener('click', () => vscode.postMessage({ command: 'download' }));
+    byId('download').addEventListener('click', () => {
+      if (isDownloadArtifactBlocked()) return;
+      vscode.postMessage({ command: 'download' });
+    });
     byId('refresh').addEventListener('click', () => vscode.postMessage({ command: 'refresh' }));
     byId('selectPr').addEventListener('click', () => vscode.postMessage({ command: 'selectPr' }));
+    byId('openPr').addEventListener('click', () => vscode.postMessage({ command: 'openPr' }));
     byId('applySelected').addEventListener('click', () => {
-      const openIds = Array.from(filters.selectedIds).filter((id) => statusOf(id) === 'open' && !dismissedIds.has(id));
-      vscode.postMessage({ command: 'applySelected', ids: openIds });
+      vscode.postMessage({ command: 'applySelected', ids: Array.from(filters.selectedIds) });
     });
+    byId('undoSelected').addEventListener('click', () => {
+      vscode.postMessage({ command: 'undoSelected', ids: Array.from(filters.selectedIds) });
+    });
+    byId('openGitDiff').addEventListener('click', () => vscode.postMessage({ command: 'openGitDiff' }));
+    byId('openLog').addEventListener('click', () => vscode.postMessage({ command: 'openLog' }));
     byId('clearDismissed').addEventListener('click', () => vscode.postMessage({ command: 'clearDismissed' }));
+    byId('clearFilters').addEventListener('click', () => clearFilters());
+    byId('advancedToggle').addEventListener('click', () => {
+      filters.advancedExpanded = !filters.advancedExpanded;
+      render();
+    });
     window.addEventListener('message', (event) => {
       const message = event.data;
       if (message?.command === 'statuses' && message.statuses) {
@@ -1830,12 +2832,13 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
         filters.severity = byId('severity').value;
         filters.source = byId('source').value;
         filters.status = byId('status').value;
-        filters.limit = Number(byId('limit').value || 0);
-        filters.currentFile = byId('currentFile').checked;
-        filters.showDismissed = byId('showDismissed').checked;
-        render();
-      });
-    }
+          filters.limit = Number(byId('limit').value || 0);
+          filters.currentFile = byId('currentFile').checked;
+          filters.showDismissed = byId('showDismissed').checked;
+          filters.visibleLimit = 50;
+          render();
+        });
+      }
 
     function uniqueValues(key, fallback) {
       const values = Array.from(new Set(state.suggestions.map((item) => item[key]).filter(Boolean)));
@@ -1850,21 +2853,54 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       fillSelect('source', uniqueValues('source', 'All sources'));
       fillSelect('status', [
         { value: 'all', label: 'All statuses' },
-        { value: 'open', label: 'OPEN' },
-        { value: 'applied', label: 'APPLIED' },
-        { value: 'changed', label: 'CHANGED' },
+        { value: 'open', label: 'Ready' },
+        { value: 'applied', label: 'Applied' },
+        { value: 'changed', label: 'Needs refresh' },
       ]);
+      renderTabs();
     }
 
     function fillSelect(id, options) {
       byId(id).innerHTML = options.map((option) => '<option value="' + escapeHtml(option.value) + '">' + escapeHtml(option.label) + '</option>').join('');
     }
 
+    function renderTabs() {
+      const tabs = [
+        ['all', 'All'],
+        ['issues', 'Issues'],
+        ['optimizations', 'Optimizations'],
+        ['applied', 'Applied'],
+        ['changed', 'Changed'],
+        ['dismissed', 'Dismissed'],
+      ];
+      byId('tabs').innerHTML = tabs.map(([value, label]) =>
+        '<button class="tab' + (filters.tab === value ? ' active' : '') + '" data-tab="' + value + '">' + label + '</button>'
+      ).join('');
+      for (const tab of byId('tabs').querySelectorAll('.tab')) {
+        tab.addEventListener('click', () => {
+          filters.tab = tab.getAttribute('data-tab') || 'all';
+          filters.visibleLimit = 50;
+          if (filters.tab === 'dismissed') {
+            byId('showDismissed').checked = true;
+            filters.showDismissed = true;
+          }
+          render();
+        });
+      }
+    }
+
     function filteredSuggestions() {
       const search = norm(filters.search);
+      const profile = state.profile || {};
       let items = state.suggestions.filter((item) => {
         const itemStatus = statusOf(item.id, item);
+        if (profile.showOptimizations === false && filters.tab === 'all' && isOptimization(item)) return false;
         if (!filters.showDismissed && dismissedIds.has(item.id)) return false;
+        if (filters.tab === 'issues' && isOptimization(item)) return false;
+        if (filters.tab === 'optimizations' && !isOptimization(item)) return false;
+        if (filters.tab === 'applied' && itemStatus !== 'applied') return false;
+        if (filters.tab === 'changed' && itemStatus !== 'changed') return false;
+        if (filters.tab === 'dismissed' && !dismissedIds.has(item.id)) return false;
         if (filters.severity !== 'all' && item.severity !== filters.severity) return false;
         if (filters.source !== 'all' && item.source !== filters.source) return false;
         if (filters.status !== 'all' && itemStatus !== filters.status) return false;
@@ -1886,41 +2922,345 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       return 0;
     }
 
+    function isOptimization(item) {
+      return norm(item.source) === 'optimization';
+    }
+
     function render() {
+      renderTopActions();
+      renderFilterCount();
+      renderAdvancedFilters();
+      renderTabs();
       renderArtifactBanner();
+      renderJenkinsBuildStatus();
       renderSelectionSummary();
+      renderNextStep();
       renderSummary();
+      if (shouldHideSuggestions()) {
+        filters.expandedId = '';
+        byId('recommended').innerHTML = '';
+        byId('list').innerHTML = staleResultsPlaceholder();
+        return;
+      }
       const items = filteredSuggestions();
+      const visibleItems = items.slice(0, filters.visibleLimit);
       if (filters.expandedId && !items.find((item) => item.id === filters.expandedId)) {
         filters.expandedId = '';
       }
-      renderList(items);
+      renderRecommended(items);
+      renderList(visibleItems, items.length);
+    }
+
+    function shouldHideSuggestions() {
+      const watchState = norm((state.jenkinsWatch || {}).state);
+      const artifactState = norm((state.artifact || {}).validation);
+      if (hasCurrentValidArtifact()) {
+        return false;
+      }
+      return ['waiting', 'waiting_pr', 'waiting_job', 'queued', 'running'].includes(watchState) ||
+        artifactState === 'stale' ||
+        artifactState === 'mismatch';
+    }
+
+    function hasCurrentValidArtifact() {
+      const artifact = state.artifact || {};
+      return norm(artifact.validation) === 'valid' && norm(artifact.status || 'downloaded') === 'downloaded';
+    }
+
+    function staleResultsPlaceholder() {
+      const watchState = norm((state.jenkinsWatch || {}).state);
+      const artifactState = norm((state.artifact || {}).validation);
+      if (watchState === 'failed') {
+        return placeholderPanel('Jenkins build failed', 'Jenkins build failed. Latest suggestions are not available.');
+      }
+      if (artifactState === 'stale' || artifactState === 'mismatch') {
+        return placeholderPanel('Waiting for latest CodeGuardian results', 'Results are outdated for the current commit. Wait for Jenkins or download valid results.');
+      }
+      return placeholderPanel('Waiting for latest CodeGuardian results', 'Jenkins is analyzing the current PR. Suggestions will appear when the new results artifact is available.');
+    }
+
+    function placeholderPanel(title, text) {
+      return '<div class="results-placeholder"><h3>' + escapeHtml(title) + '</h3><p>' + escapeHtml(text) + '</p></div>';
+    }
+
+    function renderTopActions() {
+      const download = byId('download');
+      const blocked = isDownloadArtifactBlocked();
+      download.disabled = blocked;
+      download.title = blocked ? 'Blocked while Jenkins build is running' : 'Download latest CodeGuardian artifact';
+
+      const selectPr = byId('selectPr');
+      const openPr = byId('openPr');
+      const openGitDiff = byId('openGitDiff');
+      const contextLine = byId('contextLine');
+      const selectedPr = state.selectedPr || {};
+      const hasPr = Boolean(selectedPr.id);
+      const profileName = (state.profile || {}).profile || 'default';
+      const prLabel = hasPr ? truncatePrLabel(selectedPr.title || ('#' + selectedPr.id)) : 'Not selected';
+      contextLine.textContent = joinStatus(['CodeGuardian', 'PR: ' + prLabel, 'Profile: ' + profileName]);
+      contextLine.title = hasPr ? 'PR #' + selectedPr.id + (selectedPr.title ? ': ' + selectedPr.title : '') + ' | Profile: ' + profileName : 'No pull request selected | Profile: ' + profileName;
+      selectPr.textContent = hasPr ? 'Change PR' : 'Select PR';
+      selectPr.title = hasPr
+        ? 'PR #' + selectedPr.id + (selectedPr.title ? ': ' + selectedPr.title : '')
+        : 'Select pull request';
+      selectPr.className = hasPr ? 'button dashboard-action' : 'button';
+      openPr.disabled = !hasPr;
+      openPr.title = hasPr ? 'Open PR #' + selectedPr.id + (selectedPr.title ? ': ' + selectedPr.title : '') : 'No pull request selected';
+      const gitState = state.gitState || {};
+      openGitDiff.disabled = !gitState.isGitRepository || !gitState.hasChanges;
+      openGitDiff.title = !gitState.isGitRepository
+        ? 'Current workspace is not a Git repository'
+        : gitState.hasChanges ? gitState.message : 'No local Git changes to show';
+
+      const clearDismissed = byId('clearDismissed');
+      clearDismissed.disabled = dismissedIds.size === 0;
+      clearDismissed.title = dismissedIds.size === 0 ? 'No dismissed suggestions' : 'Clear locally dismissed suggestions';
+    }
+
+    function isDownloadArtifactBlocked() {
+      return ['running', 'queued', 'waiting', 'waiting_job', 'waiting_pr'].includes(norm((state.jenkinsWatch || {}).state)) &&
+        !hasCurrentValidArtifact();
+    }
+
+    function truncatePrLabel(value) {
+      const text = String(value || '').trim();
+      return text.length > 34 ? text.slice(0, 31).trimEnd() + '...' : text;
+    }
+
+    function renderFilterCount() {
+      const count = activeFilterCount();
+      byId('filterCount').textContent = 'Filters ' + String.fromCharCode(183) + ' ' + count + ' active';
+      byId('clearFilters').disabled = count === 0;
+    }
+
+    function renderAdvancedFilters() {
+      byId('advancedFilters').className = 'filters advanced-filters' + (filters.advancedExpanded ? '' : ' collapsed');
+      byId('advancedToggle').textContent = (filters.advancedExpanded ? String.fromCharCode(9662) : String.fromCharCode(8250)) + ' Advanced filters';
+    }
+
+    function activeFilterCount() {
+      return [
+        filters.search.trim(),
+        filters.severity !== 'all',
+        filters.source !== 'all',
+        filters.status !== 'all',
+        filters.currentFile,
+        filters.showDismissed,
+        filters.tab !== 'all',
+      ].filter(Boolean).length;
+    }
+
+    function clearFilters() {
+      filters.search = '';
+      filters.severity = 'all';
+      filters.source = 'all';
+      filters.status = 'all';
+      filters.currentFile = false;
+      filters.showDismissed = false;
+      filters.advancedExpanded = false;
+      filters.tab = 'all';
+      filters.visibleLimit = 50;
+      byId('search').value = '';
+      byId('severity').value = 'all';
+      byId('source').value = 'all';
+      byId('status').value = 'all';
+      byId('currentFile').checked = false;
+      byId('showDismissed').checked = false;
+      render();
     }
 
     function renderArtifactBanner() {
       const artifact = state.artifact || {};
-      const status = artifact.status || 'unknown';
       const downloadedAt = artifact.downloadedAt ? new Date(artifact.downloadedAt).toLocaleString() : 'not downloaded';
-      const pr = artifact.prId || 'unknown PR';
-      const build = artifact.buildNumber || 'latest successful build';
-      const message = artifact.message ? ' | ' + artifact.message : '';
-      const credentials = state.credentialStatus?.message || 'Credentials: missing';
-      byId('artifactBanner').innerHTML =
-        '<strong>Artifact:</strong> ' + escapeHtml((artifact.validation || status).toUpperCase()) +
-        ' | <strong>PR:</strong> ' + escapeHtml(pr) +
-        ' | <strong>Build:</strong> ' + escapeHtml(build) +
-        ' | <strong>Commit:</strong> ' + escapeHtml((artifact.commit || artifact.localCommit || 'unknown').slice(0, 7)) +
-        ' | ' + escapeHtml(credentials) +
-        ' | <strong>Last download:</strong> ' + escapeHtml(downloadedAt) +
-        escapeHtml(message);
+      const validation = norm(artifact.validation || 'unknown');
+      const commit = artifact.commit || '';
+      const localCommit = artifact.localCommit || '';
+      const commitMatches = commit && localCommit && (commit.startsWith(localCommit) || localCommit.startsWith(commit));
+      const repoMessage = artifact.message || '';
+      const credentials = state.credentialStatus || { configured: false, source: 'missing', message: 'Credentials: missing' };
+      const tags = [
+        bannerTag('Artifact ' + artifactStatusText(validation), artifactClass(validation, artifact.status), (artifact.validation || 'unknown').toUpperCase()),
+        bannerTag('Commit ' + (commit && commitMatches ? 'OK' : commit ? 'check' : 'unknown'), commit ? (commitMatches ? 'success' : validation === 'stale' ? 'error' : 'warning') : 'warning', commit ? shortHash(commit) + (commitMatches ? ', matches local HEAD' : localCommit ? ', local HEAD is ' + shortHash(localCommit) : '') : 'missing commit metadata'),
+        bannerTag('Credentials ' + (credentials.configured ? 'OK' : 'missing'), credentialClass(credentials.source), credentials.message || 'Credentials: missing'),
+        bannerTag(artifact.downloadedAt ? 'Downloaded' : 'Not downloaded', artifact.downloadedAt ? 'success' : 'unknown', downloadedAt),
+        bannerTag('Repo ' + repoStatusText(validation, repoMessage), repoClass(validation, repoMessage), repoMessage || 'repository metadata unavailable')
+      ];
+      byId('artifactBanner').innerHTML = tags.join('');
+    }
+
+    function artifactStatusText(validation) {
+      if (validation === 'valid') return 'valid';
+      if (validation === 'stale') return 'stale';
+      if (validation === 'mismatch') return 'mismatch';
+      return 'unknown';
+    }
+
+    function repoStatusText(validation, message) {
+      if (validation === 'valid') return 'OK';
+      if (validation === 'mismatch') return 'mismatch';
+      if (norm(message).includes('missing repository')) return 'unknown';
+      return validation === 'unknown' ? 'unknown' : 'check';
+    }
+
+    function bannerTag(label, tone, title) {
+      return '<span class="banner-tag ' + escapeHtml(tone) + '" title="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
+    }
+
+    function artifactClass(validation, status) {
+      if (validation === 'valid') return 'success';
+      if (validation === 'mismatch' || status === 'error') return 'error';
+      if (validation === 'stale' || validation === 'unknown') return 'warning';
+      return 'unknown';
+    }
+
+    function credentialClass(source) {
+      if (source === 'secretStorage' || source === 'env') return 'success';
+      if (source === 'settings') return 'warning';
+      if (source === 'missing') return 'error';
+      return 'unknown';
+    }
+
+    function buildClass(watch, artifact) {
+      if (watch.state === 'artifact_ready' || watch.state === 'artifact_downloaded') return 'success';
+      if (watch.state === 'running' || watch.state === 'queued' || watch.state === 'waiting_job' || watch.state === 'waiting_pr') return 'warning';
+      if (watch.state === 'failed' || watch.state === 'timeout' || watch.state === 'error' || artifact.status === 'error') return 'error';
+      return artifact.buildNumber ? 'success' : 'unknown';
+    }
+
+    function buildTooltip(watch, artifact) {
+      if (watch.buildNumber) {
+        return 'Build #' + watch.buildNumber + (watch.progress ? ' running, estimated progress ' + watch.progress + '%' : '') + (watch.message ? ' - ' + watch.message : '');
+      }
+      return artifact.buildNumber ? 'Build ' + artifact.buildNumber : 'Build unavailable';
+    }
+
+    function repoClass(validation, message) {
+      if (validation === 'mismatch') return 'error';
+      if (validation === 'valid') return 'success';
+      if (norm(message).includes('missing repository')) return 'warning';
+      return validation === 'unknown' ? 'warning' : 'unknown';
+    }
+
+    function renderJenkinsBuildStatus() {
+      const watch = state.jenkinsWatch || { state: 'idle', message: 'Jenkins watcher idle.', artifactReady: false };
+      if (norm(watch.state) === 'artifact_ready' && state.autoDownload && watch.artifactUrl && !artifactReadyDownloadRequested) {
+        artifactReadyDownloadRequested = true;
+        vscode.postMessage({ command: 'downloadReadyArtifact' });
+      }
+      if (norm(watch.state) !== 'artifact_ready') {
+        artifactReadyDownloadRequested = false;
+      }
+      const tone = jenkinsTone(watch.state);
+      const status = jenkinsDisplayText(watch);
+      const tooltip = jenkinsTooltip(watch);
+      const progress = shouldShowProgress(watch)
+        ? '<div class="progress" title="' + escapeHtml(String(watch.progress) + '%') + '"><div class="progress-fill" style="width:' + Math.max(0, Math.min(100, watch.progress)) + '%"></div></div>'
+        : '';
+      byId('buildStatus').innerHTML =
+        '<div class="build-line ' + tone + '" title="' + escapeHtml(tooltip) + '">' +
+        '<span class="message">' + escapeHtml(status) + '</span>' +
+        '</div>' + progress;
+    }
+
+    function shouldShowProgress(watch) {
+      return norm(watch.state) === 'running' && typeof watch.progress === 'number';
+    }
+
+    function jenkinsDisplayText(watch) {
+      const value = norm(watch.state);
+      const build = watch.buildNumber ? 'Build #' + watch.buildNumber : '';
+      if (value === 'idle' || (!watch.buildNumber && !['waiting_pr', 'waiting_job', 'queued', 'running'].includes(value))) return joinStatus(['Jenkins', 'Idle']);
+      if (value === 'waiting_pr' || value === 'waiting_job' || value === 'queued') return joinStatus(['Jenkins', 'Waiting']);
+      if (value === 'running') return joinStatus(['Jenkins', build, typeof watch.progress === 'number' ? 'Running ' + watch.progress + '%' : 'Running']);
+      if (value === 'artifact_ready') return joinStatus(['Jenkins', build, 'Artifact ready']);
+      if (value === 'artifact_downloaded') return joinStatus(['Jenkins', build, 'Results downloaded']);
+      if (value === 'failed') return joinStatus(['Jenkins', build, 'Failed']);
+      if (value === 'timeout') return joinStatus(['Jenkins', 'Watch timeout']);
+      if (value === 'error') return joinStatus(['Jenkins', 'Unavailable']);
+      if (value === 'success') return joinStatus(['Jenkins', build, 'Completed']);
+      return joinStatus(['Jenkins', 'Idle']);
+    }
+
+    function joinStatus(parts) {
+      return parts.filter(Boolean).join(' ' + String.fromCharCode(183) + ' ');
+    }
+
+    function jenkinsTooltip(watch) {
+      return norm(watch.state) === 'idle' ? 'No active PR build detected.' : (watch.message || jenkinsDisplayText(watch));
+    }
+
+    function jenkinsTone(state) {
+      const value = norm(state);
+      if (['success', 'artifact_ready', 'artifact_downloaded'].includes(value)) return 'success';
+      if (['running', 'queued', 'waiting_pr', 'waiting_job'].includes(value)) return 'warning';
+      if (['failed', 'timeout', 'error'].includes(value)) return 'error';
+      return 'unknown';
     }
 
     function renderSelectionSummary() {
       const selected = Array.from(filters.selectedIds);
-      const open = selected.filter((id) => statusOf(id) === 'open' && !dismissedIds.has(id));
-      byId('selectionSummary').textContent = selected.length ? selected.length + ' selected / ' + open.length + ' applicable' : 'No suggestions selected';
-      byId('applySelected').disabled = open.length === 0 || !state.applyAllowed;
-      byId('applySelected').title = state.applyAllowed ? '' : state.applyDisabledReason;
+      const summary = selectionSummary(selected);
+      byId('selectionSummary').textContent = selected.length
+        ? summary.selected + ' selected - ' + summary.ready + ' ready - ' + summary.applied + ' applied - ' + summary.skipped + ' skipped' + skippedReasonText(summary)
+        : 'No suggestions selected';
+      const hidden = shouldHideSuggestions();
+      byId('applySelected').disabled = hidden || summary.ready === 0 || !state.applyAllowed;
+      byId('applySelected').title = hidden ? 'Latest CodeGuardian results are not ready' : state.applyAllowed ? '' : state.applyDisabledReason;
+      byId('undoSelected').disabled = summary.applied === 0 || !state.applyAllowed;
+      byId('undoSelected').title = state.applyAllowed ? '' : state.applyDisabledReason;
+    }
+
+    function renderNextStep() {
+      byId('nextStep').textContent = 'Next step: ' + nextStepMessage();
+    }
+
+    function nextStepMessage() {
+      const watchState = norm((state.jenkinsWatch || {}).state);
+      const artifactState = norm((state.artifact || {}).validation);
+      if (artifactState === 'stale' || artifactState === 'mismatch') {
+        return 'download valid results for the current commit.';
+      }
+      if (!hasCurrentValidArtifact() && ['running', 'queued', 'waiting', 'waiting_pr', 'waiting_job'].includes(watchState)) {
+        return 'wait for Jenkins to finish. Results will be available when the build completes.';
+      }
+      if (watchState === 'failed') {
+        return 'refresh or wait for a successful Jenkins build.';
+      }
+      if (!state.suggestions.length) {
+        return 'refresh results or check Jenkins build status.';
+      }
+      if (filters.selectedIds.size > 0) {
+        return 'review the diff or apply selected suggestions.';
+      }
+      if (state.suggestions.some((item) => statusOf(item.id, item) === 'applied')) {
+        return 'review Git diff or run project checks.';
+      }
+      if (state.suggestions.some((item) => statusOf(item.id, item) === 'open' && !dismissedIds.has(item.id))) {
+        return 'review the recommended fixes.';
+      }
+      return 'refresh results or check Jenkins build status.';
+    }
+
+    function selectionSummary(ids) {
+      const summary = { selected: ids.length, ready: 0, applied: 0, changed: 0, dismissed: 0, skipped: 0 };
+      for (const id of ids) {
+        const item = state.suggestions.find((candidate) => candidate.id === id);
+        const status = statusOf(id, item);
+        if (dismissedIds.has(id)) summary.dismissed += 1;
+        if (status === 'applied') summary.applied += 1;
+        if (status === 'changed') summary.changed += 1;
+        if (status === 'open' && !dismissedIds.has(id)) summary.ready += 1;
+      }
+      summary.skipped = summary.selected - summary.ready;
+      return summary;
+    }
+
+    function skippedReasonText(summary) {
+      const reasons = [];
+      if (summary.applied) reasons.push(summary.applied + ' applied');
+      if (summary.changed) reasons.push(summary.changed + ' needs refresh');
+      if (summary.dismissed) reasons.push(summary.dismissed + ' dismissed');
+      return reasons.length ? ' (' + reasons.join(', ') + ')' : '';
     }
 
     function renderSummary() {
@@ -1929,97 +3269,169 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       const optimization = state.suggestions.filter((item) => norm(item.source) === 'optimization').length;
       const visible = filteredSuggestions().length;
       const dismissed = dismissedIds.size;
-      byId('summary').innerHTML = [
-        metric(total, 'Total'),
-        metric(critical, 'Critical'),
-        metric(optimization, 'Optimization'),
-        metric(visible, 'Visible'),
-        metric(dismissed, 'Dismissed')
-      ].join('');
+      byId('summary').textContent =
+        total + ' total ' + String.fromCharCode(183) + ' ' +
+        critical + ' critical ' + String.fromCharCode(183) + ' ' +
+        optimization + ' optimizations ' + String.fromCharCode(183) + ' ' +
+        visible + ' visible ' + String.fromCharCode(183) + ' ' +
+        dismissed + ' dismissed';
     }
 
-    function metric(value, label) {
-      return '<div class="metric"><div class="metric-value">' + value + '</div><div class="metric-label">' + label + '</div></div>';
-    }
-
-    function renderList(items) {
+    function renderList(items, totalFiltered) {
       if (!state.suggestions.length) {
-        byId('list').innerHTML = '<div class="empty">No local results found. Use Download Artifact or configure codeguardian.resultsFile.</div>';
+        byId('list').innerHTML = '<div class="empty">No local results found. Use Download Results or configure codeguardian.resultsFile.</div>';
         return;
       }
       if (!items.length) {
         byId('list').innerHTML = '<div class="empty">No suggestions match the current filters.</div>';
         return;
       }
-      const issueItems = items.filter((item) => norm(item.source) !== 'optimization');
-      const optimizationItems = items.filter((item) => norm(item.source) === 'optimization');
-      byId('list').innerHTML = [
-        sectionBlock('Issues', issueItems, items),
-        sectionBlock('Optimizations', optimizationItems, items)
-      ].filter(Boolean).join('');
+      const paging = '<div class="paging-info">Showing ' + items.length + ' of ' + totalFiltered + ' suggestions</div>' +
+        (items.length < totalFiltered ? '<button class="button secondary show-more" id="showMore">Show 50 more</button>' : '');
+      byId('list').innerHTML = allSuggestionsBlock(items, items) + fileTreeBlock(items) + paging;
       for (const item of items) {
-        const row = byId('suggestion-' + item.id);
-        if (row) {
-          row.addEventListener('click', () => {
-            filters.expandedId = filters.expandedId === item.id ? '' : item.id;
-            render();
-          });
-          row.addEventListener('dblclick', () => vscode.postMessage({ command: 'open', id: item.id }));
-        }
-        const checkbox = byId('select-' + item.id);
-        if (checkbox) {
-          checkbox.addEventListener('click', (event) => event.stopPropagation());
-          checkbox.addEventListener('change', () => {
-            if (checkbox.checked) {
-              filters.selectedIds.add(item.id);
-            } else {
-              filters.selectedIds.delete(item.id);
-            }
-            renderSelectionSummary();
-          });
-        }
+        wireSuggestionControls(item, '');
       }
-      wireDetail(items);
+      byId('showMore')?.addEventListener('click', () => {
+        filters.visibleLimit += 50;
+        render();
+      });
+      byId('fileTreeHeader')?.addEventListener('click', () => {
+        filters.fileTreeExpanded = !filters.fileTreeExpanded;
+        render();
+      });
+      byId('allSuggestionsHeader')?.addEventListener('click', () => {
+        filters.allSuggestionsExpanded = !filters.allSuggestionsExpanded;
+        render();
+      });
+      wireDetail(items, '');
+      scrollToExpandedSuggestion();
     }
 
-    function sectionBlock(title, sectionItems, allItems) {
-      if (!sectionItems.length) return '';
-      const groups = new Map();
-      for (const item of sectionItems) {
-        if (!groups.has(item.file)) groups.set(item.file, []);
-        groups.get(item.file).push(item);
+    function wireSuggestionControls(item, prefix) {
+      const row = byId(prefix + 'suggestion-' + item.id);
+      if (row) {
+        row.addEventListener('click', () => {
+          filters.expandedId = filters.expandedId === item.id ? '' : item.id;
+          render();
+        });
+        row.addEventListener('dblclick', () => vscode.postMessage({ command: 'open', id: item.id }));
       }
-      return '<div class="section-title"><span>' + escapeHtml(title) + '</span><span class="count">' + sectionItems.length + '</span></div>' +
+      const checkbox = byId(prefix + 'select-' + item.id);
+      if (checkbox) {
+        checkbox.addEventListener('click', (event) => event.stopPropagation());
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) {
+            filters.selectedIds.add(item.id);
+          } else {
+            filters.selectedIds.delete(item.id);
+          }
+          render();
+        });
+      }
+    }
+
+    function scrollToExpandedSuggestion() {
+      if (!filters.scrollToId) return;
+      const target = byId('suggestion-' + filters.scrollToId);
+      filters.scrollToId = '';
+      target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function renderRecommended(items) {
+      const recommendations = recommendedSuggestions(items);
+      if (!recommendations.length) {
+        byId('recommended').innerHTML = '';
+        return;
+      }
+      byId('recommended').innerHTML =
+        '<section class="recommended">' +
+        '<div class="section-title"><div class="section-heading"><span>Recommended fixes</span><span class="section-subtitle">' +
+        recommendations.length + ' ready to review</span></div><span class="count">' + recommendations.length + '</span></div>' +
+        '<div class="recommended-list">' + recommendations.map((item) => suggestionBlock(item, recommendations, 'rec-')).join('') + '</div></section>';
+      for (const item of recommendations) {
+        wireSuggestionControls(item, 'rec-');
+      }
+      wireDetail(recommendations, 'rec-');
+    }
+
+    function recommendedSuggestions(items) {
+      const maxRecommended = Math.max(0, Number((state.profile || {}).maxRecommended || 3));
+      return items
+        .filter((item) => statusOf(item.id, item) === 'open' && (!dismissedIds.has(item.id) || filters.showDismissed))
+        .sort((a, b) => severityRank(b) - severityRank(a) || sourceRank(b) - sourceRank(a) || Number(a.line || 0) - Number(b.line || 0))
+        .slice(0, maxRecommended);
+    }
+
+    function sourceRank(item) {
+      return isOptimization(item) ? 0 : 1;
+    }
+
+    function fileTreeBlock(sectionItems) {
+      if (!sectionItems.length) return '';
+      const groups = groupByFile(sectionItems);
+      const header = collapsibleHeader('fileTreeHeader', 'File Tree', groups.size + ' files', sectionItems.length, filters.fileTreeExpanded);
+      if (!filters.fileTreeExpanded) return header;
+      return header + '<div class="file-tree-list">' +
+        Array.from(groups.entries()).map(([file, values]) =>
+          '<div class="file-tree-item"><span title="' + escapeHtml(file) + '">' + escapeHtml(file) + '</span><span class="count">' + values.length + '</span></div>'
+        ).join('') +
+        '</div>';
+    }
+
+    function allSuggestionsBlock(sectionItems, allItems) {
+      if (!sectionItems.length) return '';
+      const groups = groupByFile(sectionItems);
+      const header = collapsibleHeader('allSuggestionsHeader', 'All suggestions', sectionItems.length + ' visible', sectionItems.length, filters.allSuggestionsExpanded);
+      if (!filters.allSuggestionsExpanded) return header;
+      return header +
         Array.from(groups.entries()).map(([file, values]) => {
           return '<section class="file"><div class="file-header"><span>' + escapeHtml(file) + '</span><span class="count">' + values.length + '</span></div>' +
             values.map((item) => suggestionBlock(item, allItems)).join('') + '</section>';
         }).join('');
     }
 
-    function suggestionBlock(item, items) {
-      return suggestionRow(item) + (item.id === filters.expandedId ? detailBlock(item, items) : '');
+    function groupByFile(items) {
+      const groups = new Map();
+      for (const item of items) {
+        if (!groups.has(item.file)) groups.set(item.file, []);
+        groups.get(item.file).push(item);
+      }
+      return groups;
     }
 
-    function suggestionRow(item) {
+    function collapsibleHeader(id, title, subtitle, count, expanded) {
+      const chevron = expanded ? '&#9662;' : '&#8250;';
+      return '<div class="section-title collapsible" id="' + id + '">' +
+        '<div class="section-title-main"><span class="section-chevron">' + chevron + '</span><div class="section-heading"><span>' + escapeHtml(title) + '</span><span class="section-subtitle">' + escapeHtml(subtitle) + '</span></div></div>' +
+        '<span class="count">' + count + '</span></div>';
+    }
+
+    function suggestionBlock(item, items, prefix = '') {
+      return suggestionRow(item, prefix) + (item.id === filters.expandedId ? detailBlock(item, items, prefix) : '');
+    }
+
+    function suggestionRow(item, prefix = '') {
       const selected = item.id === filters.expandedId ? ' selected' : '';
       const chevron = item.id === filters.expandedId ? '&#9662;' : '&#8250;';
       const itemStatus = statusOf(item.id, item);
       const checked = filters.selectedIds.has(item.id) ? ' checked' : '';
-      const checkboxDisabled = itemStatus === 'open' && !dismissedIds.has(item.id) ? '' : ' disabled';
-      const statusMark = '<span class="status ' + escapeHtml(itemStatus) + '">' + escapeHtml(itemStatus.toUpperCase()) + '</span>';
-      return '<div id="suggestion-' + escapeHtml(item.id) + '" class="suggestion' + selected + '">' +
+      const checkboxDisabled = ['open', 'applied'].includes(itemStatus) && !dismissedIds.has(item.id) ? '' : ' disabled';
+      const statusMark = statusLabel(dismissedIds.has(item.id) ? 'dismissed' : itemStatus);
+      return '<div id="' + prefix + 'suggestion-' + escapeHtml(item.id) + '" class="suggestion' + selected + '">' +
         '<div class="chevron">' + chevron + '</div>' +
-        '<label class="selectbox"><input id="select-' + escapeHtml(item.id) + '" type="checkbox"' + checked + checkboxDisabled + '></label>' +
+        '<label class="selectbox"><input id="' + prefix + 'select-' + escapeHtml(item.id) + '" type="checkbox"' + checked + checkboxDisabled + '></label>' +
         '<div class="title">' + escapeHtml(titleOf(item)) + '</div>' +
         statusMark +
         '<div class="meta">' +
         '<span class="pill ' + escapeHtml(norm(severityOf(item))) + '">' + escapeHtml(severityOf(item)) + '</span>' +
-        '<span>L' + escapeHtml(item.line || '-') + '</span>' +
         '<span class="pill ' + escapeHtml(norm(item.source)) + '">' + escapeHtml(item.source || 'unknown') + '</span>' +
+        '<span>L' + escapeHtml(item.line || '-') + '</span>' +
+        '<span class="compact-path">' + escapeHtml(compactFile(item.file)) + '</span>' +
         '</div></div>';
     }
 
-    function detailBlock(item, items) {
+    function detailBlock(item, items, prefix = '') {
       const index = items.findIndex((candidate) => candidate.id === item.id);
       const prevDisabled = index <= 0 ? ' disabled' : '';
       const nextDisabled = index >= items.length - 1 ? ' disabled' : '';
@@ -2031,45 +3443,49 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       const applyTitle = state.applyAllowed ? '' : ' title="' + escapeHtml(state.applyDisabledReason) + '"';
       const dismissCommand = isDismissed ? 'restoreDismissed' : 'dismiss';
       const dismissLabel = isDismissed ? 'Restore' : 'Dismiss';
-      return '<div class="detail" id="detail-' + escapeHtml(item.id) + '"><h3>' + escapeHtml(titleOf(item)) + '</h3>' +
-        '<div class="meta"><span>' + escapeHtml(item.file) + ':' + escapeHtml(item.line || '-') + '</span><span class="status ' + escapeHtml(itemStatus) + '">' + escapeHtml(itemStatus.toUpperCase()) + '</span><span class="pill ' + escapeHtml(norm(severityOf(item))) + '">' + escapeHtml(severityOf(item)) + '</span><span class="pill ' + escapeHtml(norm(item.source)) + '">' + escapeHtml(item.source || 'unknown') + '</span></div>' +
+      return '<div class="detail" id="' + prefix + 'detail-' + escapeHtml(item.id) + '"><h3>' + escapeHtml(titleOf(item)) + '</h3>' +
+        '<div class="meta"><span>' + escapeHtml(item.file) + ':' + escapeHtml(item.line || '-') + '</span>' + statusLabel(isDismissed ? 'dismissed' : itemStatus) + '<span class="pill ' + escapeHtml(norm(severityOf(item))) + '">' + escapeHtml(severityOf(item)) + '</span><span class="pill ' + escapeHtml(norm(item.source)) + '">' + escapeHtml(item.source || 'unknown') + '</span></div>' +
         '<p><strong>Problem:</strong> ' + escapeHtml(item.problem || '') + '</p>' +
         '<p><strong>Proposal:</strong> ' + escapeHtml(item.solution || '') + '</p>' +
         '<div class="detail-actions">' +
-        '<button class="button secondary" id="previous"' + prevDisabled + '>Previous</button>' +
-        '<button class="button secondary" id="open">Locate</button>' +
-        '<button class="button secondary" id="preview">Details</button>' +
-        '<button class="button secondary" id="diff">Diff</button>' +
-        '<button class="button" id="apply" data-command="' + applyCommand + '"' + applyTitle + applyDisabled + '>' + applyLabel + '</button>' +
-        '<button class="button secondary" id="dismiss" data-command="' + dismissCommand + '">' + dismissLabel + '</button>' +
-        '<button class="button secondary" id="next"' + nextDisabled + '>Next</button>' +
+        '<button class="button secondary" id="' + actionId(prefix, 'previous') + '"' + prevDisabled + '>Previous</button>' +
+        '<button class="button secondary" id="' + actionId(prefix, 'open') + '">Locate</button>' +
+        '<button class="button secondary" id="' + actionId(prefix, 'preview') + '">Details</button>' +
+        '<button class="button secondary" id="' + actionId(prefix, 'diff') + '">Diff</button>' +
+        '<button class="button" id="' + actionId(prefix, 'apply') + '" data-command="' + applyCommand + '"' + applyTitle + applyDisabled + '>' + applyLabel + '</button>' +
+        '<button class="button secondary" id="' + actionId(prefix, 'dismiss') + '" data-command="' + dismissCommand + '">' + dismissLabel + '</button>' +
+        '<button class="button secondary" id="' + actionId(prefix, 'next') + '"' + nextDisabled + '>Next</button>' +
         '</div></div>';
     }
 
-    function wireDetail(items) {
+    function actionId(prefix, name) {
+      return prefix + name;
+    }
+
+    function wireDetail(items, prefix = '') {
       const item = items.find((candidate) => candidate.id === filters.expandedId);
-      if (!item) return;
+      if (!item || !byId(prefix + 'detail-' + item.id)) return;
       const index = items.findIndex((candidate) => candidate.id === item.id);
-      byId('open')?.addEventListener('click', () => vscode.postMessage({ command: 'open', id: item.id }));
-      byId('preview')?.addEventListener('click', () => vscode.postMessage({ command: 'preview', id: item.id }));
-      byId('diff')?.addEventListener('click', () => vscode.postMessage({ command: 'diff', id: item.id }));
-      byId('dismiss')?.addEventListener('click', () => {
-        const command = byId('dismiss')?.getAttribute('data-command') || 'dismiss';
+      byId(actionId(prefix, 'open'))?.addEventListener('click', () => vscode.postMessage({ command: 'open', id: item.id }));
+      byId(actionId(prefix, 'preview'))?.addEventListener('click', () => vscode.postMessage({ command: 'preview', id: item.id }));
+      byId(actionId(prefix, 'diff'))?.addEventListener('click', () => vscode.postMessage({ command: 'diff', id: item.id }));
+      byId(actionId(prefix, 'dismiss'))?.addEventListener('click', () => {
+        const command = byId(actionId(prefix, 'dismiss'))?.getAttribute('data-command') || 'dismiss';
         vscode.postMessage({ command, id: item.id });
       });
-      byId('apply')?.addEventListener('click', () => {
-        const command = byId('apply')?.getAttribute('data-command') || 'apply';
+      byId(actionId(prefix, 'apply'))?.addEventListener('click', () => {
+        const command = byId(actionId(prefix, 'apply'))?.getAttribute('data-command') || 'apply';
         if (state.applyAllowed && (statusOf(item.id, item) === 'open' || statusOf(item.id, item) === 'applied')) {
           vscode.postMessage({ command, id: item.id });
         }
       });
-      byId('previous')?.addEventListener('click', () => {
+      byId(actionId(prefix, 'previous'))?.addEventListener('click', () => {
         if (index > 0) {
           filters.expandedId = items[index - 1].id;
           render();
         }
       });
-      byId('next')?.addEventListener('click', () => {
+      byId(actionId(prefix, 'next'))?.addEventListener('click', () => {
         if (index < items.length - 1) {
           filters.expandedId = items[index + 1].id;
           render();
@@ -2081,11 +3497,38 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       return filters.statuses[id] || item?.status || 'open';
     }
 
+    function statusLabel(status) {
+      const value = norm(status);
+      const labels = {
+        open: 'Ready',
+        applied: 'Applied',
+        changed: 'Needs refresh',
+        dismissed: 'Dismissed'
+      };
+      const tooltips = {
+        open: 'OPEN - original code still matches and can be applied',
+        applied: 'APPLIED - proposed code is already present',
+        changed: 'CHANGED - original/proposed code could not be matched safely',
+        dismissed: 'DISMISSED - hidden locally'
+      };
+      return '<span class="status ' + escapeHtml(value) + '" title="' + escapeHtml(tooltips[value] || status) + '">' + escapeHtml(labels[value] || status) + '</span>';
+    }
+
+    function compactFile(file) {
+      const parts = String(file || '').split(/[\\/]/).filter(Boolean);
+      return parts.length ? parts[parts.length - 1] : file || '';
+    }
+
+    function shortHash(value) {
+      return String(value || 'unknown').slice(0, 7);
+    }
+
     function escapeHtml(value) {
       return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
     }
 
     setupOptions();
+    filters.tab = (state.profile && state.profile.defaultTab) || filters.tab;
     render();
     vscode.postMessage({ command: 'loadStatuses' });
   </script>
@@ -2144,29 +3587,122 @@ async function diffSuggestion(suggestion: Suggestion): Promise<void> {
     await previewSuggestion(suggestion);
     return;
   }
-  const extension = path.extname(suggestion.file) || '.txt';
+  const filePath = absoluteWorkspacePath(suggestion.file);
+  const leftUri = vscode.Uri.file(filePath);
+  const currentText = fs.readFileSync(filePath, 'utf8');
+  const proposedAlreadyPresent = containsNormalizedBlock(currentText, suggestion.proposed_code || '');
+  const preview = buildFullFileDiffPreview(currentText, suggestion);
+  if (!preview) {
+    if (proposedAlreadyPresent) {
+      vscode.window.showInformationMessage('Suggestion appears to be already applied.');
+      return;
+    }
+    vscode.window.showWarningMessage('Original block no longer matches. Refresh suggestions.');
+    return;
+  }
+
   const safeId = encodeURIComponent(suggestion.id.replace(/[^\w.-]/g, '_'));
-  const originalUri = vscode.Uri.parse(`${DIFF_SCHEME}:/${safeId}/original${extension}`);
-  const proposedUri = vscode.Uri.parse(`${DIFF_SCHEME}:/${safeId}/proposed${extension}`);
-  diffContentProvider.set(originalUri, suggestion.original_code || '');
-  diffContentProvider.set(proposedUri, suggestion.proposed_code || '');
+  const extension = path.extname(suggestion.file) || '.txt';
+  const proposedUri = vscode.Uri.parse(`${DIFF_SCHEME}:/${safeId}/${path.basename(suggestion.file, extension)}.preview${extension}`);
+  diffContentProvider.set(proposedUri, preview.text);
   await vscode.commands.executeCommand(
     'vscode.diff',
-    originalUri,
+    leftUri,
     proposedUri,
-    `CodeGuardian Diff: ${path.basename(suggestion.file)}:${suggestion.line || '-'}`
+    `CodeGuardian Diff: ${path.basename(suggestion.file)}:${suggestion.line || '-'}`,
+    { selection: new vscode.Range(Math.max(0, preview.startLine - 1), 0, Math.max(0, preview.endLine - 1), 0) }
   );
 }
 
+async function openGitDiff(): Promise<void> {
+  logInfo('Open Git Diff requested.');
+  const gitState = currentGitChangeState();
+  if (!gitState.isGitRepository) {
+    logWarn('Open Git Diff failed: workspace is not a Git repository.');
+    vscode.window.showWarningMessage('Workspace is not a Git repository.');
+    return;
+  }
+  if (!gitState.hasChanges) {
+    logInfo('Open Git Diff: no local changes.');
+    vscode.window.showInformationMessage('No local changes to show.');
+    return;
+  }
+  await vscode.commands.executeCommand('workbench.view.scm');
+}
+
+async function openActivityLog(): Promise<void> {
+  logInfo('Activity Log opened.');
+  outputChannel?.show(true);
+  await vscode.commands.executeCommand('workbench.panel.output.focus');
+}
+
+function buildFullFileDiffPreview(currentText: string, suggestion: Suggestion): { text: string; startLine: number; endLine: number } | undefined {
+  const original = suggestion.original_code || '';
+  const proposed = suggestion.proposed_code || '';
+  if (!original || !proposed) {
+    return undefined;
+  }
+
+  const exactIndex = currentText.indexOf(original);
+  if (exactIndex >= 0) {
+    const startLine = lineNumberAtOffset(currentText, exactIndex);
+    const endLine = startLine + original.replace(/\r\n/g, '\n').split('\n').length - 1;
+    return {
+      text: currentText.slice(0, exactIndex) + withOriginalTrailingNewline(proposed, original) + currentText.slice(exactIndex + original.length),
+      startLine,
+      endLine,
+    };
+  }
+
+  const located = locateNormalizedLineBlock(currentText, original);
+  if (!located) {
+    return undefined;
+  }
+  const lines = currentText.split(/(?<=\n)/);
+  const originalBlock = lines.slice(located.startIndex, located.endIndex).join('');
+  return {
+    text: lines.slice(0, located.startIndex).join('') + withOriginalTrailingNewline(proposed, originalBlock) + lines.slice(located.endIndex).join(''),
+    startLine: located.startIndex + 1,
+    endLine: located.endIndex,
+  };
+}
+
+function locateNormalizedLineBlock(text: string, block: string): { startIndex: number; endIndex: number } | undefined {
+  const textLines = text.split(/(?<=\n)/);
+  const blockLines = normalizeBlock(block).split('\n');
+  if (!blockLines.length || !blockLines[0]) {
+    return undefined;
+  }
+  for (let start = 0; start <= textLines.length - blockLines.length; start += 1) {
+    const candidate = textLines.slice(start, start + blockLines.length).map((line) => line.trim()).join('\n').trim();
+    if (candidate === blockLines.join('\n')) {
+      return { startIndex: start, endIndex: start + blockLines.length };
+    }
+  }
+  return undefined;
+}
+
+function withOriginalTrailingNewline(proposed: string, original: string): string {
+  const hasTrailingNewline = /\r?\n$/.test(original);
+  return hasTrailingNewline && !/\r?\n$/.test(proposed) ? `${proposed}${original.endsWith('\r\n') ? '\r\n' : '\n'}` : proposed;
+}
+
+function lineNumberAtOffset(text: string, offset: number): number {
+  return text.slice(0, offset).split(/\r\n|\r|\n/).length;
+}
+
 async function applyOpenSuggestion(suggestion: Suggestion): Promise<void> {
+  logInfo(`Apply started: ${suggestion.id}`);
   const data = loadResultsData(false);
   if (!data.applyAllowed) {
+    logWarn(`Apply skipped: ${data.applyDisabledReason}`);
     vscode.window.showWarningMessage(data.applyDisabledReason);
     return;
   }
   const statuses = await loadSuggestionStatuses();
   const status = statuses[suggestion.id] || suggestion.status || 'open';
   if (status !== 'open') {
+    logInfo(`Apply skipped: ${suggestion.id} status ${status}`);
     vscode.window.showInformationMessage(`CodeGuardian suggestion ${suggestion.id} is ${status.toUpperCase()} and was not applied.`);
     return;
   }
@@ -2186,6 +3722,7 @@ async function applySuggestion(suggestion: Suggestion): Promise<void> {
   const python = configValue('pythonPath') || 'python';
   const cli = absoluteWorkspacePath(configValue('cliPath') || 'tools/codeguardian_cli.py');
   const result = await runCliWithFallback(python, [cli, 'apply', '--file', resultsPath(), '--id', suggestion.id]);
+  logInfo(`Apply completed: ${suggestion.id}`);
   vscode.window.showInformationMessage(result.stdout || 'CodeGuardian suggestion applied.');
 }
 
@@ -2217,34 +3754,89 @@ async function undoAppliedSuggestion(suggestion: Suggestion): Promise<void> {
   vscode.window.showInformationMessage(result.stdout || 'CodeGuardian suggestion undone.');
 }
 
-async function applySelectedOpenSuggestions(ids: string[]): Promise<void> {
+async function undoSelectedAppliedSuggestions(ids: string[]): Promise<void> {
   const data = loadResultsData(false);
   if (!data.applyAllowed) {
     vscode.window.showWarningMessage(data.applyDisabledReason);
     return;
   }
   if (!ids.length) {
-    vscode.window.showInformationMessage('Select one or more OPEN CodeGuardian suggestions first.');
+    vscode.window.showInformationMessage('Select one or more applied CodeGuardian suggestions first.');
+    return;
+  }
+  const suggestions = loadSuggestions().filter((suggestion) => ids.includes(suggestion.id));
+  const statuses = await loadSuggestionStatuses();
+  const appliedSuggestions = suggestions.filter((suggestion) => (statuses[suggestion.id] || suggestion.status || 'open') === 'applied');
+  const skipped = suggestions.length - appliedSuggestions.length;
+  if (!appliedSuggestions.length) {
+    vscode.window.showInformationMessage(`No selected CodeGuardian suggestions are applied. Skipped ${skipped}.`);
+    return;
+  }
+  const answer = await vscode.window.showWarningMessage(
+    `Undo ${appliedSuggestions.length} applied suggestion(s)?\n\nSelected: ${suggestions.length}\nApplied: ${appliedSuggestions.length}\nSkipped: ${skipped}`,
+    { modal: true },
+    'Undo'
+  );
+  if (answer !== 'Undo') {
+    return;
+  }
+  const python = configValue('pythonPath') || 'python';
+  const cli = absoluteWorkspacePath(configValue('cliPath') || 'tools/codeguardian_cli.py');
+  let undone = 0;
+  let failed = 0;
+  for (const suggestion of appliedSuggestions) {
+    try {
+      await runCliWithFallback(python, [cli, 'undo', '--file', resultsPath(), '--id', suggestion.id]);
+      undone += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  vscode.window.showInformationMessage(`Undone: ${undone} · Skipped: ${skipped} · Failed: ${failed}`);
+}
+
+async function applySelectedOpenSuggestions(ids: string[]): Promise<void> {
+  logInfo(`Apply Selected started: ${ids.length} selected.`);
+  const data = loadResultsData(false);
+  if (!data.applyAllowed) {
+    logWarn(`Apply Selected skipped: ${data.applyDisabledReason}`);
+    vscode.window.showWarningMessage(data.applyDisabledReason);
+    return;
+  }
+  if (!ids.length) {
+    vscode.window.showInformationMessage('Select one or more ready CodeGuardian suggestions first.');
     return;
   }
   const suggestions = loadSuggestions().filter((suggestion) => ids.includes(suggestion.id));
   const statuses = await loadSuggestionStatuses();
   const openSuggestions = suggestions.filter((suggestion) => (statuses[suggestion.id] || suggestion.status || 'open') === 'open');
+  const applied = suggestions.filter((suggestion) => (statuses[suggestion.id] || suggestion.status || 'open') === 'applied').length;
+  const changed = suggestions.filter((suggestion) => (statuses[suggestion.id] || suggestion.status || 'open') === 'changed').length;
   const skipped = suggestions.length - openSuggestions.length;
   if (!openSuggestions.length) {
-    vscode.window.showInformationMessage(`No selected CodeGuardian suggestions are OPEN. Skipped ${skipped}.`);
+    logInfo(`Apply Selected skipped: no ready suggestions. Selected ${suggestions.length}.`);
+    vscode.window.showInformationMessage(`No selected CodeGuardian suggestions are ready. Skipped ${skipped}.`);
     return;
   }
-  if (skipped > 0) {
-    vscode.window.showInformationMessage(`Skipping ${skipped} selected suggestion(s) that are already APPLIED or CHANGED.`);
+  const conflicts = detectSuggestionConflicts(openSuggestions);
+  if (conflicts.length) {
+    const names = conflicts.slice(0, 5).map((suggestion) => suggestion.target_name || suggestion.id).join(', ');
+    logWarn(`Apply Selected blocked by conflicts: ${names}`);
+    vscode.window.showWarningMessage(`Some selected suggestions modify overlapping code. Apply them one by one.${names ? ` Conflicts: ${names}` : ''}`);
+    return;
   }
-  await applySelectedSuggestions(openSuggestions);
+  const reason = [
+    applied ? `${applied} already applied` : '',
+    changed ? `${changed} need refresh` : '',
+  ].filter(Boolean).join(', ');
+  const message = `Apply ${openSuggestions.length} ready suggestion(s)?\n\nSelected: ${suggestions.length}\nReady: ${openSuggestions.length}\nSkipped: ${skipped}${reason ? ` (${reason})` : ''}`;
+  await applySelectedSuggestions(openSuggestions, message);
 }
 
-async function applySelectedSuggestions(suggestions: Suggestion[]): Promise<void> {
+async function applySelectedSuggestions(suggestions: Suggestion[], confirmationMessage?: string): Promise<void> {
   const ids = suggestions.map((suggestion) => suggestion.id);
   const answer = await vscode.window.showWarningMessage(
-    `Apply ${ids.length} CodeGuardian suggestion(s)?`,
+    confirmationMessage || `Apply ${ids.length} ready CodeGuardian suggestion(s)?`,
     { modal: true },
     'Apply'
   );
@@ -2262,7 +3854,49 @@ async function applySelectedSuggestions(suggestions: Suggestion[]): Promise<void
     '--ids',
     ids.join(','),
   ]);
-  vscode.window.showInformationMessage(result.stdout || 'CodeGuardian suggestions applied.');
+  logInfo(`Apply Selected completed: ${ids.length} ready suggestions.`);
+  vscode.window.showInformationMessage(firstLine(result.stdout) || 'CodeGuardian suggestions applied.');
+}
+
+function detectSuggestionConflicts(suggestions: Suggestion[]): Suggestion[] {
+  const conflicted = new Map<string, Suggestion>();
+  const byFile = new Map<string, Suggestion[]>();
+  for (const suggestion of suggestions) {
+    const items = byFile.get(suggestion.file) || [];
+    items.push(suggestion);
+    byFile.set(suggestion.file, items);
+  }
+  for (const items of byFile.values()) {
+    for (let i = 0; i < items.length; i += 1) {
+      for (let j = i + 1; j < items.length; j += 1) {
+        if (suggestionsConflict(items[i], items[j])) {
+          conflicted.set(items[i].id, items[i]);
+          conflicted.set(items[j].id, items[j]);
+        }
+      }
+    }
+  }
+  return Array.from(conflicted.values());
+}
+
+function suggestionsConflict(a: Suggestion, b: Suggestion): boolean {
+  const aRange = suggestionLineRange(a);
+  const bRange = suggestionLineRange(b);
+  if (aRange.start <= bRange.end && bRange.start <= aRange.end) {
+    return true;
+  }
+  const aOriginal = normalizeBlock(a.original_code || '');
+  const bOriginal = normalizeBlock(b.original_code || '');
+  if (!aOriginal || !bOriginal) {
+    return false;
+  }
+  return aOriginal === bOriginal || aOriginal.includes(bOriginal) || bOriginal.includes(aOriginal);
+}
+
+function suggestionLineRange(suggestion: Suggestion): { start: number; end: number } {
+  const start = Number(suggestion.line || 0);
+  const lines = String(suggestion.original_code || '').split(/\r\n|\r|\n/).length;
+  return { start, end: start + Math.max(1, lines) - 1 };
 }
 
 async function loadSuggestionStatuses(): Promise<Record<string, SuggestionStatus>> {
@@ -2359,4 +3993,8 @@ function errorMessage(error: unknown): string {
 function short(text: string, max: number): string {
   const normalized = (text || '').replace(/\s+/g, ' ').trim();
   return normalized.length <= max ? normalized : `${normalized.slice(0, max - 3)}...`;
+}
+
+function firstLine(text: string): string {
+  return String(text || '').split(/\r?\n/).find((line) => line.trim())?.trim() || '';
 }
