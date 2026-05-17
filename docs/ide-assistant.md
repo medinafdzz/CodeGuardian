@@ -117,16 +117,19 @@ VS Code settings:
 | `codeguardian.cliPath` | `tools/codeguardian_cli.py` | CLI path relative to the workspace root |
 | `codeguardian.jenkinsArtifactUrl` | empty | Optional full Jenkins artifact URL; takes precedence over the Jenkins URL/job settings |
 | `codeguardian.jenkinsUrl` | empty | Base Jenkins URL, for example `http://localhost:8080` |
-| `codeguardian.jenkinsJobPath` | empty | Slash-separated Jenkins job path. Use `CodeGuardian/sample-mixed` to select PRs, or `CodeGuardian/sample-mixed/PR-1` to pin one PR |
+| `codeguardian.jenkinsJobPath` | empty | Slash-separated Jenkins base multibranch job path, for example `CodeGuardian/sample-mixed`. The extension appends `PR-<id>` automatically |
 | `codeguardian.jenkinsBuildSelector` | `lastBuild` | Build selector used in the artifact URL |
 | `codeguardian.jenkinsArtifactName` | `codeguardian-results.json` | Archived artifact name |
 | `codeguardian.jenkinsUser` | empty | Optional Jenkins user for Basic authentication |
 | `codeguardian.jenkinsApiToken` | empty | Optional Jenkins API token for Basic authentication |
 | `codeguardian.bitbucketEmail` | empty | Optional Bitbucket email used to discover the open PR for the current branch |
 | `codeguardian.bitbucketApiToken` | empty | Optional Bitbucket API token or app password used to discover the open PR for the current branch |
-| `codeguardian.autoDownload` | `false` | Poll Jenkins automatically and download the artifact when a completed build is available |
+| `codeguardian.autoDownload` | `true` | Poll Jenkins automatically and download the artifact when a completed build is available |
 | `codeguardian.pollIntervalSeconds` | `45` | Polling interval used by automatic download |
 | `codeguardian.allowApplyWithUnknownArtifact` | `false` | Allows apply when artifact metadata is incomplete. Keep disabled unless manually verified |
+| `codeguardian.watchBuildOnStartup` | `true` | Watches Jenkins on activation if the current artifact is missing or stale |
+| `codeguardian.watchBuildOnGitChange` | `true` | Watches Jenkins when local branch or `HEAD` changes |
+| `codeguardian.maxBuildWatchMinutes` | `30` | Maximum time spent watching a Jenkins PR build |
 
 If `python` is unavailable, the extension tries `python3`.
 
@@ -156,6 +159,36 @@ To make this automatic, enable:
 ```
 
 With this mode, the extension polls Jenkins while VS Code is open and refreshes the results when a new completed artifact is available.
+
+### Jenkins PR build watching
+
+The extension can infer the Jenkins PR job from the current workspace:
+
+1. Detect local Bitbucket repository with `git remote get-url origin`.
+2. Detect local branch with `git branch --show-current`.
+3. Use Bitbucket REST to find the open PR whose source branch matches the local branch.
+4. Resolve the Jenkins job as `<codeguardian.jenkinsJobPath>/PR-<prId>`.
+5. Poll `lastBuild/api/json` for build state, progress and artifacts.
+
+Example:
+
+```text
+Base job: CodeGuardian/sample-mixed
+Detected PR: 2
+Resolved job: CodeGuardian/sample-mixed/PR-2
+API URL: http://localhost:8080/job/CodeGuardian/job/sample-mixed/job/PR-2/lastBuild/api/json
+```
+
+The dashboard shows compact Jenkins states such as `WAITING`, `RUNNING`, `ARTIFACT READY`, `DOWNLOADED` or `FAILED`. Running progress is estimated from Jenkins `timestamp` and `estimatedDuration`, capped below 100% until the build completes.
+
+If `codeguardian.autoDownload` is enabled, a successful build with `codeguardian-results.json` is downloaded automatically, suggestions are refreshed and artifact validation is re-run. If it is disabled, the dashboard marks the artifact as ready and the existing `Download Artifact` action downloads it.
+
+Manual commands:
+
+```text
+CodeGuardian: Watch Jenkins Build
+CodeGuardian: Stop Jenkins Build Watch
+```
 
 ---
 
@@ -210,6 +243,13 @@ CODEGUARDIAN_JENKINS_USER=my-user
 CODEGUARDIAN_JENKINS_API_TOKEN=my-jenkins-token
 CODEGUARDIAN_BITBUCKET_EMAIL=my-email@example.com
 CODEGUARDIAN_BITBUCKET_API_TOKEN=my-bitbucket-token
+CODEGUARDIAN_JENKINS_URL=http://localhost:8080
+CODEGUARDIAN_JENKINS_JOB_PATH=CodeGuardian/sample-mixed
+CODEGUARDIAN_AUTO_DOWNLOAD=true
+CODEGUARDIAN_POLL_INTERVAL_SECONDS=45
+CODEGUARDIAN_CLI_PATH=C:\Users\ajmedinaf\VSCode\TFG\codeguardian-core\tools\codeguardian_cli.py
+CODEGUARDIAN_RESULTS_FILE=codeguardian-results.json
+CODEGUARDIAN_PYTHON_PATH=python
 ```
 
 Run:
@@ -220,13 +260,14 @@ CodeGuardian: Import Credentials From .env
 
 The extension stores imported values in VS Code SecretStorage and uses those values for Jenkins and Bitbucket REST calls. Token values are never printed in logs, shown in the UI or written to `codeguardian-results.json`.
 
+Non-secret configuration keys such as `CODEGUARDIAN_JENKINS_URL`, `CODEGUARDIAN_JENKINS_JOB_PATH`, `CODEGUARDIAN_AUTO_DOWNLOAD`, `CODEGUARDIAN_POLL_INTERVAL_SECONDS`, `CODEGUARDIAN_CLI_PATH`, `CODEGUARDIAN_RESULTS_FILE` and `CODEGUARDIAN_PYTHON_PATH` are read directly from the workspace `.env`. They do not need to be stored in User `settings.json`.
+
 Credential precedence:
 
 1. VS Code SecretStorage
 2. `.env` / `.codeguardian.env` import
-3. Existing VS Code settings fallback
 
-Settings fallback exists only for compatibility. Prefer SecretStorage instead of storing tokens in `settings.json`.
+Credentials are not read from User `settings.json`. Prefer SecretStorage imported from `.env` instead of storing tokens in settings.
 
 Other credential commands:
 
