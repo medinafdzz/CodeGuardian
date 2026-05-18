@@ -6,9 +6,11 @@ from codeguardian.performance import (
     collect_performance_candidates,
     demo_fast_mode,
     optimization_batch_size,
+    optimization_only_changed_files,
     performance_batch_signature,
     performance_enabled,
     performance_max_scopes,
+    skip_optimization_for_config_files,
     performance_issue_key,
     has_required_performance_metadata,
 )
@@ -51,6 +53,19 @@ def test_max_optimization_scopes_alias_is_supported(monkeypatch):
     monkeypatch.setenv("CODEGUARDIAN_MAX_OPTIMIZATION_SCOPES", "4")
 
     assert performance_max_scopes() == 4
+
+
+def test_legacy_performance_fast_knob_aliases_are_supported(monkeypatch):
+    monkeypatch.delenv("CODEGUARDIAN_OPTIMIZATION_ONLY_CHANGED_FILES", raising=False)
+    monkeypatch.delenv("CODEGUARDIAN_OPTIMIZATION_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("CODEGUARDIAN_SKIP_OPTIMIZATION_FOR_CONFIG_FILES", raising=False)
+    monkeypatch.setenv("CODEGUARDIAN_PERFORMANCE_ONLY_CHANGED_FILES", "true")
+    monkeypatch.setenv("CODEGUARDIAN_PERFORMANCE_BATCH_SIZE", "3")
+    monkeypatch.setenv("CODEGUARDIAN_SKIP_PERFORMANCE_FOR_CONFIG_FILES", "true")
+
+    assert optimization_only_changed_files() is True
+    assert optimization_batch_size() == 3
+    assert skip_optimization_for_config_files() is True
 
 
 def test_collect_performance_candidates_uses_changed_function_scopes(monkeypatch, tmp_path):

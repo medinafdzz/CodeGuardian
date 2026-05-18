@@ -146,6 +146,11 @@ def performance_max_scopes() -> int:
 
 
 def optimization_only_changed_files() -> bool:
+    raw_value = os.getenv("CODEGUARDIAN_OPTIMIZATION_ONLY_CHANGED_FILES")
+    if raw_value is None:
+        raw_value = os.getenv("CODEGUARDIAN_PERFORMANCE_ONLY_CHANGED_FILES")
+    if raw_value is not None:
+        return raw_value.strip().lower() in {"1", "true", "yes", "on"}
     return env_bool(
         "CODEGUARDIAN_OPTIMIZATION_ONLY_CHANGED_FILES",
         "true" if demo_fast_mode() else "false",
@@ -153,6 +158,10 @@ def optimization_only_changed_files() -> bool:
 
 
 def optimization_batch_size() -> int:
+    if os.getenv("CODEGUARDIAN_OPTIMIZATION_BATCH_SIZE") is None:
+        configured = env_int("CODEGUARDIAN_PERFORMANCE_BATCH_SIZE", -1)
+        if configured >= 1:
+            return configured
     return max(1, env_int(
         "CODEGUARDIAN_OPTIMIZATION_BATCH_SIZE",
         3 if demo_fast_mode() else 1,
@@ -160,6 +169,11 @@ def optimization_batch_size() -> int:
 
 
 def skip_optimization_for_config_files() -> bool:
+    raw_value = os.getenv("CODEGUARDIAN_SKIP_OPTIMIZATION_FOR_CONFIG_FILES")
+    if raw_value is None:
+        raw_value = os.getenv("CODEGUARDIAN_SKIP_PERFORMANCE_FOR_CONFIG_FILES")
+    if raw_value is not None:
+        return raw_value.strip().lower() in {"1", "true", "yes", "on"}
     return env_bool(
         "CODEGUARDIAN_SKIP_OPTIMIZATION_FOR_CONFIG_FILES",
         "true" if demo_fast_mode() else "false",
