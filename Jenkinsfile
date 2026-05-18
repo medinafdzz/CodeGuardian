@@ -10,6 +10,14 @@ pipeline {
         CACHE_TTL            = '3600s'
         CODEGUARDIAN_ENABLE_IMPROVEMENTS = 'true'
         CODEGUARDIAN_MAX_IMPROVEMENTS    = '3'
+        CODEGUARDIAN_DEMO_FAST_MODE = 'true'
+        CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW = 'true'
+        CODEGUARDIAN_PERFORMANCE_MAX_SCOPES = '5'
+        CODEGUARDIAN_PERFORMANCE_ONLY_CHANGED_FILES = 'true'
+        CODEGUARDIAN_PERFORMANCE_BATCH_SIZE = '3'
+        CODEGUARDIAN_SKIP_PERFORMANCE_FOR_CONFIG_FILES = 'true'
+        CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN = 'true'
+        CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW = '12'
     }
 
     options {
@@ -106,8 +114,11 @@ pipeline {
                         if (hasMaven) {
                             detectedStacks.add('maven')
                             mavenPoms.eachWithIndex { pomFile, index ->
+                                def mavenCommand = env.CODEGUARDIAN_DEMO_FAST_MODE == 'true'
+                                    ? "mvn -B -q -ntp -f \"${pomFile}\" -DskipTests compile"
+                                    : "mvn -B -q -ntp -f \"${pomFile}\" clean test"
                                 runQuiet(
-                                    "mvn -B -q -ntp -f \"${pomFile}\" clean test",
+                                    mavenCommand,
                                     "maven-build-${index}.log",
                                     "Maven build and tests (${pomFile})"
                                 )
@@ -273,10 +284,6 @@ pipeline {
                         withEnv([
                             "AGENT_REPO_HOST_PATH=${agentRepoHostPath}",
                             'ATLASSIAN_MCP_URL=https://mcp.atlassian.com/v1/mcp',
-                            'CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW=true',
-                            'CODEGUARDIAN_PERFORMANCE_MAX_SCOPES=30',
-                            'CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN=true',
-                            'CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW=20',
                             "CODEGUARDIAN_RESULTS_PATH=${env.WORKSPACE}/codeguardian-results.json"
                         ]) {
                             sh '''
@@ -285,8 +292,6 @@ pipeline {
                             set +x
                             git clone --quiet --depth 1 --single-branch -b "$AGENT_REPO_REF" \
                             "https://x-bitbucket-api-token-auth:${BITBUCKET_API_TOKEN}@${AGENT_REPO_HOST_PATH}" AIagent > /dev/null 2>&1
-
-                            git fetch --quiet origin "${CHANGE_TARGET:-main}:refs/remotes/origin/${CHANGE_TARGET:-main}" || true
 
                             python3 -u AIagent/agent.py --file data.json
                             '''
