@@ -15,55 +15,135 @@
       }
     ]
   },
+  "description": "Minimal executive dashboard for CodeGuardian TFG demo: execution summary, validation pipeline, AI cost, PR comment synchronization and cache efficiency.",
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "links": [],
   "liveNow": false,
   "panels": [
     {
+      "collapsed": false,
+      "datasource": {
+        "type": "grafana",
+        "uid": "-- Grafana --"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 101,
+      "panels": [],
+      "title": "Execution Summary",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "datasource": {
+        "type": "grafana",
+        "uid": "-- Grafana --"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 102,
+      "panels": [],
+      "title": "Review Pipeline",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "datasource": {
+        "type": "grafana",
+        "uid": "-- Grafana --"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 11
+      },
+      "id": 103,
+      "panels": [],
+      "title": "AI Token Usage",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "datasource": {
+        "type": "grafana",
+        "uid": "-- Grafana --"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 104,
+      "panels": [],
+      "title": "PR Comment Sync",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "datasource": {
+        "type": "grafana",
+        "uid": "-- Grafana --"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 105,
+      "panels": [],
+      "title": "Cache / Optimization",
+      "type": "row"
+    },
+    {
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Latest CodeGuardian execution timestamp.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 120
-              },
-              {
-                "color": "red",
-                "value": 300
               }
             ]
           },
-          "unit": "s"
+          "unit": "dateTimeAsIso"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 5,
         "x": 0,
-        "y": 0
+        "y": 1
       },
       "id": 1,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -72,32 +152,39 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
+      "pluginVersion": "10.4.0",
       "targets": [
         {
-          "expr": "max(last_over_time(codeguardian_analysis_latency_seconds{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "$repository",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_last_execution_timestamp{repository=~\"$repository\"}[$__range])) * 1000",
+          "legendFormat": "Last Execution",
+          "range": false,
           "refId": "A",
-          "instant": true,
-          "range": false
+          "instant": true
         }
       ],
-      "title": "Analysis Latency",
-      "type": "stat",
-      "description": "Green: under 2 minutes. Yellow: 2 to 5 minutes. Red: over 5 minutes."
+      "title": "Last Execution",
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Latest agent execution duration in minutes.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "unit": "short",
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -107,32 +194,30 @@
               },
               {
                 "color": "yellow",
-                "value": 50000
+                "value": 2
               },
               {
                 "color": "red",
-                "value": 150000
+                "value": 5
               }
             ]
-          }
+          },
+          "unit": "m"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
-        "y": 0
+        "w": 5,
+        "x": 5,
+        "y": 1
       },
       "id": 2,
       "options": {
-        "displayMode": "basic",
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -140,53 +225,45 @@
           "fields": "",
           "values": false
         },
-        "showUnfilled": true,
-        "valueMode": "color"
+        "textMode": "auto",
+        "wideLayout": true
       },
+      "pluginVersion": "10.4.0",
       "targets": [
         {
-          "expr": "max(last_over_time(codeguardian_analysis_prompt_tokens{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "prompt",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_analysis_latency_seconds{repository=~\"$repository\"}[$__range])) / 60",
+          "legendFormat": "Execution Time",
+          "range": false,
           "refId": "A",
-          "instant": true,
-          "range": false
-        },
-        {
-          "expr": "max(last_over_time(codeguardian_analysis_response_tokens{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "response",
-          "refId": "B",
-          "instant": true,
-          "range": false
+          "instant": true
         }
       ],
-      "title": "Token Usage",
-      "type": "bargauge",
-      "description": "Prompt and response tokens used by real model calls in the execution. Local batch cache reuse is shown in the Batch Cache panel."
+      "title": "Execution Time",
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 5
-              },
-              {
-                "color": "red",
-                "value": 15
               }
             ]
           },
@@ -196,15 +273,15 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 12,
-        "y": 0
+        "w": 5,
+        "x": 10,
+        "y": 1
       },
       "id": 3,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -213,31 +290,39 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
+      "pluginVersion": "10.4.0",
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
           "expr": "max(last_over_time(codeguardian_final_issues_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "$repository",
+          "legendFormat": "Final Suggestions",
+          "range": false,
           "refId": "A",
-          "instant": true,
-          "range": false
+          "instant": true
         }
       ],
-      "title": "Final Issues",
-      "type": "stat",
-      "description": "Green: 0 to 5 final issues. Yellow: 5 to 15. Red: more than 15."
+      "title": "Final Suggestions",
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -257,15 +342,15 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
-        "y": 0
+        "w": 4,
+        "x": 15,
+        "y": 1
       },
       "id": 4,
       "options": {
         "colorMode": "value",
         "graphMode": "none",
-        "justifyMode": "auto",
+        "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -274,552 +359,609 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
+      "pluginVersion": "10.4.0",
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
           "expr": "max(last_over_time(codeguardian_blocking_findings{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "$repository",
+          "legendFormat": "Blockers",
+          "range": false,
           "refId": "A",
-          "instant": true,
-          "range": false
+          "instant": true
         }
       ],
-      "title": "Blocking Findings",
-      "type": "stat",
-      "description": "Green: no blocker or critical findings. Red: at least one blocker or critical finding."
+      "title": "Blockers",
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Desired inline PR comments after synchronization.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "unit": "short",
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 5
-              },
-              {
-                "color": "red",
-                "value": 15
               }
             ]
-          }
+          },
+          "unit": "short"
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sonar findings"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "blue",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "generated"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "invalid"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "patch invalid"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "purple",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "final"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 4
+        "h": 4,
+        "w": 5,
+        "x": 19,
+        "y": 1
       },
       "id": 5,
       "options": {
-        "legend": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
           "calcs": [
             "lastNotNull"
           ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
+        "textMode": "auto",
+        "wideLayout": true
       },
+      "pluginVersion": "10.4.0",
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_sonar_findings_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "sonar findings",
-          "refId": "A"
-        },
-        {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_generated_issues_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "generated",
-          "refId": "B"
-        },
-        {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_invalid_issues_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "invalid",
-          "refId": "C"
-        },
-        {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_patch_invalid_issues_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "patch invalid",
-          "refId": "D"
-        },
-        {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_final_issues_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "final",
-          "refId": "E"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_comments_desired_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Inline Comments",
+          "range": false,
+          "refId": "A",
+          "instant": true
         }
       ],
-      "title": "Issue Flow",
-      "type": "timeseries",
-      "description": "Green/yellow/red thresholds help identify large issue volumes during one execution."
+      "title": "Inline Comments",
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Not all findings become published suggestions. CodeGuardian validates AI output before exporting it.",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
-          "unit": "short",
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 10
-              },
-              {
-                "color": "red",
-                "value": 30
               }
             ]
-          }
+          },
+          "unit": "short"
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "desired"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "blue",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "created"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "reused"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "deleted"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 4
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 6
       },
       "id": 6,
       "options": {
+        "displayMode": "basic",
         "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 120,
+        "minVizHeight": 14,
+        "minVizWidth": 8,
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
           "calcs": [
             "lastNotNull"
           ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
       },
+      "pluginVersion": "10.4.0",
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_comments_desired_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "desired",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_sonar_findings_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Sonar Findings",
+          "range": false,
+          "refId": "A",
+          "instant": true
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_comments_created_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "created",
-          "refId": "B"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_generated_issues_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Generated Issue Suggestions",
+          "range": false,
+          "refId": "B",
+          "instant": true
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_comments_reused_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "reused",
-          "refId": "C"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_invalid_issues_total{repository=~\"$repository\"}[$__range])) + max(last_over_time(codeguardian_patch_invalid_issues_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Dropped by Validation",
+          "range": false,
+          "refId": "C",
+          "instant": true
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_comments_deleted_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "deleted",
-          "refId": "D"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_final_issues_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Final Suggestions",
+          "range": false,
+          "refId": "D",
+          "instant": true
         }
       ],
-      "title": "Bitbucket Comment Synchronization",
-      "type": "timeseries",
-      "description": "Green/yellow/red thresholds help detect unusually high comment churn."
+      "title": "Review Pipeline",
+      "type": "bargauge"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Token counts for the latest execution. Request Tokens = prompt + response. Total Accounted Tokens includes cached tokens when reported.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "unit": "short",
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 10
-              },
-              {
-                "color": "red",
-                "value": 30
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "hits"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "green",
-                  "mode": "fixed"
-                }
               }
             ]
           },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "misses"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+          "unit": "short"
+        },
+        "overrides": []
       },
       "gridPos": {
-        "h": 7,
-        "w": 12,
+        "h": 5,
+        "w": 24,
         "x": 0,
         "y": 12
       },
       "id": 7,
       "options": {
-        "legend": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
           "calcs": [
             "lastNotNull"
           ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
+        "textMode": "auto",
+        "wideLayout": true
       },
+      "pluginVersion": "10.4.0",
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_batch_cache_hits_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "hits",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_analysis_prompt_tokens{repository=~\"$repository\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "Prompt Tokens",
+          "range": false,
           "refId": "A"
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_batch_cache_misses_total{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "misses",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_analysis_response_tokens{repository=~\"$repository\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "Response Tokens",
+          "range": false,
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_analysis_prompt_tokens{repository=~\"$repository\"}[$__range])) + max(last_over_time(codeguardian_analysis_response_tokens{repository=~\"$repository\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "Request Tokens",
+          "range": false,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_analysis_cached_tokens{repository=~\"$repository\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "Cached Tokens",
+          "range": false,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_analysis_total_tokens{repository=~\"$repository\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "Total Accounted Tokens",
+          "range": false,
+          "refId": "E"
         }
       ],
-      "title": "Batch Cache",
-      "type": "timeseries",
-      "description": "Green/yellow/red thresholds help detect unusually high cache activity or misses."
+      "title": "AI Token Usage",
+      "type": "stat"
     },
     {
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "CodeGuardian reuses unchanged comments, creates missing comments and deletes obsolete comments.",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
-          "unit": "short",
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 50000
-              },
-              {
-                "color": "red",
-                "value": 150000
               }
             ]
-          }
+          },
+          "unit": "short"
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "total"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "purple",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "prompt"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "blue",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "response"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 12
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 18
       },
       "id": 8,
       "options": {
+        "displayMode": "basic",
         "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 120,
+        "minVizHeight": 14,
+        "minVizWidth": 8,
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
           "calcs": [
             "lastNotNull"
           ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
       },
+      "pluginVersion": "10.4.0",
       "targets": [
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_analysis_total_tokens{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "total",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_comments_created_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Created",
+          "range": false,
+          "refId": "A",
+          "instant": true
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_analysis_prompt_tokens{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "prompt",
-          "refId": "B"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_comments_reused_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Reused",
+          "range": false,
+          "refId": "B",
+          "instant": true
         },
         {
-          "expr": "max without(instance, job, build_number, display_id, exec_timestamp) (last_over_time(codeguardian_analysis_response_tokens{repository=~\"$repository\"}[$__range]))",
-          "legendFormat": "response",
-          "refId": "C"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_comments_deleted_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Deleted",
+          "range": false,
+          "refId": "C",
+          "instant": true
         }
       ],
-      "title": "Token Usage Over Time",
-      "type": "timeseries",
-      "description": "Prompt, response and total tokens used by real model calls over time. Local batch cache reuse is shown in the Batch Cache panel."
+      "title": "PR Comment Sync",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Compact cache efficiency ratio: hits / (hits + misses).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "green",
+                "value": 70
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 0,
+        "y": 24
+      },
+      "id": 9,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "100 * max(last_over_time(codeguardian_batch_cache_hits_total{repository=~\"$repository\"}[$__range])) / clamp_min((max(last_over_time(codeguardian_batch_cache_hits_total{repository=~\"$repository\"}[$__range])) + max(last_over_time(codeguardian_batch_cache_misses_total{repository=~\"$repository\"}[$__range]))), 1)",
+          "legendFormat": "Cache Hit Ratio",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "title": "Cache Hit Ratio",
+      "type": "gauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Cache usage and optimization-review output for the latest selected execution range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 19,
+        "x": 5,
+        "y": 24
+      },
+      "id": 10,
+      "options": {
+        "displayMode": "basic",
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 120,
+        "minVizHeight": 14,
+        "minVizWidth": 8,
+        "namePlacement": "left",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_batch_cache_hits_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Cache Hits",
+          "range": false,
+          "refId": "A",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_batch_cache_misses_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Cache Misses",
+          "range": false,
+          "refId": "B",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_performance_candidates_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Optimization Candidates",
+          "range": false,
+          "refId": "C",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(last_over_time(codeguardian_performance_suggestions_total{repository=~\"$repository\"}[$__range]))",
+          "legendFormat": "Optimization Suggestions",
+          "range": false,
+          "refId": "D",
+          "instant": true
+        }
+      ],
+      "title": "Cache / Optimization",
+      "type": "bargauge"
     }
   ],
-  "refresh": "10s",
+  "refresh": "30s",
   "schemaVersion": 39,
   "style": "dark",
   "tags": [
     "codeguardian",
-    "tfg"
+    "tfg",
+    "demo"
   ],
   "templating": {
     "list": [
       {
+        "allValue": ".*",
         "current": {
           "selected": true,
-          "text": "All sample repositories",
-          "value": "sample-.*"
+          "text": "All",
+          "value": "$__all"
         },
         "datasource": {
           "type": "prometheus",
@@ -837,8 +979,7 @@
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
-        "regex": "sample-.*",
-        "allValue": "sample-.*",
+        "regex": "",
         "skipUrlSync": false,
         "sort": 1,
         "type": "query"
@@ -851,7 +992,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "CodeGuardian Overview",
+  "title": "CodeGuardian - Executive Overview",
   "uid": "codeguardian-overview",
   "version": 1,
   "weekStart": ""
