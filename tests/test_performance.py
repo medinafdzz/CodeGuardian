@@ -4,8 +4,11 @@ from codeguardian.models import Issue, PerformanceCandidate
 from codeguardian.performance import (
     build_performance_prompt,
     collect_performance_candidates,
+    demo_fast_mode,
+    optimization_batch_size,
     performance_batch_signature,
     performance_enabled,
+    performance_max_scopes,
     performance_issue_key,
     has_required_performance_metadata,
 )
@@ -30,6 +33,24 @@ def test_performance_review_keeps_legacy_env_compatibility(monkeypatch):
     monkeypatch.setenv("CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW", "true")
 
     assert performance_enabled() is True
+
+
+def test_demo_fast_mode_sets_aggressive_defaults(monkeypatch):
+    monkeypatch.setenv("CODEGUARDIAN_DEMO_FAST_MODE", "true")
+    monkeypatch.delenv("CODEGUARDIAN_OPTIMIZATION_MAX_SCOPES", raising=False)
+    monkeypatch.delenv("CODEGUARDIAN_MAX_OPTIMIZATION_SCOPES", raising=False)
+    monkeypatch.delenv("CODEGUARDIAN_OPTIMIZATION_BATCH_SIZE", raising=False)
+
+    assert demo_fast_mode() is True
+    assert performance_max_scopes() == 5
+    assert optimization_batch_size() == 3
+
+
+def test_max_optimization_scopes_alias_is_supported(monkeypatch):
+    monkeypatch.delenv("CODEGUARDIAN_OPTIMIZATION_MAX_SCOPES", raising=False)
+    monkeypatch.setenv("CODEGUARDIAN_MAX_OPTIMIZATION_SCOPES", "4")
+
+    assert performance_max_scopes() == 4
 
 
 def test_collect_performance_candidates_uses_changed_function_scopes(monkeypatch, tmp_path):
@@ -143,6 +164,19 @@ def test_collect_performance_candidates_includes_changed_build_files(monkeypatch
     assert candidates[0].target_type == "file"
     assert candidates[0].target_name == "Jenkinsfile"
     assert candidates[0].language == "groovy"
+
+
+def test_fast_mode_skips_config_files_for_optimization(monkeypatch, tmp_path):
+    source = tmp_path / "Jenkinsfile"
+    source.write_text("pipeline { stages { stage('Build') { steps { sh 'mvn test' } } } }\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CODEGUARDIAN_DEMO_FAST_MODE", "true")
+    monkeypatch.setattr("codeguardian.performance.diff_base_ref", lambda: "origin/main...HEAD")
+    monkeypatch.setattr("codeguardian.performance.changed_files", lambda base_ref, max_files: ["Jenkinsfile"])
+
+    candidates = collect_performance_candidates(max_scopes=10)
+
+    assert candidates == []
 
 
 def test_performance_issue_normalization_preserves_complexity_fields():

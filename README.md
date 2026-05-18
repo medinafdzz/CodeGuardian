@@ -207,6 +207,23 @@ CODEGUARDIAN_OPTIMIZATION_REQUIRE_CLEAR_GAIN=true
 CODEGUARDIAN_OPTIMIZATION_CONTEXT_WINDOW=20
 ```
 
+For demos, use fast mode to keep SonarQube review, Bitbucket comments, result export and metrics enabled while limiting optimization review:
+
+```text
+CODEGUARDIAN_DEMO_FAST_MODE=true
+CODEGUARDIAN_ENABLE_OPTIMIZATION_REVIEW=true
+CODEGUARDIAN_MAX_OPTIMIZATION_SCOPES=5
+CODEGUARDIAN_OPTIMIZATION_ONLY_CHANGED_FILES=true
+CODEGUARDIAN_OPTIMIZATION_BATCH_SIZE=3
+CODEGUARDIAN_SKIP_OPTIMIZATION_FOR_CONFIG_FILES=true
+```
+
+For the fastest possible demo, disable only the optional optimization path:
+
+```text
+CODEGUARDIAN_ENABLE_OPTIMIZATION_REVIEW=false
+```
+
 The previous `CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW`, `CODEGUARDIAN_PERFORMANCE_MAX_SCOPES`, `CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN` and `CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW` names remain supported for existing pipelines.
 
 This mode analyses only changed pull request scopes. Candidate scopes are functions or methods resolved from changed lines in the diff, plus selected build/configuration files such as `Jenkinsfile`, `pom.xml`, `build.gradle`, `package.json`, Docker and CI files. Generated files, dependency folders, build folders, caches and common test paths are excluded conservatively.

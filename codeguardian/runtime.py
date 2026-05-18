@@ -1,4 +1,5 @@
 import argparse
+import time
 
 from codeguardian.ai import analyze_code_with_gemini
 from codeguardian.bitbucket import report_to_bitbucket
@@ -27,6 +28,7 @@ def combine_analysis_metrics(*metrics: AnalysisMetrics) -> AnalysisMetrics:
 
 
 async def main() -> None:
+    execution_start = time.time()
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", required=True, help="Path to the JSON file to analyze")
     args = parser.parse_args()
@@ -86,11 +88,13 @@ async def main() -> None:
         logger.info("Final optimization comments: %s", len(performance_decision.issues))
         decision.issues.extend(performance_decision.issues)
         analysis_metrics = combine_analysis_metrics(analysis_metrics, performance_decision.metrics)
+    else:
+        logger.info("Optimization review disabled")
 
     validate_maven_compile()
 
     logger.info(
-        "Execution summary: sonar_findings=%s generated_issues=%s dropped_invalid=%s dropped_patch_validation=%s final_issues=%s blocking_findings=%s optimization_suggestions=%s",
+        "Execution summary: sonar_findings=%s generated_issues=%s dropped_invalid=%s dropped_patch_validation=%s final_issues=%s blocking_findings=%s optimization_suggestions=%s total_agent_time=%.2fs",
         len(sonar_issues),
         generated_static_count,
         invalid_count,
@@ -98,6 +102,7 @@ async def main() -> None:
         len(decision.issues),
         has_blocking_findings,
         len([issue for issue in decision.issues if issue.source in {"performance", "optimization"}]),
+        time.time() - execution_start,
     )
 
     comments = await report_to_bitbucket(pr_id, repo_slug, workspace, decision)

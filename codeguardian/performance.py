@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Iterable
 
 import google.genai as genai
 from google.genai import types
@@ -74,6 +75,28 @@ OPTIMIZATION_FILE_PATTERNS = {
     "Makefile": "makefile",
 }
 
+CONFIG_OPTIMIZATION_EXCLUSIONS = (
+    "Jenkinsfile",
+    "*.yml",
+    "*.yaml",
+    "*.json",
+    "*.md",
+    "*.xml",
+    "*.properties",
+    "*.ini",
+    "pom.xml",
+    "package-lock.json",
+    "yarn.lock",
+    "target/",
+    "build/",
+    "node_modules/",
+    ".venv/",
+    "venv/",
+    "__pycache__/",
+)
+
+OPTIMIZATION_CACHE_KEY_VERSION = "optimization-v2"
+
 
 def env_bool(primary: str, default: str = "false", fallback: str | None = None) -> bool:
     raw_value = os.getenv(primary)
@@ -99,6 +122,10 @@ def env_int(primary: str, default: int, fallback: str | None = None) -> int:
         return default
 
 
+def demo_fast_mode() -> bool:
+    return env_bool("CODEGUARDIAN_DEMO_FAST_MODE")
+
+
 def performance_enabled() -> bool:
     return env_bool(
         "CODEGUARDIAN_ENABLE_OPTIMIZATION_REVIEW",
@@ -107,10 +134,35 @@ def performance_enabled() -> bool:
 
 
 def performance_max_scopes() -> int:
+    if os.getenv("CODEGUARDIAN_OPTIMIZATION_MAX_SCOPES") is None:
+        configured = env_int("CODEGUARDIAN_MAX_OPTIMIZATION_SCOPES", -1)
+        if configured >= 0:
+            return configured
     return env_int(
         "CODEGUARDIAN_OPTIMIZATION_MAX_SCOPES",
-        10,
+        5 if demo_fast_mode() else 10,
         fallback="CODEGUARDIAN_PERFORMANCE_MAX_SCOPES",
+    )
+
+
+def optimization_only_changed_files() -> bool:
+    return env_bool(
+        "CODEGUARDIAN_OPTIMIZATION_ONLY_CHANGED_FILES",
+        "true" if demo_fast_mode() else "false",
+    )
+
+
+def optimization_batch_size() -> int:
+    return max(1, env_int(
+        "CODEGUARDIAN_OPTIMIZATION_BATCH_SIZE",
+        3 if demo_fast_mode() else 1,
+    ))
+
+
+def skip_optimization_for_config_files() -> bool:
+    return env_bool(
+        "CODEGUARDIAN_SKIP_OPTIMIZATION_FOR_CONFIG_FILES",
+        "true" if demo_fast_mode() else "false",
     )
 
 
@@ -150,13 +202,63 @@ def performance_rules_hash() -> str:
 
 def is_performance_path_excluded(path: str) -> bool:
     normalized_path = path.replace("\\", "/").lstrip("./")
-    for pattern in PERFORMANCE_EXCLUSIONS:
+    patterns = PERFORMANCE_EXCLUSIONS
+    if skip_optimization_for_config_files():
+        patterns = (*patterns, *CONFIG_OPTIMIZATION_EXCLUSIONS)
+
+    for pattern in patterns:
         normalized_pattern = pattern.replace("\\", "/").lstrip("./")
         if normalized_pattern.endswith("/") and normalized_path.startswith(normalized_pattern):
             return True
         if fnmatch.fnmatch(normalized_path, normalized_pattern):
             return True
     return False
+
+
+def normalized_code_hash(code: str) -> str:
+    normalized = "\n".join(line.rstrip() for line in code.strip().splitlines())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def has_obvious_loop(code: str) -> bool:
+    lowered = code.lower()
+    return any(token in lowered for token in (
+        "for ",
+        "while ",
+        ".map(",
+        ".filter(",
+        ".foreach(",
+        " stream()",
+        "select ",
+        "join ",
+    ))
+
+
+def candidate_rank(candidate: PerformanceCandidate, changed_file_set: set[str]) -> tuple[int, int, int]:
+    return (
+        1 if candidate.file in changed_file_set else 0,
+        1 if has_obvious_loop(candidate.code) else 0,
+        len(candidate.code.splitlines()),
+    )
+
+
+def rank_and_limit_candidates(
+    candidates: list[PerformanceCandidate],
+    changed_file_set: set[str],
+    max_scope_count: int,
+) -> list[PerformanceCandidate]:
+    meaningful = [
+        candidate for candidate in candidates
+        if candidate.target_type == "file"
+        or has_obvious_loop(candidate.code)
+        or len(candidate.code.splitlines()) >= 6
+    ]
+    ranked = sorted(
+        meaningful,
+        key=lambda candidate: candidate_rank(candidate, changed_file_set),
+        reverse=True,
+    )
+    return ranked[:max_scope_count]
 
 
 def changed_line_numbers(base_ref: str, file_path: str) -> list[int]:
@@ -179,12 +281,22 @@ def changed_line_numbers(base_ref: str, file_path: str) -> list[int]:
 def collect_performance_candidates(max_scopes: int | None = None) -> list[PerformanceCandidate]:
     max_scope_count = max_scopes if max_scopes is not None else performance_max_scopes()
     base_ref = diff_base_ref()
-    files = changed_files(base_ref, max_files=max_scope_count * 2)
+    files = changed_files(base_ref, max_files=max(max_scope_count * 8, 20))
+    changed_file_set = set(files)
+    logger.info("Optimization changed files detected: %s", len(files))
+    if optimization_only_changed_files() and not base_ref:
+        logger.info("Optimization changed-file filtering requested but no diff base was found")
+        if demo_fast_mode():
+            return []
+
     candidates: list[PerformanceCandidate] = []
     seen: set[tuple[str, str, str, int, int]] = set()
+    excluded_file_count = 0
+    before_file_exclusion = len(files)
 
     for file_path in files:
         if is_performance_path_excluded(file_path):
+            excluded_file_count += 1
             continue
 
         language = detect_language(file_path)
@@ -213,8 +325,6 @@ def collect_performance_candidates(max_scopes: int | None = None) -> list[Perfor
                     language=language,
                     code="".join(file_lines).rstrip(),
                 ))
-                if len(candidates) >= max_scope_count:
-                    return candidates
             continue
 
         for line_number in changed_lines:
@@ -239,10 +349,21 @@ def collect_performance_candidates(max_scopes: int | None = None) -> list[Perfor
                 code="".join(file_lines[scope.start_line - 1:scope.end_line]).rstrip(),
             ))
 
-            if len(candidates) >= max_scope_count:
-                return candidates
+    selected = rank_and_limit_candidates(candidates, changed_file_set, max_scope_count)
+    logger.info("Optimization candidate scopes before filtering: %s", len(candidates))
+    logger.info(
+        "Optimization candidates after changed-file filtering: %s",
+        len(candidates) if optimization_only_changed_files() else "not enabled",
+    )
+    logger.info(
+        "Optimization files after exclusion: %s/%s kept",
+        before_file_exclusion - excluded_file_count,
+        before_file_exclusion,
+    )
+    logger.info("Optimization selected candidate scopes: %s", len(selected))
+    logger.info("Optimization max scope limit: %s", max_scope_count)
 
-    return candidates
+    return selected
 
 
 def performance_issue_key(candidate: PerformanceCandidate) -> str:
@@ -260,25 +381,51 @@ def performance_issue_key(candidate: PerformanceCandidate) -> str:
 
 
 def performance_batch_signature(project_key: str, candidate: PerformanceCandidate) -> str:
+    return performance_batch_signature_for_candidates(project_key, [candidate])
+
+
+def performance_batch_signature_for_candidates(project_key: str, candidates: Iterable[PerformanceCandidate]) -> str:
     payload = {
         "review_type": "optimization",
+        "cache_key_version": OPTIMIZATION_CACHE_KEY_VERSION,
         "project_key": project_key,
         "model": CACHE_MODEL,
         "rules_hash": performance_rules_hash(),
-        "file": candidate.file,
-        "target_type": candidate.target_type,
-        "target_name": candidate.target_name,
-        "start_line": candidate.start_line,
-        "end_line": candidate.end_line,
-        "scope_content_hash": hashlib.sha256(candidate.code.encode("utf-8")).hexdigest(),
+        "candidates": [
+            {
+                "file": candidate.file,
+                "target_type": candidate.target_type,
+                "target_name": candidate.target_name,
+                "scope_content_hash": normalized_code_hash(candidate.code),
+            }
+            for candidate in candidates
+        ],
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def build_performance_prompt(project_key: str, candidate: PerformanceCandidate) -> str:
+    return build_performance_batch_prompt(project_key, [candidate])
+
+
+def build_performance_batch_prompt(project_key: str, candidates: list[PerformanceCandidate]) -> str:
     complexity_gain_required = performance_min_complexity_gain()
     context_window = performance_context_window()
+    candidate_payloads = [
+        {
+            "internal_key": performance_issue_key(candidate),
+            "file": candidate.file,
+            "target_type": candidate.target_type,
+            "target_name": candidate.target_name,
+            "line": candidate.start_line,
+            "original_start_line": candidate.start_line,
+            "original_end_line": candidate.end_line,
+            "language": candidate.language,
+            "code": candidate.code,
+        }
+        for candidate in candidates
+    ]
     return f"""
 {PERFORMANCE_REVIEW_RULES}
 
@@ -289,22 +436,14 @@ Optimization review settings:
 - clear efficiency gain required: {complexity_gain_required}
 - context window: {context_window}
 
-Return one issue at most. If no safe optimization is clear, return an empty issues list.
+Return at most one issue per optimization candidate. If no safe optimization is clear for a candidate,
+return no issue for that candidate.
 The response must include current time/space or build/runtime cost estimates, proposed estimates,
 optimization justification and minimal direct replacement code.
+Keep every issue independent. Do not merge unrelated candidates into one code replacement.
 
-OPTIMIZATION CANDIDATE:
-{json.dumps({
-    "internal_key": performance_issue_key(candidate),
-    "file": candidate.file,
-    "target_type": candidate.target_type,
-    "target_name": candidate.target_name,
-    "line": candidate.start_line,
-    "original_start_line": candidate.start_line,
-    "original_end_line": candidate.end_line,
-    "language": candidate.language,
-    "code": candidate.code,
-}, indent=2)}
+OPTIMIZATION CANDIDATES:
+{json.dumps(candidate_payloads, indent=2)}
 """
 
 
@@ -318,8 +457,12 @@ def has_required_performance_metadata(issue: Issue) -> bool:
 
 def analyze_performance(project_key: str) -> Decision:
     if not performance_enabled():
+        logger.info("Optimization review disabled")
         return Decision(issues=[])
 
+    logger.info("Demo fast mode enabled: %s", demo_fast_mode())
+    logger.info("Optimization only changed files: %s", optimization_only_changed_files())
+    logger.info("Optimization skip config files: %s", skip_optimization_for_config_files())
     candidates = collect_performance_candidates()
     logger.info("Optimization review enabled: candidate scopes=%s", len(candidates))
 
@@ -339,11 +482,18 @@ def analyze_performance(project_key: str) -> Decision:
     response_tokens = 0
     total_tokens = 0
     start_time = time.time()
+    batch_size = optimization_batch_size()
+    batches = [
+        candidates[index:index + batch_size]
+        for index in range(0, len(candidates), batch_size)
+    ]
 
-    logger.info("Optimization review batches: %s", len(candidates))
+    logger.info("Optimization batch size: %s", batch_size)
+    logger.info("Optimization review batches: %s", len(batches))
+    logger.info("Optimization cache key version: %s", OPTIMIZATION_CACHE_KEY_VERSION)
 
-    for candidate in candidates:
-        cache_key = performance_batch_signature(project_key, candidate)
+    for batch in batches:
+        cache_key = performance_batch_signature_for_candidates(project_key, batch)
         cached_response_text = batch_cache.get(cache_key)
 
         if cached_response_text:
@@ -359,7 +509,7 @@ def analyze_performance(project_key: str) -> Decision:
             batch_cache_misses += 1
             response = client.models.generate_content(
                 model=CACHE_MODEL,
-                contents=build_performance_prompt(project_key, candidate),
+                contents=build_performance_batch_prompt(project_key, batch),
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=IssueBatchDecision,
@@ -376,24 +526,40 @@ def analyze_performance(project_key: str) -> Decision:
             response_text = response.text
             if response_text is None:
                 logger.error(
-                    "Optimization review response for %s:%s did not contain text",
-                    candidate.file,
-                    candidate.start_line,
+                    "Optimization review response for batch %s did not contain text",
+                    [f"{candidate.file}:{candidate.start_line}" for candidate in batch],
                 )
                 continue
 
             try:
                 decision = IssueBatchDecision.model_validate_json(response_text)
             except Exception as e:
-                logger.error("Failed to parse optimization review response for %s:%s: %s",
-                             candidate.file, candidate.start_line, e)
+                logger.error(
+                    "Failed to parse optimization review response for batch %s: %s",
+                    [f"{candidate.file}:{candidate.start_line}" for candidate in batch],
+                    e,
+                )
                 logger.error("The response from the model was: %s", response_text)
                 continue
 
             batch_cache[cache_key] = response_text
             batch_cache_changed = True
 
-        for issue in decision.issues[:1]:
+        candidate_by_key = {performance_issue_key(candidate): candidate for candidate in batch}
+        used_candidate_keys: set[str] = set()
+        for issue in decision.issues[:len(batch)]:
+            candidate = candidate_by_key.get(issue.sonar_key)
+            if candidate is None:
+                candidate = next(
+                    (
+                        fallback_candidate for fallback_candidate in batch
+                        if performance_issue_key(fallback_candidate) not in used_candidate_keys
+                    ),
+                    None,
+                )
+            if candidate is None:
+                continue
+            used_candidate_keys.add(performance_issue_key(candidate))
             if not has_required_performance_metadata(issue):
                 logger.info(
                     "Dropped optimization suggestion for %s:%s because cost metadata is incomplete",
