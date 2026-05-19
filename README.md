@@ -13,17 +13,8 @@ The objective of this repository is not to contain the agent logic, but to provi
 | Prometheus | `prometheus` | `9090` | Collects metrics from Pushgateway |
 | Pushgateway | `pushgateway` | `9091` | Receives metrics from short agent executions |P
 | Grafana | `grafana` | `3000` | Shows execution metrics in dashboards |
-| CodeGuardian MCP | `codeguardian-mcp` | `8010` | Exposes review context to GitHub Copilot and can apply local replacements |
 
 All services are connected to the Docker network `services-net`.
-
-The MCP endpoint exposed to the host is:
-
-```text
-http://localhost:8010/mcp
-```
-
-It lets Copilot query Bitbucket PR comments, SonarQube findings, Prometheus metrics and Jenkins build summaries. It can also apply one CodeGuardian proposed replacement to the mounted local workspace when explicitly requested.
 
 ## Relation With The Other Repositories
 
@@ -57,9 +48,9 @@ Before starting the environment, the following elements are needed:
 - Token or credentials for the LLM provider used by the agent.
 - Bitbucket API token.
 - Authentication header for Atlassian MCP.
-- Optional Jenkins API token if Copilot will query protected Jenkins build summaries through the CodeGuardian MCP server.
+- Optional Jenkins API token if external tools need to query protected Jenkins endpoints.
 
-For the CodeGuardian MCP service, export these variables before running `docker compose up`:
+For the agent execution, configure these variables in the Jenkins credentials/environment used by the target repository pipeline:
 
 ```bash
 BITBUCKET_EMAIL=your.email@company.com
@@ -71,7 +62,7 @@ JENKINS_USER=your_jenkins_user
 JENKINS_API_TOKEN=your_jenkins_api_token
 ```
 
-`ATLASSIAN_MCP_AUTH_HEADER` is used by the CodeGuardian MCP service to read Bitbucket pull requests and comments through Atlassian MCP. `BITBUCKET_WORKSPACE` is optional. The MCP server detects repositories from the mounted local Git origin remotes when Copilot refers to "this repository", so there is no fixed repository default. The Jenkins variables are optional when Jenkins allows anonymous read access.
+`ATLASSIAN_MCP_AUTH_HEADER` is used by the CodeGuardian agent to read Bitbucket pull requests and comments through Atlassian Rovo MCP. Comment creation and deletion are performed through the Bitbucket REST API with `BITBUCKET_EMAIL` and `BITBUCKET_API_TOKEN`. The Jenkins variables are optional when Jenkins allows anonymous read access.
 
 In Linux, Jenkins uses the Docker socket from the host:
 
