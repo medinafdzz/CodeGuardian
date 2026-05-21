@@ -27,11 +27,7 @@
     "onCommand:codeguardian.watchJenkinsBuild",
     "onCommand:codeguardian.stopJenkinsBuildWatch",
     "onCommand:codeguardian.openGitDiff",
-    "onCommand:codeguardian.openActivityLog",
-    "onCommand:codeguardian.runLocalScan",
-    "onCommand:codeguardian.clearLocalDiagnostics",
-    "onCommand:codeguardian.toggleLocalAnalysis",
-    "onCommand:codeguardian.openLocalResults"
+    "onCommand:codeguardian.openActivityLog"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -117,22 +113,6 @@
       {
         "command": "codeguardian.openActivityLog",
         "title": "CodeGuardian: Open Activity Log"
-      },
-      {
-        "command": "codeguardian.runLocalScan",
-        "title": "CodeGuardian: Run Local Scan"
-      },
-      {
-        "command": "codeguardian.clearLocalDiagnostics",
-        "title": "CodeGuardian: Clear Local Diagnostics"
-      },
-      {
-        "command": "codeguardian.toggleLocalAnalysis",
-        "title": "CodeGuardian: Toggle Local Analysis"
-      },
-      {
-        "command": "codeguardian.openLocalResults",
-        "title": "CodeGuardian: Open Local Results"
       }
     ],
     "configuration": {
@@ -229,33 +209,6 @@
           "default": 30,
           "minimum": 1,
           "description": "Maximum number of minutes to watch a Jenkins PR build before timing out."
-        },
-        "codeguardian.localAnalysis.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable CodeGuardian Local diagnostics from .codeguardian.json-compatible lightweight rules."
-        },
-        "codeguardian.localAnalysis.onType": {
-          "type": "boolean",
-          "default": false,
-          "description": "Run lightweight CodeGuardian Local diagnostics while typing. No network, Docker, MCP or AI calls are made."
-        },
-        "codeguardian.localAnalysis.onSave": {
-          "type": "boolean",
-          "default": true,
-          "description": "Run CodeGuardian Local diagnostics when a file is saved."
-        },
-        "codeguardian.localAnalysis.debounceMs": {
-          "type": "number",
-          "default": 600,
-          "minimum": 100,
-          "description": "Debounce delay for on-type CodeGuardian Local diagnostics."
-        },
-        "codeguardian.localAnalysis.maxFindings": {
-          "type": "number",
-          "default": 50,
-          "minimum": 1,
-          "description": "Maximum number of local diagnostics reported per local scan."
         }
       }
     },

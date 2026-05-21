@@ -5,7 +5,6 @@ import * as http from 'http';
 import * as https from 'https';
 import { execFile, execFileSync } from 'child_process';
 import { URL } from 'url';
-import { LocalAnalysisService } from './local/localAnalysisService';
 
 type Suggestion = {
   id: string;
@@ -41,7 +40,6 @@ type ResultsData = {
   selectedPr: SelectedPullRequestState;
   profile: ProjectProfile;
   gitState: GitChangeState;
-  localAnalysis: LocalAnalysisDashboardState;
 };
 
 type ArtifactState = {
@@ -70,14 +68,6 @@ type GitChangeState = {
   hasChanges: boolean;
   changeCount: number;
   message: string;
-};
-
-type LocalAnalysisDashboardState = {
-  enabled: boolean;
-  findings: number;
-  analyzer: string;
-  ai: 'off';
-  lastScanAt?: string;
 };
 
 type JenkinsAuth = {
@@ -223,7 +213,6 @@ let envConfigCache: Record<string, string> | undefined;
 let envConfigCachePath: string | undefined;
 let envConfigCacheMtime = 0;
 let outputChannel: vscode.OutputChannel | undefined;
-let localAnalysisService: LocalAnalysisService | undefined;
 
 class DiffContentProvider implements vscode.TextDocumentContentProvider {
   private readonly documents = new Map<string, string>();
@@ -423,9 +412,6 @@ class DashboardProvider implements vscode.WebviewViewProvider {
       case 'openLog':
         await openActivityLog();
         break;
-      case 'openGuide':
-        await openQuickGuide();
-        break;
       case 'undoSelected':
         await undoSelectedAppliedSuggestions(message.ids || []);
         this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
@@ -445,18 +431,6 @@ class DashboardProvider implements vscode.WebviewViewProvider {
         break;
       case 'clearDismissed':
         await clearDismissedSuggestions();
-        this.refresh();
-        break;
-      case 'runLocalScan':
-        await localAnalysisService?.runLocalScan();
-        this.refresh();
-        break;
-      case 'clearLocalDiagnostics':
-        localAnalysisService?.clearDiagnostics();
-        this.refresh();
-        break;
-      case 'toggleLocalAnalysis':
-        localAnalysisService?.toggle();
         this.refresh();
         break;
       case 'watchBuild':
@@ -654,11 +628,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await initializeCredentials();
   logInfo(`Credentials source: ${credentialCache.source}`);
   loadProjectProfile();
-  localAnalysisService = new LocalAnalysisService(context, {
-    info: logInfo,
-    warn: logWarn,
-  });
-  localAnalysisService.register();
   const provider = new SuggestionsProvider();
   const dashboard = new DashboardProvider(context);
   buildWatcher = new JenkinsBuildWatcher(provider, dashboard);
@@ -788,7 +757,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 export function deactivate(): void {
   buildWatcher?.dispose();
-  localAnalysisService?.dispose();
 }
 
 function logInfo(message: string): void {
@@ -1152,7 +1120,6 @@ function loadResultsData(showMessage = true): ResultsData {
     selectedPr: selectedPullRequestState(),
     profile,
     gitState: currentGitChangeState(),
-    localAnalysis: localAnalysisDashboardState(),
   });
   try {
     const file = resultsPath();
@@ -1178,24 +1145,12 @@ function loadResultsData(showMessage = true): ResultsData {
       selectedPr: selectedPullRequestState(),
       profile,
       gitState: currentGitChangeState(),
-      localAnalysis: localAnalysisDashboardState(),
     };
   } catch (error) {
     logError(`Failed to load CodeGuardian results: ${errorMessage(error)}`);
     vscode.window.showErrorMessage(`Failed to load CodeGuardian results: ${String(error)}`);
     return empty();
   }
-}
-
-function localAnalysisDashboardState(): LocalAnalysisDashboardState {
-  const status = localAnalysisService?.status();
-  return {
-    enabled: Boolean(status?.enabled),
-    findings: status?.findings || 0,
-    analyzer: status?.analyzer || 'Rules',
-    ai: 'off',
-    lastScanAt: status?.lastScanAt?.toISOString(),
-  };
 }
 
 function dismissedSuggestionIds(): string[] {
@@ -2219,7 +2174,6 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     selectedPr: data.selectedPr,
     profile: data.profile,
     gitState: data.gitState,
-    localAnalysis: data.localAnalysis,
     activeFile,
   }).replace(/</g, '\\u003c');
   return `<!DOCTYPE html>
@@ -2261,7 +2215,7 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     .context-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto auto;
-      gap: 6px;
+      gap: 8px;
       align-items: center;
     }
     .context-line {
@@ -2273,57 +2227,10 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .action-grid {
+    .actions-row {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 6px;
-    }
-    .action-grid .button {
-      min-height: 30px;
-      width: 100%;
-      padding: 5px 6px;
-    }
-    .status-chips {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5px;
-      align-items: center;
-      overflow: hidden;
-    }
-    .chip {
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 999px;
-      padding: 2px 8px;
-      font-size: 11px;
-      font-weight: 600;
-      line-height: 16px;
-      white-space: nowrap;
-      color: var(--vscode-foreground);
-      background: var(--vscode-input-background);
-    }
-    .chip.success {
-      border-color: var(--vscode-testing-iconPassed);
-      background: color-mix(in srgb, var(--vscode-testing-iconPassed) 20%, transparent);
-    }
-    .chip.warning {
-      border-color: var(--vscode-editorWarning-foreground);
-      background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 22%, transparent);
-    }
-    .chip.error {
-      border-color: var(--vscode-testing-iconFailed);
-      background: color-mix(in srgb, var(--vscode-testing-iconFailed) 20%, transparent);
-    }
-    .chip.info {
-      border-color: var(--vscode-charts-blue);
-      background: color-mix(in srgb, var(--vscode-charts-blue) 20%, transparent);
-    }
-    .chip.neutral {
-      color: var(--vscode-descriptionForeground);
-      border-color: var(--vscode-descriptionForeground);
-      background: var(--vscode-input-background);
-    }
-    .more-wrap {
-      position: relative;
     }
     .next-step {
       color: var(--vscode-descriptionForeground);
@@ -2343,27 +2250,6 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     .compact-action {
       min-width: 72px;
       white-space: nowrap;
-    }
-    .help-icon {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 15px;
-      height: 15px;
-      margin-left: 5px;
-      border: 1px solid var(--vscode-charts-blue);
-      border-radius: 50%;
-      color: var(--vscode-charts-blue);
-      background: color-mix(in srgb, var(--vscode-charts-blue) 12%, transparent);
-      font-size: 10px;
-      font-weight: 700;
-      vertical-align: text-bottom;
-      cursor: pointer;
-      padding: 0;
-    }
-    .help-icon:hover {
-      color: var(--vscode-textLink-activeForeground);
-      border-color: var(--vscode-textLink-activeForeground);
     }
     .banner {
       padding: 0;
@@ -2444,10 +2330,6 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       padding: 5px 8px;
       cursor: pointer;
       text-align: center;
-    }
-    .button.small {
-      padding: 4px 7px;
-      font-size: 12px;
     }
     .button:hover {
       background: var(--vscode-button-secondaryHoverBackground);
@@ -2848,22 +2730,19 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
   <div class="shell">
     <div class="header-card">
       <div class="context-row">
-        <div class="context-line"><span id="contextLine">CodeGuardian &middot; PR: Not selected &middot; Profile: default</span><button class="help-icon" id="quickGuide" title="Open CodeGuardian quick guide" aria-label="Open CodeGuardian quick guide">?</button></div>
+        <div class="context-line" id="contextLine">CodeGuardian &middot; PR: Not selected &middot; Profile: default</div>
         <button class="button dashboard-action compact-action" id="openPr" disabled>Open PR</button>
-        <button class="button secondary compact-action" id="selectPr">Change PR</button>
+        <button class="button secondary compact-action" id="selectPr">Select PR</button>
       </div>
-      <div class="status-chips" id="statusChips"></div>
+      <div class="banner" id="artifactBanner"></div>
       <div class="build-status" id="buildStatus"></div>
-      <div class="action-grid">
+      <div class="actions-row">
         <button class="button dashboard-action" id="refresh">Refresh</button>
         <button class="button dashboard-action" id="download">Download Results</button>
-        <button class="button dashboard-action" id="runLocalScan">Run Local Scan</button>
+        <button class="button secondary" id="openGitDiff">Open Git Diff</button>
         <button class="button" id="applySelected" disabled>Apply Selected</button>
         <button class="button secondary" id="undoSelected" disabled>Undo Selected</button>
-        <button class="button secondary" id="openGitDiff">Open Git Diff</button>
         <button class="button secondary" id="openLog">Activity Log</button>
-        <button class="button secondary" id="toggleLocalAnalysis">Toggle Local</button>
-        <button class="button secondary" id="clearLocalDiagnostics">Clear Local Findings</button>
       </div>
       <div class="selection-summary" id="selectionSummary"></div>
       <div class="next-step" id="nextStep"></div>
@@ -2934,10 +2813,6 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     });
     byId('openGitDiff').addEventListener('click', () => vscode.postMessage({ command: 'openGitDiff' }));
     byId('openLog').addEventListener('click', () => vscode.postMessage({ command: 'openLog' }));
-    byId('quickGuide').addEventListener('click', () => vscode.postMessage({ command: 'openGuide' }));
-    byId('runLocalScan').addEventListener('click', () => vscode.postMessage({ command: 'runLocalScan' }));
-    byId('toggleLocalAnalysis').addEventListener('click', () => vscode.postMessage({ command: 'toggleLocalAnalysis' }));
-    byId('clearLocalDiagnostics').addEventListener('click', () => vscode.postMessage({ command: 'clearLocalDiagnostics' }));
     byId('clearDismissed').addEventListener('click', () => vscode.postMessage({ command: 'clearDismissed' }));
     byId('clearFilters').addEventListener('click', () => clearFilters());
     byId('advancedToggle').addEventListener('click', () => {
@@ -3056,7 +2931,7 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       renderFilterCount();
       renderAdvancedFilters();
       renderTabs();
-      renderStatusChips();
+      renderArtifactBanner();
       renderJenkinsBuildStatus();
       renderSelectionSummary();
       renderNextStep();
@@ -3128,7 +3003,7 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       selectPr.title = hasPr
         ? 'PR #' + selectedPr.id + (selectedPr.title ? ': ' + selectedPr.title : '')
         : 'Select pull request';
-      selectPr.className = 'button secondary compact-action';
+      selectPr.className = hasPr ? 'button dashboard-action' : 'button';
       openPr.disabled = !hasPr;
       openPr.title = hasPr ? 'Open PR #' + selectedPr.id + (selectedPr.title ? ': ' + selectedPr.title : '') : 'No pull request selected';
       const gitState = state.gitState || {};
@@ -3140,15 +3015,6 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       const clearDismissed = byId('clearDismissed');
       clearDismissed.disabled = dismissedIds.size === 0;
       clearDismissed.title = dismissedIds.size === 0 ? 'No dismissed suggestions' : 'Clear locally dismissed suggestions';
-      const local = state.localAnalysis || {};
-      byId('toggleLocalAnalysis').textContent = local.enabled ? 'Disable Local Analysis' : 'Enable Local Analysis';
-      byId('toggleLocalAnalysis').title = local.enabled ? 'Disable CodeGuardian Local diagnostics' : 'Enable CodeGuardian Local diagnostics';
-      byId('clearLocalDiagnostics').textContent = 'Clear Local Findings';
-      byId('clearLocalDiagnostics').title = 'Clear CodeGuardian Local diagnostics from the editor and Problems panel';
-      byId('clearLocalDiagnostics').disabled = !local.findings;
-      byId('clearLocalDiagnostics').title = local.findings ? 'Clear CodeGuardian Local diagnostics from the editor and Problems panel' : 'No local findings to clear';
-
-
     }
 
     function isDownloadArtifactBlocked() {
@@ -3203,7 +3069,7 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       render();
     }
 
-    function renderStatusChips() {
+    function renderArtifactBanner() {
       const artifact = state.artifact || {};
       const downloadedAt = artifact.downloadedAt ? new Date(artifact.downloadedAt).toLocaleString() : 'not downloaded';
       const validation = norm(artifact.validation || 'unknown');
@@ -3211,19 +3077,15 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       const localCommit = artifact.localCommit || '';
       const commitMatches = commit && localCommit && (commit.startsWith(localCommit) || localCommit.startsWith(commit));
       const repoMessage = artifact.message || '';
-      const local = state.localAnalysis || {};
-      const chips = [
-        chip('Artifact ' + artifactStatusText(validation), artifactClass(validation, artifact.status), (artifact.validation || 'unknown').toUpperCase()),
-        chip(commit && commitMatches ? 'Commit OK' : commit ? 'Commit check' : 'Commit unknown', commit ? (commitMatches ? 'success' : validation === 'stale' ? 'error' : 'warning') : 'warning', commit ? shortHash(commit) + (commitMatches ? ', matches local HEAD' : localCommit ? ', local HEAD is ' + shortHash(localCommit) : '') : 'missing commit metadata'),
-        chip(artifact.downloadedAt ? 'Downloaded' : 'Not downloaded', artifact.downloadedAt ? 'success' : 'neutral', downloadedAt),
-        chip('Repo ' + repoStatusText(validation, repoMessage), repoClass(validation, repoMessage), repoMessage || 'repository metadata unavailable'),
-        chip(local.enabled ? 'Local On' : 'Local Off', local.enabled ? 'success' : 'neutral', local.enabled ? 'Local diagnostics enabled' : 'Local diagnostics disabled')
+      const credentials = state.credentialStatus || { configured: false, source: 'missing', message: 'Credentials: missing' };
+      const tags = [
+        bannerTag('Artifact ' + artifactStatusText(validation), artifactClass(validation, artifact.status), (artifact.validation || 'unknown').toUpperCase()),
+        bannerTag('Commit ' + (commit && commitMatches ? 'OK' : commit ? 'check' : 'unknown'), commit ? (commitMatches ? 'success' : validation === 'stale' ? 'error' : 'warning') : 'warning', commit ? shortHash(commit) + (commitMatches ? ', matches local HEAD' : localCommit ? ', local HEAD is ' + shortHash(localCommit) : '') : 'missing commit metadata'),
+        bannerTag('Credentials ' + (credentials.configured ? 'OK' : 'missing'), credentialClass(credentials.source), credentials.message || 'Credentials: missing'),
+        bannerTag(artifact.downloadedAt ? 'Downloaded' : 'Not downloaded', artifact.downloadedAt ? 'success' : 'unknown', downloadedAt),
+        bannerTag('Repo ' + repoStatusText(validation, repoMessage), repoClass(validation, repoMessage), repoMessage || 'repository metadata unavailable')
       ];
-      byId('statusChips').innerHTML = chips.join('');
-    }
-
-    function chip(label, tone, title) {
-      return '<span class="chip ' + escapeHtml(tone || 'neutral') + '" title="' + escapeHtml(title || label) + '">' + escapeHtml(label) + '</span>';
+      byId('artifactBanner').innerHTML = tags.join('');
     }
 
     function artifactStatusText(validation) {
@@ -3288,12 +3150,15 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       if (norm(watch.state) !== 'artifact_ready') {
         artifactReadyDownloadRequested = false;
       }
+      const tone = jenkinsTone(watch.state);
+      const status = jenkinsDisplayText(watch);
+      const tooltip = jenkinsTooltip(watch);
       const progress = shouldShowProgress(watch)
         ? '<div class="progress" title="' + escapeHtml(String(watch.progress) + '%') + '"><div class="progress-fill" style="width:' + Math.max(0, Math.min(100, watch.progress)) + '%"></div></div>'
         : '';
       byId('buildStatus').innerHTML =
-        '<div class="build-line ' + escapeHtml(jenkinsTone(watch.state)) + '" title="' + escapeHtml(jenkinsTooltip(watch)) + '">' +
-        '<span class="message">' + escapeHtml(jenkinsDisplayText(watch)) + '</span>' +
+        '<div class="build-line ' + tone + '" title="' + escapeHtml(tooltip) + '">' +
+        '<span class="message">' + escapeHtml(status) + '</span>' +
         '</div>' + progress;
     }
 
@@ -3337,7 +3202,7 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       const summary = selectionSummary(selected);
       byId('selectionSummary').textContent = selected.length
         ? summary.selected + ' selected - ' + summary.ready + ' ready - ' + summary.applied + ' applied - ' + summary.skipped + ' skipped' + skippedReasonText(summary)
-        : '';
+        : 'No suggestions selected';
       const hidden = shouldHideSuggestions();
       byId('applySelected').disabled = hidden || summary.ready === 0 || !state.applyAllowed;
       byId('applySelected').title = hidden ? 'Latest CodeGuardian results are not ready' : state.applyAllowed ? '' : state.applyDisabledReason;
@@ -3346,7 +3211,7 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     }
 
     function renderNextStep() {
-      byId('nextStep').textContent = 'Next step: review recommended fixes or select Ready suggestions.';
+      byId('nextStep').textContent = 'Next step: ' + nextStepMessage();
     }
 
     function nextStepMessage() {
@@ -3769,78 +3634,6 @@ async function openActivityLog(): Promise<void> {
   logInfo('Activity Log opened.');
   outputChannel?.show(true);
   await vscode.commands.executeCommand('workbench.panel.output.focus');
-}
-
-async function openQuickGuide(): Promise<void> {
-  logInfo('Quick guide opened.');
-  const document = await vscode.workspace.openTextDocument({
-    language: 'markdown',
-    content: quickGuideMarkdown(),
-  });
-  await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
-}
-
-function quickGuideMarkdown(): string {
-  return `# CodeGuardian Quick Guide
-
-## What is CodeGuardian?
-
-CodeGuardian helps review pull requests and local code changes by showing validated suggestions, local diagnostics and safe apply actions inside VS Code.
-
-## Status colors
-
-- Green: valid, ready, enabled or OK.
-- Yellow: warning, idle, pending or needs attention.
-- Red: blocking, failed or unsafe.
-- Blue/Cyan: informational state.
-- Gray: disabled, unavailable or neutral.
-
-## Status tags
-
-- Artifact valid: downloaded PR results match the current context.
-- Commit OK: results match the current commit.
-- Downloaded: results were downloaded from Jenkins.
-- Repo OK: results belong to the current repository.
-- Local On/Off: local analysis state.
-- Rules: local deterministic rules are being used.
-- N findings: number of local findings currently detected.
-- AI Off: local AI assistance is disabled.
-- Jenkins Idle/Running: Jenkins watcher state.
-
-## Main actions
-
-- Refresh: refresh dashboard state and suggestion status.
-- Download Results: download the latest Jenkins artifact.
-- Run Local Scan: run local rule-based analysis.
-- Open PR: open the current Bitbucket pull request.
-- Change PR: select another open pull request.
-- Apply Selected: apply selected ready suggestions.
-- Open Git Diff: review local file changes.
-- Activity Log: open the CodeGuardian output log.
-- Clear Local Results: clear local diagnostics/results.
-
-## Suggestion states
-
-- Ready: suggestion can be reviewed/applied.
-- Applied: proposed code is already present.
-- Needs refresh: local code changed and the suggestion no longer matches safely.
-- Dismissed: suggestion was hidden by the user.
-
-## Local analysis
-
-Local analysis runs only in the local workspace. It does not require Jenkins, Bitbucket, SonarQube, Gemini or Docker. It is intended to catch simple issues before pushing code or opening a PR.
-
-## Recommended workflow
-
-1. Run Local Scan while developing.
-2. Fix local diagnostics if needed.
-3. Push changes and let Jenkins analyze the PR.
-4. Download PR results.
-5. Review Recommended fixes.
-6. Inspect Locate / Details / Diff.
-7. Apply safe suggestions.
-8. Review Git diff and commit.
-`;
 }
 
 function buildFullFileDiffPreview(currentText: string, suggestion: Suggestion): { text: string; startLine: number; endLine: number } | undefined {
