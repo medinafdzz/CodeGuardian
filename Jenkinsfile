@@ -268,6 +268,17 @@ pipeline {
                     string(credentialsId: 'atlassian-mcp-auth-header', variable: 'ATLASSIAN_MCP_AUTH_HEADER')
                 ]) {
                     script {
+                        def prHeadCommit = sh(
+                            returnStdout: true,
+                            script: '''
+                                if [ -n "${CHANGE_BRANCH:-}" ] && git rev-parse --verify "origin/${CHANGE_BRANCH}^{commit}" >/dev/null 2>&1; then
+                                    git rev-parse "origin/${CHANGE_BRANCH}^{commit}"
+                                else
+                                    git rev-parse HEAD
+                                fi
+                            '''
+                        ).trim()
+
                         def data = groovy.json.JsonOutput.prettyPrint(
                             groovy.json.JsonOutput.toJson([
                                 pr_id      : env.CHANGE_ID ?: '',
@@ -284,7 +295,8 @@ pipeline {
                         withEnv([
                             "AGENT_REPO_HOST_PATH=${agentRepoHostPath}",
                             'ATLASSIAN_MCP_URL=https://mcp.atlassian.com/v1/mcp',
-                            "CODEGUARDIAN_RESULTS_PATH=${env.WORKSPACE}/codeguardian-results.json"
+                            "CODEGUARDIAN_RESULTS_PATH=${env.WORKSPACE}/codeguardian-results.json",
+                            "CODEGUARDIAN_HEAD_COMMIT=${prHeadCommit}"
                         ]) {
                             sh '''
                             #!/bin/bash
