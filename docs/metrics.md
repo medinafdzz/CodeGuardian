@@ -177,6 +177,9 @@ The agent exports:
 - `codeguardian_comments_created_total`
 - `codeguardian_comments_reused_total`
 - `codeguardian_comments_deleted_total`
+- `codeguardian_comments_resolved_total`
+- `codeguardian_comments_kept_total`
+- `codeguardian_comments_sync_failed_total`
 
 These metrics show how the inline comment synchronization behaved in the pull request.
 

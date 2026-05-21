@@ -83,6 +83,10 @@ class CommentSyncResult:
     created: int = 0
     reused: int = 0
     deleted: int = 0
+    resolved: int = 0
+    kept: int = 0
+    failed: int = 0
+    mode: str = "resolve"
 
 
 class IssueBatchDecision(BaseModel):

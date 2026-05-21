@@ -61,7 +61,7 @@ A second important architectural decision is that model output is never publishe
 
 ### 7. Synchronization of pull request comments
 
-If a proposal passes validation, the agent prepares the final inline comment content and synchronizes it with the pull request. Instead of deleting and recreating everything on each run, CodeGuardian reads existing inline comments, identifies the ones created by the agent, compares them against the desired state, deletes obsolete comments, reuses matching ones, and only creates the missing comments. The current signature used for synchronization includes file path, target line, issue identifiers and a content hash, which makes the synchronization more precise than a simple line-based comparison.
+If a proposal passes validation, the agent prepares the final inline comment content and synchronizes it with the pull request. Instead of deleting and recreating everything on each run, CodeGuardian reads existing inline comments, identifies the ones created by the agent, compares them against the desired state, resolves obsolete CodeGuardian threads by default, reuses matching ones, and only creates the missing comments. The current signature used for synchronization includes file path, target line, issue identifiers and a content hash, which makes the synchronization more precise than a simple line-based comparison. The obsolete-comment policy is configurable with `CODEGUARDIAN_COMMENT_SYNC_MODE=resolve|delete|keep`.
 
 ### 8. Metrics export
 

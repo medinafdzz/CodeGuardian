@@ -249,7 +249,7 @@ Analysis metrics are exported to Pushgateway, including:
 - cache hits and misses,
 - SonarQube findings,
 - generated, dropped and final issues,
-- Bitbucket comments created, reused and deleted,
+- Bitbucket comments created, reused, resolved, deleted, kept and failed,
 - last execution timestamp.
 
 In addition, the agent logs:
@@ -271,6 +271,8 @@ Main environment variables:
 - `ATLASSIAN_MCP_AUTH_HEADER`
 
 Additional optional variables are available for cache configuration, endpoints, grouping behaviour and optimization review.
+`CODEGUARDIAN_COMMENT_SYNC_MODE` controls obsolete CodeGuardian inline comments:
+`resolve` resolves obsolete threads, `delete` preserves the previous deletion behaviour and `keep` leaves them untouched. The default is `resolve`.
 
 ## Minimal Agent Invocation
 

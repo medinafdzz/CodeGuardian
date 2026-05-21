@@ -249,15 +249,21 @@ The agent generates the list of desired comment signatures and their associated 
 
 ### Step 3: Build the existing index
 
-The agent converts existing comments into a dictionary indexed by signature. If duplicated existing signatures are found, the extra ones are marked for deletion.
+The agent converts existing comments into a dictionary indexed by signature. If duplicated existing signatures are found, the extra ones are marked as obsolete.
 
 ### Step 4: Detect obsolete comments
 
-If an existing signature is not present in the desired state, that comment is considered obsolete and added to the deletion set.
+If an existing signature is not present in the desired state, that comment is considered obsolete.
 
-### Step 5: Delete obsolete comments
+### Step 5: Handle obsolete comments
 
-All comments marked for deletion are removed through `delete_comment_ids()`.
+Obsolete CodeGuardian comments are handled according to `CODEGUARDIAN_COMMENT_SYNC_MODE`:
+
+- `resolve` resolves obsolete Bitbucket comment threads through the REST API. This is the default.
+- `delete` removes obsolete comments and preserves the previous behaviour.
+- `keep` leaves obsolete comments untouched.
+
+Only comments marked with the CodeGuardian marker are handled. Human comments are ignored.
 
 ### Step 6: Create missing comments
 
@@ -269,7 +275,10 @@ At the end, the function logs a synchronization summary with:
 - desired comments,
 - created comments,
 - reused comments,
-- deleted comments.
+- resolved comments,
+- deleted comments,
+- kept comments,
+- failed synchronization operations.
 
 This makes the synchronization behaviour observable and easier to evaluate experimentally.
 

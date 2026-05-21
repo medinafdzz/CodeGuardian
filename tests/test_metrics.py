@@ -30,6 +30,9 @@ def test_build_metrics_registry_exports_execution_analysis_and_comment_values():
             created=1,
             reused=1,
             deleted=3,
+            resolved=4,
+            kept=5,
+            failed=6,
         ),
     )
 
@@ -46,6 +49,9 @@ def test_build_metrics_registry_exports_execution_analysis_and_comment_values():
     assert "codeguardian_blocking_findings 1.0" in output
     assert "codeguardian_comments_created_total 1.0" in output
     assert "codeguardian_comments_deleted_total 3.0" in output
+    assert "codeguardian_comments_resolved_total 4.0" in output
+    assert "codeguardian_comments_kept_total 5.0" in output
+    assert "codeguardian_comments_sync_failed_total 6.0" in output
 
 
 def test_metric_grouping_key_uses_stable_repository_labels(monkeypatch):

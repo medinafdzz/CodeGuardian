@@ -95,6 +95,16 @@ def get_agent_summary_comment_ids(comments: list[dict]) -> set[int]:
     return summary_comment_ids
 
 
+def is_comment_resolved(comment: dict) -> bool:
+    state = str(comment.get("state") or comment.get("status") or "").strip().lower()
+    if state == "resolved":
+        return True
+    if comment.get("resolved") is True:
+        return True
+    resolution = comment.get("resolution")
+    return bool(resolution and resolution is not False)
+
+
 async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str, workspace: str) -> dict[int, dict]:
     try:
         comments = await get_pull_request_comments(session, pr_id, repo_slug, workspace)
@@ -103,6 +113,9 @@ async def get_inline_comments(session: ClientSession, pr_id: str, repo_slug: str
 
         for comment in comments:
             if comment.get("deleted", False):
+                continue
+
+            if is_comment_resolved(comment):
                 continue
 
             if comment.get("parent"):
@@ -171,6 +184,14 @@ def build_pullrequest_comment_url(
     base_url = get_bitbucket_api_base_url()
     return (f"{base_url}/repositories/{workspace}/{repo_slug}"
             f"/pullrequests/{pr_id}/comments/{comment_id}")
+
+
+def comment_sync_mode() -> str:
+    mode = (os.getenv("CODEGUARDIAN_COMMENT_SYNC_MODE") or "resolve").strip().lower()
+    if mode not in {"resolve", "delete", "keep"}:
+        logger.warning("Unsupported CODEGUARDIAN_COMMENT_SYNC_MODE=%s. Falling back to resolve.", mode)
+        return "resolve"
+    return mode
 
 
 async def create_inline_comment_by_rest(
@@ -282,6 +303,58 @@ async def delete_inline_comment_by_rest(
         return False
 
 
+async def resolve_inline_comment_by_rest(
+    pr_id: str,
+    repo_slug: str,
+    comment_id: str,
+    workspace: str,
+) -> bool:
+    headers = get_bitbucket_basic_auth_headers()
+    if not headers:
+        return False
+
+    resolve_url = f"{build_pullrequest_comment_url(pr_id, repo_slug, comment_id, workspace)}/resolve"
+
+    def _resolve_comment() -> int:
+        req = urllib.request.Request(
+            url=resolve_url,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return int(resp.status)
+
+    try:
+        status = await asyncio.to_thread(_resolve_comment)
+        return status == 200
+    except urllib.error.HTTPError as e:
+        if e.code == 200:
+            return True
+        if e.code == 404:
+            logger.info("CodeGuardian comment already unavailable while resolving: %s", comment_id)
+            return True
+        if e.code == 409:
+            logger.info("CodeGuardian comment resolve conflict, treating as non-fatal: %s", comment_id)
+            return True
+        logger.error(
+            "Failed to resolve inline comment by REST: status=%s repo=%s pr=%s comment_id=%s",
+            e.code,
+            repo_slug,
+            pr_id,
+            comment_id,
+        )
+        return False
+    except Exception as e:
+        logger.error(
+            "Unexpected error resolving inline comment by REST: repo=%s pr=%s comment_id=%s error=%s",
+            repo_slug,
+            pr_id,
+            comment_id,
+            e,
+        )
+        return False
+
+
 async def delete_comment_ids(
     pr_id: str,
     repo_slug: str,
@@ -307,6 +380,33 @@ async def delete_comment_ids(
             logger.info("Comment %s could not be deleted", comment_id)
 
     return deleted_comment_ids, failed_comment_ids
+
+
+async def resolve_comment_ids(
+    pr_id: str,
+    repo_slug: str,
+    workspace: str,
+    comment_ids: set[int],
+) -> tuple[set[int], set[int]]:
+    resolved_comment_ids: set[int] = set()
+    failed_comment_ids: set[int] = set()
+
+    for comment_id in sorted(comment_ids):
+        resolved = await resolve_inline_comment_by_rest(
+            pr_id,
+            repo_slug,
+            str(comment_id),
+            workspace,
+        )
+        if resolved:
+            resolved_comment_ids.add(comment_id)
+            logger.info("Inline comment resolved: %s", comment_id)
+            await asyncio.sleep(0.2)
+        else:
+            failed_comment_ids.add(comment_id)
+            logger.info("Comment %s could not be resolved", comment_id)
+
+    return resolved_comment_ids, failed_comment_ids
 
 
 async def post_issue_group_comment(
@@ -464,7 +564,7 @@ async def synchronize_inline_comments(
         })
 
     existing: dict[tuple, int] = {}
-    to_delete: set[int] = set()
+    obsolete_comments: set[int] = set()
 
     for comment_id, comment_data in active_inline_comments.items():
         file_path = (comment_data.get("file_path") or "").strip()
@@ -473,7 +573,7 @@ async def synchronize_inline_comments(
         content_hash = comment_data.get("content_hash", "")
 
         if not file_path or not line_to or not issue_keys or not content_hash:
-            to_delete.add(comment_id)
+            obsolete_comments.add(comment_id)
             continue
 
         signature = (
@@ -484,7 +584,7 @@ async def synchronize_inline_comments(
         )
 
         if signature in existing:
-            to_delete.add(comment_id)
+            obsolete_comments.add(comment_id)
             continue
 
         existing[signature] = comment_id
@@ -493,10 +593,24 @@ async def synchronize_inline_comments(
 
     for signature, comment_id in existing.items():
         if signature not in desired_signatures:
-            to_delete.add(comment_id)
+            obsolete_comments.add(comment_id)
 
-    if to_delete:
-        await delete_comment_ids(pr_id, repo_slug, workspace, to_delete)
+    mode = comment_sync_mode()
+    deleted_comment_ids: set[int] = set()
+    resolved_comment_ids: set[int] = set()
+    failed_comment_ids: set[int] = set()
+    kept_comments = 0
+
+    if obsolete_comments:
+        if mode == "delete":
+            deleted_comment_ids, failed_comment_ids = await delete_comment_ids(
+                pr_id, repo_slug, workspace, obsolete_comments)
+        elif mode == "keep":
+            kept_comments = len(obsolete_comments)
+            logger.info("Keeping %s obsolete CodeGuardian inline comments", kept_comments)
+        else:
+            resolved_comment_ids, failed_comment_ids = await resolve_comment_ids(
+                pr_id, repo_slug, workspace, obsolete_comments)
 
     created_comments = 0
 
@@ -510,14 +624,20 @@ async def synchronize_inline_comments(
         await asyncio.sleep(0.2)
 
     reused_comments = len(desired_comments) - created_comments
-    deleted_comments = len(to_delete)
+    deleted_comments = len(deleted_comment_ids)
+    resolved_comments = len(resolved_comment_ids)
+    failed_comments = len(failed_comment_ids)
 
     logger.info(
-        "Inline synchronization summary: desired=%s created=%s reused=%s deleted=%s",
+        "Inline synchronization summary: mode=%s desired=%s created=%s reused=%s resolved=%s deleted=%s kept=%s failed=%s",
+        mode,
         len(desired_comments),
         created_comments,
         reused_comments,
+        resolved_comments,
         deleted_comments,
+        kept_comments,
+        failed_comments,
     )
 
     return CommentSyncResult(
@@ -525,6 +645,10 @@ async def synchronize_inline_comments(
         created=created_comments,
         reused=reused_comments,
         deleted=deleted_comments,
+        resolved=resolved_comments,
+        kept=kept_comments,
+        failed=failed_comments,
+        mode=mode,
     )
 
 

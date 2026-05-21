@@ -149,6 +149,24 @@ def build_metrics_registry(
         "Number of obsolete Bitbucket inline comments deleted by the agent",
         comments.deleted,
     )
+    _set_gauge(
+        registry,
+        "codeguardian_comments_resolved_total",
+        "Number of obsolete Bitbucket inline comment threads resolved by the agent",
+        comments.resolved,
+    )
+    _set_gauge(
+        registry,
+        "codeguardian_comments_kept_total",
+        "Number of obsolete Bitbucket inline comments left untouched by the agent",
+        comments.kept,
+    )
+    _set_gauge(
+        registry,
+        "codeguardian_comments_sync_failed_total",
+        "Number of Bitbucket inline comments that could not be synchronized",
+        comments.failed,
+    )
 
     return registry
 
