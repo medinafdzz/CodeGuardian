@@ -535,11 +535,23 @@ class JenkinsBuildWatcher {
 
       if (next.state === 'artifact_ready' && next.artifactUrl) {
         if (configBoolean('autoDownload', true)) {
-          await downloadResultsFromUrl(next.artifactUrl, {
+          const artifact = await downloadResultsFromUrl(next.artifactUrl, {
             commit: extractBuildCommit(build),
             buildNumber: build.number ? String(build.number) : undefined,
           });
           this.provider.refresh();
+          if (artifact.validation !== 'valid') {
+            this.setStatus({
+              ...next,
+              state: 'running',
+              message: `Build #${build.number || ''} artifact is stale; waiting for latest results.`,
+              artifactReady: false,
+              progress: undefined,
+              lastUpdatedAt: Date.now(),
+            });
+            this.schedule();
+            return;
+          }
           this.setStatus({
             ...next,
             state: 'artifact_downloaded',
@@ -580,8 +592,8 @@ class JenkinsBuildWatcher {
   private schedule(running = false): void {
     this.clearTimer();
     const intervalSeconds = running
-      ? Math.min(Math.max(10, configNumber('pollIntervalSeconds', 45)), 15)
-      : Math.max(15, configNumber('pollIntervalSeconds', 45));
+      ? Math.min(Math.max(5, configNumber('pollIntervalSeconds', 45)), 10)
+      : Math.max(5, configNumber('pollIntervalSeconds', 45));
     this.timer = setTimeout(() => void this.tick(), intervalSeconds * 1000);
   }
 
@@ -874,7 +886,7 @@ function startGitHeadWatcher(
       dashboard.refresh();
       void buildWatcher?.start('git-change');
     }
-  }, Math.max(15, configNumber('pollIntervalSeconds', 45)) * 1000);
+  }, Math.max(5, configNumber('pollIntervalSeconds', 45)) * 1000);
   context.subscriptions.push({ dispose: () => clearInterval(interval) });
 }
 
@@ -910,7 +922,7 @@ function startAutoDownloadPolling(
   };
 
   void poll();
-  const intervalMs = Math.max(15, configNumber('pollIntervalSeconds', 45)) * 1000;
+  const intervalMs = Math.max(5, configNumber('pollIntervalSeconds', 45)) * 1000;
   const timer = setInterval(() => void poll(), intervalMs);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
 }
@@ -1576,7 +1588,7 @@ async function tryDownloadReadyArtifact(): Promise<string | undefined> {
   return ready.buildKey;
 }
 
-async function downloadResultsFromUrl(url: string, metadata: Partial<ArtifactState> = {}): Promise<void> {
+async function downloadResultsFromUrl(url: string, metadata: Partial<ArtifactState> = {}): Promise<ArtifactState> {
   logInfo('Artifact download started.');
   const body = await downloadText(url, jenkinsAuth());
   let parsed: Record<string, unknown>;
@@ -1593,7 +1605,7 @@ async function downloadResultsFromUrl(url: string, metadata: Partial<ArtifactSta
   const effectiveParsed = artifactMetadata(parsed).headCommit || !metadata.commit
     ? parsed
     : { ...parsed, head_commit: metadata.commit };
-  await setArtifactState({
+  const artifactState: ArtifactState = {
     status: 'downloaded',
     validation: validateArtifactContext(effectiveParsed, getLocalGitContext()).state,
     prId: stringFromMetadata(parsed, ['pull_request', 'pullRequest', 'pr_id', 'prId']),
@@ -1602,9 +1614,11 @@ async function downloadResultsFromUrl(url: string, metadata: Partial<ArtifactSta
     localCommit: currentGitHeadSync(),
     downloadedAt: new Date().toISOString(),
     message: 'downloaded from Jenkins artifact',
-  });
+  };
+  await setArtifactState(artifactState);
   logInfo(`Artifact downloaded to ${resultsPath()}.`);
   vscode.window.showInformationMessage(`Downloaded CodeGuardian results to ${resultsPath()}`);
+  return artifactState;
 }
 
 async function selectPullRequestAndDownload(): Promise<void> {
