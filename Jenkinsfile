@@ -4,7 +4,7 @@ pipeline {
     environment {
         SONARQUBE_HOST_URL   = 'http://sonarqube-server:9000'
         AGENT_REPO_URL       = 'https://bitbucket.org/medinafdzz/codeguardian-core.git'
-        AGENT_REPO_REF       = 'feature'
+        AGENT_REPO_REF       = 'main'
         BITBUCKET_WORKSPACE  = 'medinafdzz'
         CACHE_MODE           = 'explicit'
         CACHE_TTL            = '3600s'
