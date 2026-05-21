@@ -17,7 +17,7 @@ Bitbucket pull request
   -> Grafana dashboard
 ```
 
-The demo target repository can be `app-demo`, but the system is not limited to that repository. `app-demo` is only the controlled project used to demonstrate the workflow.
+The demo target repository is `codeguardian-sample-mixed`, but the system is not limited to that repository. `codeguardian-sample-mixed` is only the controlled project used to demonstrate the workflow with Java and Python code.
 
 ## Repositories Used
 
@@ -25,7 +25,7 @@ The demo target repository can be `app-demo`, but the system is not limited to t
 | --- | --- |
 | `codeguardian-infra` | Starts Jenkins, SonarQube, Prometheus, Pushgateway and Grafana |
 | `codeguardian-core` | Contains the Python agent executed by Jenkins |
-| `app-demo` | Demo target repository analysed by the pipeline |
+| `codeguardian-sample-mixed` | Demo target repository analysed by the pipeline |
 
 ## Previous Requirements
 
@@ -37,7 +37,7 @@ Before starting the demo, check that:
 - SonarQube has a valid token.
 - Bitbucket credentials are valid.
 - The Atlassian MCP authentication header is configured.
-- The branch used by the Jenkinsfile points to the correct `codeguardian-core` branch.
+- The branch used by the Jenkinsfile points to `codeguardian-core` `main`.
 
 The most important Jenkins credentials are:
 
@@ -97,7 +97,7 @@ In Jenkins, use the `CodeGuardian` job. This job should discover the pull reques
 For the demo repository, the expected branch flow is usually:
 
 ```text
-main <- feature
+main <- demo/mixed-review
 ```
 
 The pull request must contain changes that can generate SonarQube findings. If the repository has no relevant findings, the agent will report a clean analysis state.

@@ -22,12 +22,12 @@ CodeGuardian is divided into three repositories:
 
 - `codeguardian-infra`: this repository. It defines Jenkins, SonarQube, Prometheus, Pushgateway and Grafana.
 - `codeguardian-core`: contains the Python agent that reads SonarQube issues, calls the AI model, validates suggestions and publishes comments in Bitbucket.
-- `demo-java` / `app-demo`: Java repository used as the target project for the demonstration.
+- `codeguardian-sample-mixed`: mixed Java and Python repository used as the target project for the demonstration.
 
 Expected execution flow:
 
 ```text
-Pull Request in demo-java
+Pull Request in codeguardian-sample-mixed
   -> Jenkins executes the Jenkinsfile
   -> SonarQube analyses the code
   -> Jenkins clones codeguardian-core
@@ -344,8 +344,8 @@ Recommended sequence for the demo:
 
 1. Start this infrastructure.
 2. Configure Jenkins and SonarQube.
-3. Create a multibranch job or pipeline for `demo-java`.
-4. Open a pull request in Bitbucket over `demo-java`.
+3. Create a multibranch job or pipeline for `codeguardian-sample-mixed`.
+4. Open a pull request in Bitbucket over `codeguardian-sample-mixed`.
 5. Execute the pipeline.
 6. Check that SonarQube analyses the project.
 7. Check that Jenkins clones `codeguardian-core`.
@@ -364,7 +364,7 @@ The `Jenkinsfile` of the demo repository defines variables like:
 | --- | --- | --- |
 | `SONARQUBE_HOST_URL` | `http://sonarqube-server:9000` | Internal SonarQube URL |
 | `AGENT_REPO_URL` | URL of `codeguardian-core` | Agent repository |
-| `AGENT_REPO_REF` | Agent branch | Branch cloned by Jenkins |
+| `AGENT_REPO_REF` | `main` | Branch cloned by Jenkins |
 | `BITBUCKET_WORKSPACE` | Bitbucket workspace | Workspace where the PR exists |
 | `CACHE_MODE` | `explicit` | Agent cache mode |
 | `CACHE_TTL` | `3600s` | Cache time to live |
