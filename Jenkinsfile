@@ -53,18 +53,10 @@ pipeline {
                     }
 
                     def mavenPoms = fileExists('pom.xml') ? ['pom.xml'] : findFiles('pom.xml')
-                    def gradleFiles = fileExists('build.gradle') || fileExists('build.gradle.kts') || fileExists('gradlew') ? ['.'] : findFiles('build.gradle') + findFiles('build.gradle.kts') + findFiles('gradlew')
-                    def nodePackages = fileExists('package.json') ? ['package.json'] : findFiles('package.json')
                     def pythonFiles = findFiles('requirements.txt') + findFiles('pyproject.toml') + findFiles('setup.py')
-                    def cfamilyCompileDbs = fileExists('compile_commands.json') ? ['compile_commands.json'] : findFiles('compile_commands.json')
-                    def cfamilyBuildFiles = findFiles('CMakeLists.txt') + findFiles('Makefile')
 
                     def hasMaven = !mavenPoms.isEmpty()
-                    def hasGradle = !gradleFiles.isEmpty()
-                    def hasNode = !nodePackages.isEmpty()
                     def hasPython = !pythonFiles.isEmpty()
-                    def hasCfamilyCompileDb = !cfamilyCompileDbs.isEmpty()
-                    def hasCfamilyBuildFiles = !cfamilyBuildFiles.isEmpty()
                     def detectedStacks = []
 
                     def runQuiet = { String cmd, String logFile, String label ->
@@ -125,60 +117,6 @@ pipeline {
                             }
                         }
 
-                        if (hasGradle) {
-                            detectedStacks.add('gradle')
-                            gradleFiles.collect { it == '.' ? '.' : it.substring(0, it.lastIndexOf('/')) }.unique().eachWithIndex { gradleDir, index ->
-                                if (fileExists("${gradleDir}/gradlew")) {
-                                    runQuiet(
-                                        "cd \"${gradleDir}\" && chmod +x ./gradlew && ./gradlew --no-daemon -q test",
-                                        "gradle-build-${index}.log",
-                                        "Gradle build and tests (${gradleDir})"
-                                    )
-                                } else {
-                                    runQuiet(
-                                        "gradle -p \"${gradleDir}\" --no-daemon -q test",
-                                        "gradle-build-${index}.log",
-                                        "Gradle build and tests (${gradleDir})"
-                                    )
-                                }
-                            }
-                        }
-
-                        if (hasNode) {
-                            detectedStacks.add('node')
-                            nodePackages.eachWithIndex { packageFile, index ->
-                                def nodeDir = packageFile.contains('/') ? packageFile.substring(0, packageFile.lastIndexOf('/')) : '.'
-                                if (fileExists("${nodeDir}/package-lock.json")) {
-                                    runOptional(
-                                        "cd \"${nodeDir}\" && npm ci",
-                                        "node-build-${index}.log",
-                                        "NPM dependency installation (${nodeDir})"
-                                    )
-                                } else {
-                                    runOptional(
-                                        "cd \"${nodeDir}\" && npm install",
-                                        "node-build-${index}.log",
-                                        "NPM dependency installation (${nodeDir})"
-                                    )
-                                }
-
-                                def hasNpmTest = sh(
-                                    script: "cd \"${nodeDir}\" && node -e \"const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)\"",
-                                    returnStatus: true
-                                ) == 0
-
-                                if (hasNpmTest) {
-                                    runOptional(
-                                        "cd \"${nodeDir}\" && npm test",
-                                        "node-test-${index}.log",
-                                        "NPM tests (${nodeDir})"
-                                    )
-                                } else {
-                                    echo "No npm test script found in ${nodeDir}. Skipping Node.js tests."
-                                }
-                            }
-                        }
-
                         if (hasPython) {
                             detectedStacks.add('python')
                             def pythonCommand = 'python3'
@@ -226,25 +164,31 @@ pipeline {
                             }
                         }
 
-                        if (hasCfamilyCompileDb) {
-                            detectedStacks.add('cfamily')
-                        } else if (hasCfamilyBuildFiles) {
-                            error('C/C++ project detected but compile_commands.json is missing.')
+                        if (!hasMaven && !hasPython) {
+                            error('This demo pipeline only supports the verified Java/Maven and Python sample project.')
                         }
 
-                        env.PROJECT_TYPE = detectedStacks ? detectedStacks.join(',') : 'generic'
+                        env.PROJECT_TYPE = detectedStacks.join(',')
 
                         def javaBinaries = sh(
                             script: "find . -type d \\( -path '*/target/classes' -o -path '*/build/classes' -o -path '*/build/classes/java/main' \\) | sed 's#^./##' | paste -sd, -",
                             returnStdout: true
                         ).trim()
 
-                        def scannerArgs = "-Dsonar.sources=. -Dsonar.exclusions=${analysisExclusions}"
+                        def sonarSources = []
+                        if (fileExists('java-service/src')) {
+                            sonarSources.add('java-service/src')
+                        }
+                        if (fileExists('python-tools')) {
+                            sonarSources.add('python-tools')
+                        }
+                        if (sonarSources.isEmpty()) {
+                            error('No verified Java or Python source directories found for SonarQube analysis.')
+                        }
+
+                        def scannerArgs = "-Dsonar.sources=${sonarSources.join(',')} -Dsonar.exclusions=${analysisExclusions}"
                         if (javaBinaries) {
                             scannerArgs = "${scannerArgs} -Dsonar.java.binaries=${javaBinaries}"
-                        }
-                        if (hasCfamilyCompileDb) {
-                            scannerArgs = "${scannerArgs} -Dsonar.cfamily.compile-commands=${cfamilyCompileDbs[0]}"
                         }
 
                         runScanner(scannerArgs)
