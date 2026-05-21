@@ -46,3 +46,13 @@ def test_build_results_export_uses_git_commit_env(monkeypatch):
     data = build_results_export(decision, "project", "repo", "workspace", "7", True)
 
     assert data["head_commit"] == "abc123"
+
+
+def test_build_results_export_prefers_codeguardian_head_commit(monkeypatch):
+    monkeypatch.setenv("CODEGUARDIAN_HEAD_COMMIT", "pr-head")
+    monkeypatch.setenv("GIT_COMMIT", "jenkins-merge")
+    decision = Decision(issues=[make_issue()])
+
+    data = build_results_export(decision, "project", "repo", "workspace", "7", True)
+
+    assert data["head_commit"] == "pr-head"

@@ -12,7 +12,7 @@ from codeguardian.models import Decision, Issue
 
 
 def current_git_head() -> str:
-    for env_name in ("GIT_COMMIT", "BITBUCKET_COMMIT"):
+    for env_name in ("CODEGUARDIAN_HEAD_COMMIT", "BITBUCKET_COMMIT", "GIT_COMMIT"):
         value = (os.getenv(env_name) or "").strip()
         if value:
             return value

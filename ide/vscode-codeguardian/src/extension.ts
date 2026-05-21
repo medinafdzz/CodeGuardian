@@ -1624,13 +1624,26 @@ async function selectPullRequestAndDownload(): Promise<void> {
     const bitbucketPr = await findOpenBitbucketPullRequestById(Number(match[1]));
     await setSelectedPullRequest(bitbucketPr || { id: match[1] });
   }
-  const ready = selected.url ? await readyArtifactForJob(selected.url, false) : undefined;
+  let ready: { artifactUrl: string; buildKey: string; buildNumber?: string; commit?: string } | undefined;
+  if (selected.url) {
+    try {
+      ready = await readyArtifactForJob(selected.url, false);
+    } catch (error) {
+      if (/404|not found/i.test(errorMessage(error))) {
+        vscode.window.showInformationMessage('Selected pull request. CodeGuardian artifact is not ready yet.');
+        void buildWatcher?.start('select-pr');
+        return;
+      }
+      throw error;
+    }
+  }
   if (ready) {
     await downloadResultsFromUrl(ready.artifactUrl, { commit: ready.commit, buildNumber: ready.buildNumber });
     return;
   }
   if (selected.url) {
     vscode.window.showInformationMessage('Selected pull request. CodeGuardian artifact is not ready yet.');
+    void buildWatcher?.start('select-pr');
     return;
   }
   const url = buildArtifactUrlForJobCandidate(selected);
@@ -1820,7 +1833,7 @@ async function listPullRequestJobsAtPath(parts: string[], source: 'configured' |
   const jobs = Array.isArray(data.jobs) ? data.jobs as JenkinsJob[] : [];
   return jobs
     .filter((job) => /^PR-\d+$/i.test(job.name))
-    .map((job) => ({ ...job, source }));
+    .map((job) => ({ ...job, url: normalizeJenkinsUrl(job.url), source }));
 }
 
 async function listRootPullRequestJobs(): Promise<JenkinsJobCandidate[]> {
@@ -1830,7 +1843,23 @@ async function listRootPullRequestJobs(): Promise<JenkinsJobCandidate[]> {
   const jobs = Array.isArray(data.jobs) ? data.jobs as JenkinsJob[] : [];
   return jobs
     .filter((job) => /PR-\d+/i.test(job.name))
-    .map((job) => ({ ...job, source: 'root' as const }));
+    .map((job) => ({ ...job, url: normalizeJenkinsUrl(job.url), source: 'root' as const }));
+}
+
+function normalizeJenkinsUrl(url: string | undefined): string | undefined {
+  if (!url) {
+    return url;
+  }
+  const configuredBase = configValue('jenkinsUrl').trim().replace(/\/+$/, '');
+  if (!configuredBase) {
+    return url;
+  }
+  try {
+    const parsed = new URL(url);
+    return `${configuredBase}${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return url;
+  }
 }
 
 async function pickPullRequestJob(jobs: JenkinsJobCandidate[], placeHolder: string): Promise<JenkinsJobCandidate | undefined> {
@@ -1850,12 +1879,13 @@ async function pickPullRequestJob(jobs: JenkinsJobCandidate[], placeHolder: stri
 }
 
 async function jobMentionsBranch(job: JenkinsJobCandidate, branch: string): Promise<boolean> {
-  if (!job.url || !branch) {
+  const jobUrl = normalizeJenkinsUrl(job.url);
+  if (!jobUrl || !branch) {
     return false;
   }
   try {
     const tree = encodeURIComponent('name,displayName,fullDisplayName,description,url,actions[*],lastBuild[actions[*],url]');
-    const data = await downloadJson(`${job.url.replace(/\/+$/, '')}/api/json?tree=${tree}`);
+    const data = await downloadJson(`${jobUrl.replace(/\/+$/, '')}/api/json?tree=${tree}`);
     const serialized = JSON.stringify(data).toLowerCase();
     return serialized.includes(branch.toLowerCase()) || serialized.includes(encodeURIComponent(branch).toLowerCase());
   } catch {
@@ -1904,8 +1934,9 @@ function buildArtifactUrlForJobCandidate(
   buildSelector = configValue('jenkinsBuildSelector').trim() || 'lastSuccessfulBuild',
   artifactName = configValue('jenkinsArtifactName').trim() || 'codeguardian-results.json',
 ): string {
-  if (job.url) {
-    return `${job.url.replace(/\/+$/, '')}/${encodeURIComponent(buildSelector)}/artifact/${encodeURIComponent(artifactName)}`;
+  const jobUrl = normalizeJenkinsUrl(job.url);
+  if (jobUrl) {
+    return `${jobUrl.replace(/\/+$/, '')}/${encodeURIComponent(buildSelector)}/artifact/${encodeURIComponent(artifactName)}`;
   }
   if (job.source === 'configured') {
     return buildArtifactUrlForJob([...baseJobParts(), job.name], buildSelector, artifactName);
@@ -1914,8 +1945,9 @@ function buildArtifactUrlForJobCandidate(
 }
 
 function jobUrlFromCandidate(job: JenkinsJobCandidate): string {
-  if (job.url) {
-    return job.url.replace(/\/+$/, '');
+  const jobUrl = normalizeJenkinsUrl(job.url);
+  if (jobUrl) {
+    return jobUrl.replace(/\/+$/, '');
   }
   if (job.source === 'configured') {
     return buildJobUrl([...baseJobParts(), job.name]);
@@ -1978,7 +2010,7 @@ function jenkinsStatusFromBuild(build: JenkinsBuild, jobUrl: string): JenkinsWat
   }
   if (build.result === 'SUCCESS') {
     if (artifact?.relativePath) {
-      const buildUrl = (build.url || `${jobUrl.replace(/\/+$/, '')}/${build.number}`).replace(/\/+$/, '');
+      const buildUrl = (normalizeJenkinsUrl(build.url) || `${normalizeJenkinsUrl(jobUrl)?.replace(/\/+$/, '') || jobUrl.replace(/\/+$/, '')}/${build.number}`).replace(/\/+$/, '');
       return {
         ...base,
         state: 'artifact_ready',
@@ -2029,9 +2061,10 @@ async function readyArtifactForJob(
   jobUrl: string,
   throwWhenNotReady: boolean,
 ): Promise<{ artifactUrl: string; buildKey: string; buildNumber?: string; commit?: string } | undefined> {
+  const normalizedJobUrl = normalizeJenkinsUrl(jobUrl) || jobUrl;
   const buildSelector = configValue('jenkinsBuildSelector').trim() || 'lastBuild';
   const artifactName = configValue('jenkinsArtifactName').trim() || 'codeguardian-results.json';
-  const apiUrl = `${jobUrl.replace(/\/+$/, '')}/${encodeURIComponent(buildSelector)}/api/json?tree=building,result,number,url,artifacts[fileName,relativePath],actions[lastBuiltRevision[SHA1],buildsByBranchName[*],parameters[name,value]]`;
+  const apiUrl = `${normalizedJobUrl.replace(/\/+$/, '')}/${encodeURIComponent(buildSelector)}/api/json?tree=building,result,number,url,artifacts[fileName,relativePath],actions[lastBuiltRevision[SHA1],buildsByBranchName[*],parameters[name,value]]`;
   const build = await downloadJson(apiUrl) as JenkinsBuild;
   if (build.building) {
     if (throwWhenNotReady) {
@@ -2054,10 +2087,10 @@ async function readyArtifactForJob(
     return undefined;
   }
 
-  const buildUrl = (build.url || `${jobUrl.replace(/\/+$/, '')}/${build.number}`).replace(/\/+$/, '');
+  const buildUrl = (normalizeJenkinsUrl(build.url) || `${normalizedJobUrl.replace(/\/+$/, '')}/${build.number}`).replace(/\/+$/, '');
   return {
     artifactUrl: `${buildUrl}/artifact/${artifact.relativePath.split('/').map(encodeURIComponent).join('/')}`,
-    buildKey: `${jobUrl}#${build.number || buildSelector}`,
+    buildKey: `${normalizedJobUrl}#${build.number || buildSelector}`,
     buildNumber: build.number ? String(build.number) : buildSelector,
     commit: extractBuildCommit(build),
   };
