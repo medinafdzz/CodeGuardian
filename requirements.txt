@@ -13,3 +13,4 @@ prometheus-client
 
 # Tests
 pytest
+pytest-asyncio
