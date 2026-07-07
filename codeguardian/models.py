@@ -3,6 +3,12 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field
 
 
+class AuxiliaryEdit(BaseModel):
+    original_code: str
+    proposed_code: str
+    description: str = ""
+
+
 class Issue(BaseModel):
     sonar_key: str
     source: str = "sonarqube"
@@ -21,6 +27,10 @@ class Issue(BaseModel):
     original_code: str
     proposed_code: str
     required_imports: list[str] = Field(default_factory=list)
+    optional_removed_imports: list[str] = Field(default_factory=list)
+    auxiliary_edits: list[AuxiliaryEdit] = Field(default_factory=list)
+    validation_status: str = ""
+    validation_notes: list[str] = Field(default_factory=list)
 
 
 class Decision(BaseModel):

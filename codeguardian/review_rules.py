@@ -45,6 +45,8 @@ Imports and dependencies:
 - If the fix requires new imports outside the replaceable block, list them in required_imports.
 - required_imports must contain only concrete import lines exactly as they should appear in the file.
 - If no additional imports are required, return an empty required_imports array.
+- If the fix makes an existing import clearly obsolete, list that exact import line in optional_removed_imports only when removal is safe.
+- If the fix needs another small same-file change outside original_code, represent it in auxiliary_edits. Do not use auxiliary_edits for cross-file changes.
 - Do not introduce wildcard imports.
 - Do not remove existing imports unless they become clearly unnecessary because of the exact proposed replacement.
 - Do not duplicate imports already present in the file.
@@ -80,6 +82,8 @@ Output content rules:
 - original_code must match the exact code to be replaced.
 - proposed_code must be a directly applicable replacement for original_code.
 - required_imports must be a JSON array of strings.
+- optional_removed_imports must be a JSON array of strings.
+- auxiliary_edits must be a JSON array of objects with original_code, proposed_code and description.
 - Do not leave placeholder text such as TODO, FIXME, example names, dummy values, or pseudo-code.
 - Do not include ellipses, omissions, comments like "existing code", or abbreviated snippets.
 - Do not escape the code unnecessarily.
@@ -108,7 +112,11 @@ Return ONLY valid JSON with this exact shape:
       "solution": "...",
       "original_code": "...",
       "proposed_code": "...",
-      "required_imports": []
+      "required_imports": [],
+      "optional_removed_imports": [],
+      "auxiliary_edits": [],
+      "validation_status": "",
+      "validation_notes": []
     }
   ]
 }

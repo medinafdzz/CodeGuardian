@@ -1,4 +1,3 @@
-import ast
 import os
 import re
 import subprocess
@@ -6,7 +5,8 @@ from pathlib import Path
 
 from codeguardian.logging_utils import logger
 from codeguardian.models import AgentExecutionError, BuildValidationResult, Issue
-from codeguardian.text import clean_replacement_text, detect_language, normalize_code_block, read_file_lines
+from codeguardian.patching import apply_additional_file_edits, validate_patched_text
+from codeguardian.text import clean_replacement_text, normalize_code_block, read_file_lines
 
 
 def issue_key(issue: Issue) -> str:
@@ -29,6 +29,13 @@ def normalize_issues(issues: list[Issue]) -> tuple[list[Issue], int]:
         issue.solution = re.sub(r"\s*-\s+", "\n- ", (issue.solution or "").strip()).lstrip("\n")
         issue.original_code = clean_replacement_text(issue.original_code or "")
         issue.proposed_code = clean_replacement_text(issue.proposed_code or "")
+        issue.required_imports = [item.strip() for item in issue.required_imports or [] if item and item.strip()]
+        issue.optional_removed_imports = [
+            item.strip() for item in issue.optional_removed_imports or [] if item and item.strip()
+        ]
+        for auxiliary_edit in issue.auxiliary_edits or []:
+            auxiliary_edit.original_code = clean_replacement_text(auxiliary_edit.original_code or "")
+            auxiliary_edit.proposed_code = clean_replacement_text(auxiliary_edit.proposed_code or "")
 
         normalized_original_code = normalize_code_block(issue.original_code)
         normalized_proposed_code = normalize_code_block(issue.proposed_code)
@@ -81,27 +88,27 @@ def group_key(issue: Issue) -> tuple[str, str, str]:
     )
 
 
-def patched_file_content(issue: Issue) -> str | None:
+def _patched_file_content_with_reason(issue: Issue) -> tuple[str | None, str]:
     if not issue.file or not os.path.exists(issue.file):
-        return None
+        return None, "file not found"
 
     try:
         lines = read_file_lines(issue.file)
     except Exception:
-        return None
+        return None, "file cannot be read"
 
     start_line = int(issue.original_start_line or issue.line or 0)
     end_line = int(issue.original_end_line or issue.line or 0)
 
     if start_line < 1 or end_line < start_line or end_line > len(lines):
-        return None
+        return None, "invalid original line range"
 
     original_slice = "".join(lines[start_line - 1:end_line])
     normalized_file_block = normalize_code_block(original_slice)
     normalized_issue_block = normalize_code_block(issue.original_code)
 
     if not normalized_issue_block or normalized_file_block != normalized_issue_block:
-        return None
+        return None, "original_code does not match the current file content in the expected line range"
 
     replacement = issue.proposed_code or ""
 
@@ -109,21 +116,26 @@ def patched_file_content(issue: Issue) -> str | None:
         replacement += "\n"
 
     patched_content = "".join(lines[:start_line - 1]) + replacement + "".join(lines[end_line:])
+    ok, patched_content, reason = apply_additional_file_edits(patched_content, issue, issue.file)
+    if not ok:
+        return None, reason
+
+    return patched_content, ""
+
+
+def patched_file_content(issue: Issue) -> str | None:
+    patched_content, _reason = _patched_file_content_with_reason(issue)
     return patched_content
 
 
 def validate_issue(issue: Issue) -> tuple[bool, str]:
-    patched_content = patched_file_content(issue)
+    patched_content, patch_reason = _patched_file_content_with_reason(issue)
     if patched_content is None:
-        return False, "original_code does not match the current file content in the expected line range"
+        return False, patch_reason
 
-    language = detect_language(issue.file)
-
-    if language == "python":
-        try:
-            ast.parse(patched_content)
-        except SyntaxError as e:
-            return False, f"python syntax validation failed: {e}"
+    ok, reason = validate_patched_text(patched_content, issue.file)
+    if not ok:
+        return False, reason
 
     return True, ""
 

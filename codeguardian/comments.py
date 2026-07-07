@@ -90,6 +90,14 @@ def comment_content(issues: list[Issue]) -> str:
                          f"```{file_extension}\n" +
                          "\n".join(required_import for required_import in all_required_imports) + "\n```\n\n")
 
+    auxiliary_count = sum(len(getattr(issue, "auxiliary_edits", []) or []) for issue in issues)
+    auxiliary_block = ""
+    if auxiliary_count:
+        auxiliary_block = (
+            f"**Additional same-file edits:** {auxiliary_count} auxiliary change(s) are required and "
+            "will be included in the local diff before applying the suggestion.\n\n"
+        )
+
     is_optimization = all((issue.source or "").lower() in {"performance", "optimization"} for issue in issues)
 
     complexity_block = ""
@@ -117,6 +125,7 @@ def comment_content(issues: list[Issue]) -> str:
                 f"{complexity_block}"
                 f"**{solution_label}:**\n\n{issue.solution}\n\n"
                 f"{imports_block}"
+                f"{auxiliary_block}"
                 f"**Block to substitute:**\n"
                 f"```{file_extension}\n"
                 f"{clean_orig}\n"
@@ -172,6 +181,7 @@ def comment_content(issues: list[Issue]) -> str:
             f"{complexity_block}"
             f"{solution_block}"
             f"{imports_block}"
+            f"{auxiliary_block}"
             f"**Block to substitute:**\n"
             f"```{file_extension}\n"
             f"{clean_orig}\n"

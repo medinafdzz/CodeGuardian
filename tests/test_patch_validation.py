@@ -43,6 +43,23 @@ def test_validate_issue_accepts_python_patch_when_syntax_remains_valid(tmp_path)
     assert reason == ""
 
 
+def test_patched_file_content_adds_required_imports(tmp_path):
+    source = tmp_path / "sample.py"
+    source.write_text("def calculate(value):\n    return value\n", encoding="utf-8")
+    read_file_lines.cache_clear()
+
+    patched = patched_file_content(
+        make_issue(
+            source,
+            original_code="    return value",
+            proposed_code="    return sqrt(value)",
+            required_imports=["from math import sqrt"],
+        )
+    )
+
+    assert patched == "from math import sqrt\n\ndef calculate(value):\n    return sqrt(value)\n"
+
+
 def test_validate_issue_rejects_python_patch_when_syntax_is_invalid(tmp_path):
     source = tmp_path / "invalid_patch.py"
     source.write_text("def calculate():\n    value = 1\n    return value\n", encoding="utf-8")
