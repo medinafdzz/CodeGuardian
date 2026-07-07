@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from codeguardian.patching import apply_additional_file_edits, required_edits_present, validate_patched_text
 
 
 def load_results_file(path: str | Path) -> dict[str, Any]:
@@ -45,6 +50,56 @@ def _repo_path(file_path: str, root: Path | None = None) -> Path:
     if path.is_absolute():
         return path
     return (root or Path.cwd()) / path
+
+
+def _find_build_root(path: Path, root: Path | None = None) -> Path | None:
+    root = (root or Path.cwd()).resolve()
+    current = path.resolve().parent
+    while True:
+        if (current / "pom.xml").is_file() or (current / "build.gradle").is_file() or (current / "build.gradle.kts").is_file():
+            return current
+        if current == root or current.parent == current:
+            return None
+        current = current.parent
+
+
+def _java_build_command(build_root: Path) -> list[str] | None:
+    if (build_root / "pom.xml").is_file():
+        return ["mvn", "-q", "-DskipTests", "compile"]
+    if (build_root / "gradlew.bat").is_file():
+        return [str(build_root / "gradlew.bat"), "compileJava", "-q"]
+    if (build_root / "gradlew").is_file():
+        return [str(build_root / "gradlew"), "compileJava", "-q"]
+    if (build_root / "build.gradle").is_file() or (build_root / "build.gradle.kts").is_file():
+        return ["gradle", "compileJava", "-q"]
+    return None
+
+
+def _validate_java_build_if_available(path: Path, root: Path | None = None) -> tuple[bool, str]:
+    if path.suffix.lower() != ".java":
+        return True, ""
+    build_root = _find_build_root(path, root)
+    if build_root is None:
+        return True, ""
+    command = _java_build_command(build_root)
+    if command is None:
+        return True, ""
+    try:
+        result = subprocess.run(
+            command,
+            cwd=build_root,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except FileNotFoundError:
+        return False, f"build command not found: {command[0]}"
+    except subprocess.TimeoutExpired:
+        return False, "java build validation timed out"
+    if result.returncode != 0:
+        output = "\n".join(part for part in [result.stdout, result.stderr] if part).strip()
+        return False, "java build validation failed" + (f": {output[-1000:]}" if output else "")
+    return True, ""
 
 
 def _line_ending(text: str) -> str:
@@ -180,8 +235,12 @@ def validate_local_match(suggestion: dict[str, Any], root: Path | None = None) -
     if start < 1 or end < start:
         return False, "Invalid original line range"
 
-    if _locate_original_block(suggestion, root) is None and _locate_proposed_block(suggestion, root) is None:
+    proposed = _locate_proposed_block(suggestion, root)
+    if _locate_original_block(suggestion, root) is None and proposed is None:
         return False, "original_code does not match the current file content"
+
+    if proposed is not None and not required_edits_present(path.read_text(encoding="utf-8"), suggestion, path):
+        return False, "required imports or auxiliary edits are missing"
 
     return True, ""
 
@@ -191,10 +250,14 @@ def apply_suggestion(suggestion: dict[str, Any], root: Path | None = None) -> tu
     if not ok:
         return False, reason
 
+    target_path = _repo_path(str(suggestion.get("file", "")), root)
     located = _locate_original_block(suggestion, root)
     if located is None:
-        if _locate_proposed_block(suggestion, root) is not None:
+        proposed = _locate_proposed_block(suggestion, root)
+        if proposed is not None and required_edits_present(target_path.read_text(encoding="utf-8"), suggestion, target_path):
             return True, "already applied"
+        if proposed is not None:
+            return False, "proposed_code is present but required imports or auxiliary edits are missing"
         return False, "original_code does not match the current file content"
 
     path, start, end, original_block, expected = located
@@ -202,7 +265,18 @@ def apply_suggestion(suggestion: dict[str, Any], root: Path | None = None) -> tu
     proposed = _rebase_proposed_indent(str(suggestion.get("proposed_code") or ""), expected, original_block)
     proposed = _with_original_trailing_newline(proposed, original_block)
     new_content = "".join(lines[:start - 1]) + proposed + "".join(lines[end:])
+    ok, new_content, reason = apply_additional_file_edits(new_content, suggestion, path)
+    if not ok:
+        return False, reason
+    ok, reason = validate_patched_text(new_content, path)
+    if not ok:
+        return False, reason
+    previous_content = path.read_text(encoding="utf-8")
     path.write_text(new_content, encoding="utf-8")
+    ok, reason = _validate_java_build_if_available(path, root)
+    if not ok:
+        path.write_text(previous_content, encoding="utf-8")
+        return False, reason
     return True, "applied"
 
 
@@ -269,8 +343,12 @@ def undo_suggestions(suggestions: list[dict[str, Any]], root: Path | None = None
 
 
 def suggestion_status(suggestion: dict[str, Any], root: Path | None = None) -> str:
-    if _locate_proposed_block(suggestion, root) is not None:
-        return "applied"
+    proposed = _locate_proposed_block(suggestion, root)
+    if proposed is not None:
+        path, *_ = proposed
+        if required_edits_present(path.read_text(encoding="utf-8"), suggestion, path):
+            return "applied"
+        return "changed"
     if _locate_original_block(suggestion, root) is not None:
         return "open"
     return "changed"
@@ -337,6 +415,17 @@ def command_show(args: argparse.Namespace) -> int:
     imports = item.get("required_imports") or []
     if imports:
         print("\nRequired imports:\n" + "\n".join(imports))
+    removed_imports = item.get("optional_removed_imports") or []
+    if removed_imports:
+        print("\nOptional removed imports:\n" + "\n".join(removed_imports))
+    auxiliary_edits = item.get("auxiliary_edits") or []
+    if auxiliary_edits:
+        print("\nAuxiliary edits:")
+        for index, edit in enumerate(auxiliary_edits, start=1):
+            print(f"\n[{index}] {edit.get('description') or 'Auxiliary edit'}")
+            print(str(edit.get("original_code") or ""))
+            print("->")
+            print(str(edit.get("proposed_code") or ""))
     print(f"\nContent hash: {item.get('content_hash')}")
     return 0
 

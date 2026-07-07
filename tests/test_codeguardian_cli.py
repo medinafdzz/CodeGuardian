@@ -1,4 +1,5 @@
 import json
+import subprocess
 
 from tools.codeguardian_cli import (
     apply_suggestions,
@@ -64,6 +65,127 @@ def test_cli_applies_valid_suggestion(tmp_path):
 
     assert summary["applied"] == 1
     assert source.read_text(encoding="utf-8") == "def run():\n    return new\n"
+
+
+def test_cli_applies_python_required_import(tmp_path):
+    source = tmp_path / "app.py"
+    source.write_text('"""Module docstring."""\n\n\ndef run(value):\n    return value\n', encoding="utf-8")
+    item = {
+        **suggestion("one", "app.py", 4, 5, "def run(value):\n    return value", "def run(value):\n    return sqrt(value)"),
+        "required_imports": ["from math import sqrt"],
+    }
+
+    summary = apply_suggestions([item], tmp_path)
+
+    assert summary["applied"] == 1
+    assert source.read_text(encoding="utf-8") == (
+        '"""Module docstring."""\n'
+        "\n"
+        "\n"
+        "from math import sqrt\n"
+        "\n"
+        "def run(value):\n"
+        "    return sqrt(value)\n"
+    )
+
+
+def test_cli_applies_java_required_import_after_package(tmp_path):
+    source = tmp_path / "App.java"
+    source.write_text(
+        "package demo;\n"
+        "\n"
+        "class App {\n"
+        "    Object run() {\n"
+        "        return null;\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    item = {
+        **suggestion(
+            "one",
+            "App.java",
+            4,
+            6,
+            "    Object run() {\n        return null;\n    }",
+            "    Object run() {\n        return Optional.empty();\n    }",
+        ),
+        "required_imports": ["import java.util.Optional;"],
+    }
+
+    summary = apply_suggestions([item], tmp_path)
+
+    assert summary["applied"] == 1
+    assert source.read_text(encoding="utf-8") == (
+        "package demo;\n"
+        "\n"
+        "import java.util.Optional;\n"
+        "\n"
+        "class App {\n"
+        "    Object run() {\n"
+        "        return Optional.empty();\n"
+        "    }\n"
+        "}\n"
+    )
+
+
+def test_cli_rolls_back_java_change_when_build_validation_fails(tmp_path, monkeypatch):
+    source = tmp_path / "App.java"
+    original = (
+        "class App {\n"
+        "    String run() {\n"
+        "        return \"old\";\n"
+        "    }\n"
+        "}\n"
+    )
+    source.write_text(original, encoding="utf-8")
+    (tmp_path / "pom.xml").write_text("<project />", encoding="utf-8")
+    item = suggestion(
+        "one",
+        "App.java",
+        2,
+        4,
+        "    String run() {\n        return \"old\";\n    }",
+        "    String run() {\n        return \"new\";\n    }",
+    )
+
+    def fake_run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(args=["mvn"], returncode=1, stdout="", stderr="compile failed")
+
+    monkeypatch.setattr("tools.codeguardian_cli.subprocess.run", fake_run)
+
+    summary = apply_suggestions([item], tmp_path)
+
+    assert summary["applied"] == 0
+    assert "java build validation failed" in summary["results"][0]["message"]
+    assert source.read_text(encoding="utf-8") == original
+
+
+def test_cli_rejects_invalid_required_import(tmp_path):
+    source = tmp_path / "app.py"
+    source.write_text("def run():\n    return old\n", encoding="utf-8")
+    item = {
+        **suggestion("one", "app.py", 2, 2, "    return old", "    return new"),
+        "required_imports": ["not an import"],
+    }
+
+    summary = apply_suggestions([item], tmp_path)
+
+    assert summary["applied"] == 0
+    assert "invalid python import" in summary["results"][0]["message"]
+    assert source.read_text(encoding="utf-8") == "def run():\n    return old\n"
+
+
+def test_cli_does_not_write_python_syntax_error(tmp_path):
+    source = tmp_path / "app.py"
+    source.write_text("def run():\n    return old\n", encoding="utf-8")
+    item = suggestion("one", "app.py", 2, 2, "    return old", "    value = ")
+
+    summary = apply_suggestions([item], tmp_path)
+
+    assert summary["applied"] == 0
+    assert "python syntax validation failed" in summary["results"][0]["message"]
+    assert source.read_text(encoding="utf-8") == "def run():\n    return old\n"
 
 
 def test_cli_applies_same_file_suggestions_bottom_to_top(tmp_path):
