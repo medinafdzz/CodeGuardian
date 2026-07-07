@@ -18,7 +18,17 @@ type Suggestion = {
   original_code: string;
   proposed_code: string;
   required_imports?: string[];
+  optional_removed_imports?: string[];
+  auxiliary_edits?: AuxiliaryEdit[];
+  validation_status?: string;
+  validation_notes?: string[];
   status?: string;
+};
+
+type AuxiliaryEdit = {
+  original_code: string;
+  proposed_code: string;
+  description?: string;
 };
 
 type CliResult = {
@@ -3490,10 +3500,12 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       const applyTitle = state.applyAllowed ? '' : ' title="' + escapeHtml(state.applyDisabledReason) + '"';
       const dismissCommand = isDismissed ? 'restoreDismissed' : 'dismiss';
       const dismissLabel = isDismissed ? 'Restore' : 'Dismiss';
+      const extraEdits = extraEditsSummary(item);
       return '<div class="detail" id="' + prefix + 'detail-' + escapeHtml(item.id) + '"><h3>' + escapeHtml(titleOf(item)) + '</h3>' +
         '<div class="meta"><span>' + escapeHtml(item.file) + ':' + escapeHtml(item.line || '-') + '</span>' + statusLabel(isDismissed ? 'dismissed' : itemStatus) + '<span class="pill ' + escapeHtml(norm(severityOf(item))) + '">' + escapeHtml(severityOf(item)) + '</span><span class="pill ' + escapeHtml(norm(item.source)) + '">' + escapeHtml(item.source || 'unknown') + '</span></div>' +
         '<p><strong>Problem:</strong> ' + escapeHtml(item.problem || '') + '</p>' +
         '<p><strong>Proposal:</strong> ' + escapeHtml(item.solution || '') + '</p>' +
+        (extraEdits ? '<p><strong>Additional file changes:</strong> ' + escapeHtml(extraEdits) + '</p>' : '') +
         '<div class="detail-actions">' +
         '<button class="button secondary" id="' + actionId(prefix, 'previous') + '"' + prevDisabled + '>Previous</button>' +
         '<button class="button secondary" id="' + actionId(prefix, 'open') + '">Locate</button>' +
@@ -3507,6 +3519,20 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
 
     function actionId(prefix, name) {
       return prefix + name;
+    }
+
+    function extraEditsSummary(item) {
+      const parts = [];
+      if (Array.isArray(item.required_imports) && item.required_imports.length) {
+        parts.push(item.required_imports.length + ' required import(s)');
+      }
+      if (Array.isArray(item.optional_removed_imports) && item.optional_removed_imports.length) {
+        parts.push(item.optional_removed_imports.length + ' removable import(s)');
+      }
+      if (Array.isArray(item.auxiliary_edits) && item.auxiliary_edits.length) {
+        parts.push(item.auxiliary_edits.length + ' auxiliary edit(s)');
+      }
+      return parts.join(', ');
     }
 
     function wireDetail(items, prefix = '') {
@@ -3602,6 +3628,9 @@ async function openSuggestion(suggestion: Suggestion): Promise<void> {
 }
 
 async function previewSuggestion(suggestion: Suggestion): Promise<void> {
+  const requiredImports = suggestion.required_imports || [];
+  const removedImports = suggestion.optional_removed_imports || [];
+  const auxiliaryEdits = suggestion.auxiliary_edits || [];
   const content = [
     `# CodeGuardian Suggestion ${suggestion.id}`,
     '',
@@ -3624,6 +3653,36 @@ async function previewSuggestion(suggestion: Suggestion): Promise<void> {
     '```',
     suggestion.proposed_code || '',
     '```',
+    ...(requiredImports.length ? [
+      '',
+      '## Required imports',
+      '```',
+      requiredImports.join('\n'),
+      '```',
+    ] : []),
+    ...(removedImports.length ? [
+      '',
+      '## Optional removed imports',
+      '```',
+      removedImports.join('\n'),
+      '```',
+    ] : []),
+    ...(auxiliaryEdits.length ? [
+      '',
+      '## Auxiliary edits',
+      ...auxiliaryEdits.flatMap((edit, index) => [
+        '',
+        `### Edit ${index + 1}${edit.description ? ` - ${edit.description}` : ''}`,
+        'Original:',
+        '```',
+        edit.original_code || '',
+        '```',
+        'Proposed:',
+        '```',
+        edit.proposed_code || '',
+        '```',
+      ]),
+    ] : []),
   ].join('\n');
   const document = await vscode.workspace.openTextDocument({ content, language: 'markdown' });
   await vscode.window.showTextDocument(document, { preview: true });
@@ -3694,8 +3753,9 @@ function buildFullFileDiffPreview(currentText: string, suggestion: Suggestion): 
   if (exactIndex >= 0) {
     const startLine = lineNumberAtOffset(currentText, exactIndex);
     const endLine = startLine + original.replace(/\r\n/g, '\n').split('\n').length - 1;
+    const replaced = currentText.slice(0, exactIndex) + withOriginalTrailingNewline(proposed, original) + currentText.slice(exactIndex + original.length);
     return {
-      text: currentText.slice(0, exactIndex) + withOriginalTrailingNewline(proposed, original) + currentText.slice(exactIndex + original.length),
+      text: applyAdditionalPreviewEdits(replaced, suggestion),
       startLine,
       endLine,
     };
@@ -3707,11 +3767,121 @@ function buildFullFileDiffPreview(currentText: string, suggestion: Suggestion): 
   }
   const lines = currentText.split(/(?<=\n)/);
   const originalBlock = lines.slice(located.startIndex, located.endIndex).join('');
+  const replaced = lines.slice(0, located.startIndex).join('') + withOriginalTrailingNewline(proposed, originalBlock) + lines.slice(located.endIndex).join('');
   return {
-    text: lines.slice(0, located.startIndex).join('') + withOriginalTrailingNewline(proposed, originalBlock) + lines.slice(located.endIndex).join(''),
+    text: applyAdditionalPreviewEdits(replaced, suggestion),
     startLine: located.startIndex + 1,
     endLine: located.endIndex,
   };
+}
+
+function applyAdditionalPreviewEdits(text: string, suggestion: Suggestion): string {
+  let result = removeOptionalImportsPreview(text, suggestion.optional_removed_imports || []);
+  result = applyAuxiliaryEditsPreview(result, suggestion.auxiliary_edits || []);
+  return addRequiredImportsPreview(result, suggestion.file, suggestion.required_imports || []);
+}
+
+function removeOptionalImportsPreview(text: string, imports: string[]): string {
+  const removable = new Set(imports.map((item) => item.trim()).filter(Boolean));
+  if (!removable.size) {
+    return text;
+  }
+  return text.split(/(?<=\n)/).filter((line) => !removable.has(line.replace(/\r?\n$/, '').trim())).join('');
+}
+
+function applyAuxiliaryEditsPreview(text: string, edits: AuxiliaryEdit[]): string {
+  let result = text;
+  for (const edit of edits) {
+    const original = edit.original_code || '';
+    const proposed = edit.proposed_code || '';
+    if (!original || result.indexOf(original) < 0) {
+      continue;
+    }
+    result = result.replace(original, withOriginalTrailingNewline(proposed, original));
+  }
+  return result;
+}
+
+function addRequiredImportsPreview(text: string, file: string, imports: string[]): string {
+  const required = Array.from(new Set(imports.map((item) => item.trim()).filter(Boolean)));
+  if (!required.length) {
+    return text;
+  }
+  const lowerFile = file.toLowerCase();
+  if (lowerFile.endsWith('.py')) {
+    return addPythonImportsPreview(text, required);
+  }
+  if (lowerFile.endsWith('.java')) {
+    return addJavaImportsPreview(text, required);
+  }
+  return text;
+}
+
+function addPythonImportsPreview(text: string, imports: string[]): string {
+  const missing = imports.filter((item) => !hasLine(text, item) && (item.startsWith('import ') || item.startsWith('from ')));
+  if (!missing.length) {
+    return text;
+  }
+  const newline = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split(/(?<=\n)/);
+  let index = 0;
+  if (lines[index]?.startsWith('#!')) {
+    index += 1;
+  }
+  if (lines[index] && /^#.*coding[:=]\s*[-\w.]+/.test(lines[index])) {
+    index += 1;
+  }
+  while (index < lines.length && lines[index].trim().startsWith('from __future__ import ')) {
+    index += 1;
+  }
+  let scan = index;
+  while (scan < lines.length && !lines[scan].trim()) {
+    scan += 1;
+  }
+  if (scan < lines.length && (lines[scan].trim().startsWith('import ') || lines[scan].trim().startsWith('from '))) {
+    index = scan;
+    while (index < lines.length && (lines[index].trim().startsWith('import ') || lines[index].trim().startsWith('from ') || !lines[index].trim())) {
+      index += 1;
+    }
+  }
+  const insertion = missing.map((item) => item.replace(/\r?\n$/, '') + newline);
+  let remainderIndex = index;
+  while (remainderIndex < lines.length && !lines[remainderIndex].trim()) {
+    remainderIndex += 1;
+  }
+  insertion.push(newline);
+  return [...lines.slice(0, index), ...insertion, ...lines.slice(remainderIndex)].join('');
+}
+
+function addJavaImportsPreview(text: string, imports: string[]): string {
+  const missing = imports.filter((item) => !hasLine(text, item) && item.startsWith('import ') && item.endsWith(';'));
+  if (!missing.length) {
+    return text;
+  }
+  const newline = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split(/(?<=\n)/);
+  let packageIndex = -1;
+  let lastImportIndex = -1;
+  lines.forEach((line, index) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('package ') && trimmed.endsWith(';')) {
+      packageIndex = index;
+    }
+    if (trimmed.startsWith('import ') && trimmed.endsWith(';')) {
+      lastImportIndex = index;
+    }
+  });
+  const insertIndex = lastImportIndex >= 0 ? lastImportIndex + 1 : packageIndex >= 0 ? packageIndex + 1 : 0;
+  const insertion = missing.map((item) => item.replace(/\r?\n$/, '') + newline);
+  if (lastImportIndex < 0 && packageIndex >= 0) {
+    insertion.unshift(newline);
+  }
+  return [...lines.slice(0, insertIndex), ...insertion, ...lines.slice(insertIndex)].join('');
+}
+
+function hasLine(text: string, expected: string): boolean {
+  const normalized = expected.trim();
+  return text.split(/\r\n|\r|\n/).some((line) => line.trim() === normalized);
 }
 
 function locateNormalizedLineBlock(text: string, block: string): { startIndex: number; endIndex: number } | undefined {
@@ -3976,7 +4146,7 @@ function overlayOpenDocumentStatuses(statuses: Record<string, SuggestionStatus>)
     if (text === undefined) {
       continue;
     }
-    if (containsNormalizedBlock(text, suggestion.proposed_code || '')) {
+    if (containsNormalizedBlock(text, suggestion.proposed_code || '') && requiredPreviewEditsPresent(text, suggestion)) {
       statuses[suggestion.id] = 'applied';
     } else if (containsNormalizedBlock(text, suggestion.original_code || '')) {
       statuses[suggestion.id] = 'open';
@@ -3984,6 +4154,19 @@ function overlayOpenDocumentStatuses(statuses: Record<string, SuggestionStatus>)
       statuses[suggestion.id] = 'changed';
     }
   }
+}
+
+function requiredPreviewEditsPresent(text: string, suggestion: Suggestion): boolean {
+  const imports = suggestion.required_imports || [];
+  if (imports.some((item) => !hasLine(text, item))) {
+    return false;
+  }
+  for (const edit of suggestion.auxiliary_edits || []) {
+    if (edit.proposed_code && !containsNormalizedBlock(text, edit.proposed_code)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function containsNormalizedBlock(text: string, block: string): boolean {
