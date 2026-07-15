@@ -260,7 +260,8 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p ./"
+    "compile": "tsc -p ./",
+    "test": "npm run compile && node --test out/cliProtocol.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

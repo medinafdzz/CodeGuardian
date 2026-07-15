@@ -2,3 +2,4 @@ node_modules
 src
 *.map
 tsconfig.json
+out/*.test.js

@@ -3,8 +3,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as http from 'http';
 import * as https from 'https';
-import { execFile, execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import { URL } from 'url';
+import {
+  buildMutationCliArgs,
+  mutationStatuses,
+  parseMutationSummary,
+} from './cliProtocol';
 
 type Suggestion = {
   id: string;
@@ -34,7 +39,10 @@ type AuxiliaryEdit = {
 type CliResult = {
   stdout: string;
   stderr: string;
+  exitCode: number;
 };
+
+class ArtifactContextError extends Error {}
 
 type SuggestionStatus = 'open' | 'applied' | 'changed';
 
@@ -223,6 +231,16 @@ let envConfigCache: Record<string, string> | undefined;
 let envConfigCachePath: string | undefined;
 let envConfigCacheMtime = 0;
 let outputChannel: vscode.OutputChannel | undefined;
+let workspaceSnapshot: { context: LocalGitContext; gitState: GitChangeState } = {
+  context: { warnings: ['local Git context has not been loaded'] },
+  gitState: {
+    isGitRepository: false,
+    hasChanges: false,
+    changeCount: 0,
+    message: 'Local Git state has not been loaded',
+  },
+};
+let workspaceSnapshotRefresh: Promise<typeof workspaceSnapshot> | undefined;
 
 class DiffContentProvider implements vscode.TextDocumentContentProvider {
   private readonly documents = new Map<string, string>();
@@ -290,6 +308,7 @@ class SuggestionsProvider implements vscode.TreeDataProvider<FileNode | Suggesti
 class DashboardProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private artifactReadyDownloadInProgress = false;
+  private currentData?: ResultsData;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -303,7 +322,9 @@ class DashboardProvider implements vscode.WebviewViewProvider {
       try {
         await this.handleMessage(message);
       } catch (error) {
-        vscode.window.showErrorMessage(errorMessage(error));
+        const ids = message.ids || (message.id ? [message.id] : []);
+        this.view?.webview.postMessage({ command: 'operationComplete', ids, statuses: {} });
+        await showTechnicalError('CodeGuardian could not complete the operation.', error);
       }
     });
     this.refresh();
@@ -313,20 +334,36 @@ class DashboardProvider implements vscode.WebviewViewProvider {
     if (!this.view) {
       return;
     }
-    this.view.webview.html = renderDashboardHtml(this.view.webview, this.context.extensionUri, loadResultsData(false));
+    this.currentData = loadResultsData(false);
+    this.view.webview.html = renderDashboardHtml(this.view.webview, this.context.extensionUri, this.currentData);
   }
 
   async refreshStatuses(): Promise<void> {
     if (!this.view) {
       return;
     }
-    this.view.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
+    this.view.webview.postMessage({
+      command: 'statuses',
+      statuses: await loadSuggestionStatuses(this.currentData?.suggestions),
+    });
   }
 
-  private async handleMessage(message: { command?: string; id?: string; ids?: string[] }): Promise<void> {
-    const suggestion = message.id ? findSuggestionById(message.id) : undefined;
+  updateStatuses(statuses: Record<string, SuggestionStatus>, ids = Object.keys(statuses)): void {
+    this.view?.webview.postMessage({ command: 'operationComplete', ids, statuses });
+  }
+
+  private async handleMessage(message: {
+    command?: string;
+    id?: string;
+    ids?: string[];
+    statuses?: Record<string, SuggestionStatus>;
+  }): Promise<void> {
+    const suggestion = message.id
+      ? this.currentData?.suggestions.find((item) => item.id === message.id)
+      : undefined;
     switch (message.command) {
       case 'refresh':
+        await refreshWorkspaceSnapshot();
         this.refresh();
         this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
         void buildWatcher?.start('refresh');
@@ -380,7 +417,10 @@ class DashboardProvider implements vscode.WebviewViewProvider {
         await openSelectedPullRequest();
         break;
       case 'loadStatuses':
-        this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
+        this.view?.webview.postMessage({
+          command: 'statuses',
+          statuses: await loadSuggestionStatuses(this.currentData?.suggestions),
+        });
         break;
       case 'open':
         if (suggestion) {
@@ -399,22 +439,25 @@ class DashboardProvider implements vscode.WebviewViewProvider {
         break;
       case 'apply':
         if (suggestion) {
-          await applyOpenSuggestion(suggestion);
-          this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
-          this.refresh();
+          const statuses = await applyOpenSuggestion(suggestion, this.currentData);
+          this.updateStatuses(statuses, [suggestion.id]);
         }
         break;
       case 'undo':
         if (suggestion) {
-          await undoAppliedSuggestion(suggestion);
-          this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
-          this.refresh();
+          const statuses = await undoAppliedSuggestion(suggestion, this.currentData);
+          this.updateStatuses(statuses, [suggestion.id]);
         }
         break;
       case 'applySelected':
-        await applySelectedOpenSuggestions(message.ids || []);
-        this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
-        this.refresh();
+        this.updateStatuses(
+          await applySelectedOpenSuggestions(
+            message.ids || [],
+            this.currentData,
+            message.statuses,
+          ),
+          message.ids || [],
+        );
         break;
       case 'openGitDiff':
         await openGitDiff();
@@ -423,9 +466,14 @@ class DashboardProvider implements vscode.WebviewViewProvider {
         await openActivityLog();
         break;
       case 'undoSelected':
-        await undoSelectedAppliedSuggestions(message.ids || []);
-        this.view?.webview.postMessage({ command: 'statuses', statuses: await loadSuggestionStatuses() });
-        this.refresh();
+        this.updateStatuses(
+          await undoSelectedAppliedSuggestions(
+            message.ids || [],
+            this.currentData,
+            message.statuses,
+          ),
+          message.ids || [],
+        );
         break;
       case 'dismiss':
         if (message.id) {
@@ -649,6 +697,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(DIFF_SCHEME, diffContentProvider));
   await initializeCredentials();
   logInfo(`Credentials source: ${credentialCache.source}`);
+  await refreshWorkspaceSnapshot();
   loadProjectProfile();
   const provider = new SuggestionsProvider();
   const dashboard = new DashboardProvider(context);
@@ -660,7 +709,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(tree);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('codeguardianDashboard', dashboard));
 
-  context.subscriptions.push(vscode.commands.registerCommand('codeguardian.refreshSuggestions', () => {
+  context.subscriptions.push(vscode.commands.registerCommand('codeguardian.refreshSuggestions', async () => {
+    await refreshWorkspaceSnapshot();
     provider.refresh();
     dashboard.refresh();
     void buildWatcher?.start('refresh');
@@ -732,9 +782,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }));
   context.subscriptions.push(vscode.commands.registerCommand('codeguardian.applySuggestion', async (node?: SuggestionNode) => {
     if (node) {
-      await applyOpenSuggestion(node.suggestion);
-      provider.refresh();
-      dashboard.refresh();
+      dashboard.updateStatuses(await applyOpenSuggestion(node.suggestion));
     }
   }));
   context.subscriptions.push(vscode.commands.registerCommand(
@@ -746,9 +794,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.window.showInformationMessage('Select one or more CodeGuardian suggestions first.');
         return;
       }
-      await applySelectedOpenSuggestions(suggestions.map((suggestion) => suggestion.id));
-      provider.refresh();
-      dashboard.refresh();
+      dashboard.updateStatuses(await applySelectedOpenSuggestions(
+        suggestions.map((suggestion) => suggestion.id),
+      ));
     }
   ));
 
@@ -791,6 +839,14 @@ function logWarn(message: string): void {
 
 function logError(message: string): void {
   outputChannel?.appendLine(`[${new Date().toISOString()}] ERROR ${message}`);
+}
+
+async function showTechnicalError(message: string, error: unknown): Promise<void> {
+  logError(`${message} ${errorMessage(error)}`);
+  const action = await vscode.window.showErrorMessage(message, 'Show details');
+  if (action === 'Show details') {
+    outputChannel?.show(true);
+  }
 }
 
 function workspaceRoot(): vscode.WorkspaceFolder {
@@ -885,19 +941,23 @@ function startGitHeadWatcher(
   if (!configBoolean('watchBuildOnGitChange', true)) {
     return;
   }
-  let lastHead = `${currentGitBranchSync() || ''}:${currentGitHeadSync() || ''}`;
+  let lastHead = gitHeadStateKey(getLocalGitContext());
   const interval = setInterval(() => {
-    const currentHead = currentGitHeadSync() || '';
-    const currentBranch = currentGitBranchSync() || '';
-    const key = `${currentBranch}:${currentHead}`;
-    if (currentHead && key !== lastHead) {
-      lastHead = key;
-      provider.refresh();
-      dashboard.refresh();
-      void buildWatcher?.start('git-change');
-    }
+    void refreshWorkspaceSnapshot().then(({ context: nextContext }) => {
+      const key = gitHeadStateKey(nextContext);
+      if (nextContext.headCommit && key !== lastHead) {
+        lastHead = key;
+        provider.refresh();
+        dashboard.refresh();
+        void buildWatcher?.start('git-change');
+      }
+    });
   }, Math.max(5, configNumber('pollIntervalSeconds', 45)) * 1000);
   context.subscriptions.push({ dispose: () => clearInterval(interval) });
+}
+
+function gitHeadStateKey(context: LocalGitContext): string {
+  return `${context.branch || ''}:${context.headCommit || ''}`;
 }
 
 function startAutoDownloadPolling(
@@ -940,11 +1000,13 @@ function startAutoDownloadPolling(
 function startGitStatusWatcher(context: vscode.ExtensionContext, dashboard: DashboardProvider): void {
   let lastState = gitChangeStateKey(currentGitChangeState());
   const timer = setInterval(() => {
-    const nextState = gitChangeStateKey(currentGitChangeState());
-    if (nextState !== lastState) {
-      lastState = nextState;
-      dashboard.refresh();
-    }
+    void refreshWorkspaceSnapshot().then(({ gitState }) => {
+      const nextState = gitChangeStateKey(gitState);
+      if (nextState !== lastState) {
+        lastState = nextState;
+        dashboard.refresh();
+      }
+    });
   }, 5000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
 }
@@ -965,61 +1027,16 @@ function runWorkspaceCommand(command: string, args: string[]): Promise<string> {
   });
 }
 
-function runWorkspaceCommandSync(command: string, args: string[]): string {
-  return execFileSync(command, args, {
-    cwd: workspaceRoot().uri.fsPath,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-}
-
 async function currentGitBranch(): Promise<string> {
   return runWorkspaceCommand('git', ['branch', '--show-current']);
 }
 
-function currentGitBranchSync(): string | undefined {
-  try {
-    return runWorkspaceCommandSync('git', ['branch', '--show-current']) || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function currentGitHeadSync(): string | undefined {
-  try {
-    return runWorkspaceCommandSync('git', ['rev-parse', 'HEAD']) || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function currentRepositoryInfoSync(): RepositoryInfo | undefined {
-  try {
-    return repositoryInfoFromRemote(runWorkspaceCommandSync('git', ['remote', 'get-url', 'origin']));
-  } catch {
-    return undefined;
-  }
+  return workspaceSnapshot.context.headCommit;
 }
 
 function currentGitChangeState(): GitChangeState {
-  try {
-    runWorkspaceCommandSync('git', ['rev-parse', '--is-inside-work-tree']);
-  } catch {
-    return {
-      isGitRepository: false,
-      hasChanges: false,
-      changeCount: 0,
-      message: 'Current workspace is not a Git repository',
-    };
-  }
-  const status = runWorkspaceCommandSync('git', ['status', '--porcelain']);
-  const changes = status.split(/\r?\n/).filter((line) => line.trim()).length;
-  return {
-    isGitRepository: true,
-    hasChanges: changes > 0,
-    changeCount: changes,
-    message: changes > 0 ? `${changes} local Git change${changes === 1 ? '' : 's'}` : 'No local Git changes to show',
-  };
+  return workspaceSnapshot.gitState;
 }
 
 async function currentRepositorySlug(): Promise<string> {
@@ -1049,26 +1066,68 @@ function repositoryInfoFromRemote(remote: string): RepositoryInfo {
 }
 
 function getLocalGitContext(): LocalGitContext {
-  const warnings: string[] = [];
-  const repo = currentRepositoryInfoSync();
-  const branch = currentGitBranchSync();
-  const headCommit = currentGitHeadSync();
-  if (!repo) {
-    warnings.push('local repository could not be detected');
+  return workspaceSnapshot.context;
+}
+
+async function optionalWorkspaceCommand(args: string[]): Promise<string | undefined> {
+  try {
+    return await runWorkspaceCommand('git', args);
+  } catch {
+    return undefined;
   }
-  if (!branch) {
-    warnings.push('local branch could not be detected');
+}
+
+async function refreshWorkspaceSnapshot(): Promise<typeof workspaceSnapshot> {
+  if (workspaceSnapshotRefresh) {
+    return workspaceSnapshotRefresh;
   }
-  if (!headCommit) {
-    warnings.push('local HEAD commit could not be detected');
+  workspaceSnapshotRefresh = (async () => {
+    const [remote, branch, headCommit, status] = await Promise.all([
+      optionalWorkspaceCommand(['remote', 'get-url', 'origin']),
+      optionalWorkspaceCommand(['branch', '--show-current']),
+      optionalWorkspaceCommand(['rev-parse', 'HEAD']),
+      optionalWorkspaceCommand(['status', '--porcelain']),
+    ]);
+    let repository: RepositoryInfo | undefined;
+    if (remote) {
+      try {
+        repository = repositoryInfoFromRemote(remote);
+      } catch {
+        repository = undefined;
+      }
+    }
+    const warnings: string[] = [];
+    if (!repository) warnings.push('local repository could not be detected');
+    if (!branch) warnings.push('local branch could not be detected');
+    if (!headCommit) warnings.push('local HEAD commit could not be detected');
+    const isGitRepository = status !== undefined && headCommit !== undefined;
+    const changes = status?.split(/\r?\n/).filter((line) => line.trim()).length || 0;
+    workspaceSnapshot = {
+      context: {
+        workspace: repository?.workspace,
+        repository: repository?.repo,
+        branch,
+        headCommit,
+        warnings,
+      },
+      gitState: {
+        isGitRepository,
+        hasChanges: changes > 0,
+        changeCount: changes,
+        message: !isGitRepository
+          ? 'Current workspace is not a Git repository'
+          : changes > 0
+            ? `${changes} local Git change${changes === 1 ? '' : 's'}`
+            : 'No local Git changes to show',
+      },
+    };
+    return workspaceSnapshot;
+  })();
+  try {
+    return await workspaceSnapshotRefresh;
+  } finally {
+    workspaceSnapshotRefresh = undefined;
   }
-  return {
-    workspace: repo?.workspace,
-    repository: repo?.repo,
-    branch,
-    headCommit,
-    warnings,
-  };
 }
 
 function loadProjectProfile(): ProjectProfile {
@@ -1600,6 +1659,7 @@ async function tryDownloadReadyArtifact(): Promise<string | undefined> {
 
 async function downloadResultsFromUrl(url: string, metadata: Partial<ArtifactState> = {}): Promise<ArtifactState> {
   logInfo('Artifact download started.');
+  await refreshWorkspaceSnapshot();
   const body = await downloadText(url, jenkinsAuth());
   let parsed: Record<string, unknown>;
 
@@ -2845,7 +2905,8 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       expandedId: '',
       scrollToId: '',
       statuses: {},
-      selectedIds: new Set()
+      selectedIds: new Set(),
+      busyIds: new Set()
     };
     const dismissedIds = new Set(state.dismissedIds || []);
 
@@ -2863,10 +2924,18 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
     byId('selectPr').addEventListener('click', () => vscode.postMessage({ command: 'selectPr' }));
     byId('openPr').addEventListener('click', () => vscode.postMessage({ command: 'openPr' }));
     byId('applySelected').addEventListener('click', () => {
-      vscode.postMessage({ command: 'applySelected', ids: Array.from(filters.selectedIds) });
+      const ids = Array.from(filters.selectedIds);
+      const statuses = statusesFor(ids);
+      ids.forEach((id) => filters.busyIds.add(id));
+      render();
+      vscode.postMessage({ command: 'applySelected', ids, statuses });
     });
     byId('undoSelected').addEventListener('click', () => {
-      vscode.postMessage({ command: 'undoSelected', ids: Array.from(filters.selectedIds) });
+      const ids = Array.from(filters.selectedIds);
+      const statuses = statusesFor(ids);
+      ids.forEach((id) => filters.busyIds.add(id));
+      render();
+      vscode.postMessage({ command: 'undoSelected', ids, statuses });
     });
     byId('openGitDiff').addEventListener('click', () => vscode.postMessage({ command: 'openGitDiff' }));
     byId('openLog').addEventListener('click', () => vscode.postMessage({ command: 'openLog' }));
@@ -2880,6 +2949,13 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       const message = event.data;
       if (message?.command === 'statuses' && message.statuses) {
         filters.statuses = message.statuses;
+        render();
+      }
+      if (message?.command === 'operationComplete') {
+        filters.statuses = { ...filters.statuses, ...(message.statuses || {}) };
+        for (const id of message.ids || []) {
+          filters.busyIds.delete(id);
+        }
         render();
       }
     });
@@ -3494,8 +3570,9 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       const nextDisabled = index >= items.length - 1 ? ' disabled' : '';
       const itemStatus = statusOf(item.id, item);
       const isDismissed = dismissedIds.has(item.id);
-      const applyDisabled = (itemStatus === 'open' || itemStatus === 'applied') && !dismissedIds.has(item.id) && state.applyAllowed ? '' : ' disabled';
-      const applyLabel = itemStatus === 'applied' ? 'Undo' : 'Apply';
+      const isBusy = filters.busyIds.has(item.id);
+      const applyDisabled = !isBusy && (itemStatus === 'open' || itemStatus === 'applied') && !dismissedIds.has(item.id) && state.applyAllowed ? '' : ' disabled';
+      const applyLabel = isBusy ? itemStatus === 'applied' ? 'Undoing...' : 'Applying...' : itemStatus === 'applied' ? 'Undo' : 'Apply';
       const applyCommand = itemStatus === 'applied' ? 'undo' : 'apply';
       const applyTitle = state.applyAllowed ? '' : ' title="' + escapeHtml(state.applyDisabledReason) + '"';
       const dismissCommand = isDismissed ? 'restoreDismissed' : 'dismiss';
@@ -3548,7 +3625,9 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
       });
       byId(actionId(prefix, 'apply'))?.addEventListener('click', () => {
         const command = byId(actionId(prefix, 'apply'))?.getAttribute('data-command') || 'apply';
-        if (state.applyAllowed && (statusOf(item.id, item) === 'open' || statusOf(item.id, item) === 'applied')) {
+        if (!filters.busyIds.has(item.id) && state.applyAllowed && (statusOf(item.id, item) === 'open' || statusOf(item.id, item) === 'applied')) {
+          filters.busyIds.add(item.id);
+          render();
           vscode.postMessage({ command, id: item.id });
         }
       });
@@ -3568,6 +3647,15 @@ function renderDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri, 
 
     function statusOf(id, item) {
       return filters.statuses[id] || item?.status || 'open';
+    }
+
+    function statusesFor(ids) {
+      const statuses = {};
+      for (const id of ids) {
+        const item = state.suggestions.find((candidate) => candidate.id === id);
+        statuses[id] = statusOf(id, item);
+      }
+      return statuses;
     }
 
     function statusLabel(status) {
@@ -3722,6 +3810,7 @@ async function diffSuggestion(suggestion: Suggestion): Promise<void> {
 
 async function openGitDiff(): Promise<void> {
   logInfo('Open Git Diff requested.');
+  await refreshWorkspaceSnapshot();
   const gitState = currentGitChangeState();
   if (!gitState.isGitRepository) {
     logWarn('Open Git Diff failed: workspace is not a Git repository.');
@@ -3908,124 +3997,78 @@ function lineNumberAtOffset(text: string, offset: number): number {
   return text.slice(0, offset).split(/\r\n|\r|\n/).length;
 }
 
-async function applyOpenSuggestion(suggestion: Suggestion): Promise<void> {
+async function applyOpenSuggestion(
+  suggestion: Suggestion,
+  data = loadResultsData(false),
+): Promise<Record<string, SuggestionStatus>> {
   logInfo(`Apply started: ${suggestion.id}`);
-  const data = loadResultsData(false);
   if (!data.applyAllowed) {
     logWarn(`Apply skipped: ${data.applyDisabledReason}`);
     vscode.window.showWarningMessage(data.applyDisabledReason);
-    return;
+    return {};
   }
-  const statuses = await loadSuggestionStatuses();
-  const status = statuses[suggestion.id] || suggestion.status || 'open';
-  if (status !== 'open') {
-    logInfo(`Apply skipped: ${suggestion.id} status ${status}`);
-    vscode.window.showInformationMessage(`CodeGuardian suggestion ${suggestion.id} is ${status.toUpperCase()} and was not applied.`);
-    return;
-  }
-  await applySuggestion(suggestion);
+  return applySuggestionsWithCli([suggestion], data.artifact.commit);
 }
 
-async function applySuggestion(suggestion: Suggestion): Promise<void> {
-  const answer = await vscode.window.showWarningMessage(
-    `Apply CodeGuardian suggestion ${suggestion.id} to ${suggestion.file}?`,
-    { modal: true },
-    'Apply'
-  );
-  if (answer !== 'Apply') {
-    return;
-  }
-
-  const python = configValue('pythonPath') || 'python';
-  const cli = absoluteWorkspacePath(configValue('cliPath') || 'tools/codeguardian_cli.py');
-  const result = await runCliWithFallback(python, [cli, 'apply', '--file', resultsPath(), '--id', suggestion.id]);
-  logInfo(`Apply completed: ${suggestion.id}`);
-  vscode.window.showInformationMessage(result.stdout || 'CodeGuardian suggestion applied.');
-}
-
-async function undoAppliedSuggestion(suggestion: Suggestion): Promise<void> {
-  const data = loadResultsData(false);
+async function undoAppliedSuggestion(
+  suggestion: Suggestion,
+  data = loadResultsData(false),
+): Promise<Record<string, SuggestionStatus>> {
   if (!data.applyAllowed) {
     vscode.window.showWarningMessage(data.applyDisabledReason);
-    return;
+    return {};
   }
-  const statuses = await loadSuggestionStatuses();
-  const status = statuses[suggestion.id] || suggestion.status || 'open';
-  if (status !== 'applied') {
-    vscode.window.showInformationMessage(`CodeGuardian suggestion ${suggestion.id} is ${status.toUpperCase()} and cannot be undone.`);
-    return;
-  }
-
-  const answer = await vscode.window.showWarningMessage(
-    `Undo CodeGuardian suggestion ${suggestion.id} in ${suggestion.file}?`,
-    { modal: true },
-    'Undo'
-  );
-  if (answer !== 'Undo') {
-    return;
-  }
-
-  const python = configValue('pythonPath') || 'python';
-  const cli = absoluteWorkspacePath(configValue('cliPath') || 'tools/codeguardian_cli.py');
-  const result = await runCliWithFallback(python, [cli, 'undo', '--file', resultsPath(), '--id', suggestion.id]);
-  vscode.window.showInformationMessage(result.stdout || 'CodeGuardian suggestion undone.');
+  return undoSuggestionsWithCli([suggestion], data.artifact.commit);
 }
 
-async function undoSelectedAppliedSuggestions(ids: string[]): Promise<void> {
-  const data = loadResultsData(false);
+async function undoSelectedAppliedSuggestions(
+  ids: string[],
+  data = loadResultsData(false),
+  knownStatuses?: Record<string, SuggestionStatus>,
+): Promise<Record<string, SuggestionStatus>> {
   if (!data.applyAllowed) {
     vscode.window.showWarningMessage(data.applyDisabledReason);
-    return;
+    return {};
   }
   if (!ids.length) {
     vscode.window.showInformationMessage('Select one or more applied CodeGuardian suggestions first.');
-    return;
+    return {};
   }
-  const suggestions = loadSuggestions().filter((suggestion) => ids.includes(suggestion.id));
-  const statuses = await loadSuggestionStatuses();
+  const suggestions = data.suggestions.filter((suggestion) => ids.includes(suggestion.id));
+  const statuses = knownStatuses || await loadSuggestionStatuses(data.suggestions);
   const appliedSuggestions = suggestions.filter((suggestion) => (statuses[suggestion.id] || suggestion.status || 'open') === 'applied');
   const skipped = suggestions.length - appliedSuggestions.length;
   if (!appliedSuggestions.length) {
     vscode.window.showInformationMessage(`No selected CodeGuardian suggestions are applied. Skipped ${skipped}.`);
-    return;
+    return {};
   }
   const answer = await vscode.window.showWarningMessage(
     `Undo ${appliedSuggestions.length} applied suggestion(s)?\n\nSelected: ${suggestions.length}\nApplied: ${appliedSuggestions.length}\nSkipped: ${skipped}`,
-    { modal: true },
     'Undo'
   );
   if (answer !== 'Undo') {
-    return;
+    return {};
   }
-  const python = configValue('pythonPath') || 'python';
-  const cli = absoluteWorkspacePath(configValue('cliPath') || 'tools/codeguardian_cli.py');
-  let undone = 0;
-  let failed = 0;
-  for (const suggestion of appliedSuggestions) {
-    try {
-      await runCliWithFallback(python, [cli, 'undo', '--file', resultsPath(), '--id', suggestion.id]);
-      undone += 1;
-    } catch {
-      failed += 1;
-    }
-  }
-  vscode.window.showInformationMessage(`Undone: ${undone} · Skipped: ${skipped} · Failed: ${failed}`);
+  return undoSuggestionsWithCli(appliedSuggestions, data.artifact.commit);
 }
 
-async function applySelectedOpenSuggestions(ids: string[]): Promise<void> {
+async function applySelectedOpenSuggestions(
+  ids: string[],
+  data = loadResultsData(false),
+  knownStatuses?: Record<string, SuggestionStatus>,
+): Promise<Record<string, SuggestionStatus>> {
   logInfo(`Apply Selected started: ${ids.length} selected.`);
-  const data = loadResultsData(false);
   if (!data.applyAllowed) {
     logWarn(`Apply Selected skipped: ${data.applyDisabledReason}`);
     vscode.window.showWarningMessage(data.applyDisabledReason);
-    return;
+    return {};
   }
   if (!ids.length) {
     vscode.window.showInformationMessage('Select one or more ready CodeGuardian suggestions first.');
-    return;
+    return {};
   }
-  const suggestions = loadSuggestions().filter((suggestion) => ids.includes(suggestion.id));
-  const statuses = await loadSuggestionStatuses();
+  const suggestions = data.suggestions.filter((suggestion) => ids.includes(suggestion.id));
+  const statuses = knownStatuses || await loadSuggestionStatuses(data.suggestions);
   const openSuggestions = suggestions.filter((suggestion) => (statuses[suggestion.id] || suggestion.status || 'open') === 'open');
   const applied = suggestions.filter((suggestion) => (statuses[suggestion.id] || suggestion.status || 'open') === 'applied').length;
   const changed = suggestions.filter((suggestion) => (statuses[suggestion.id] || suggestion.status || 'open') === 'changed').length;
@@ -4033,46 +4076,163 @@ async function applySelectedOpenSuggestions(ids: string[]): Promise<void> {
   if (!openSuggestions.length) {
     logInfo(`Apply Selected skipped: no ready suggestions. Selected ${suggestions.length}.`);
     vscode.window.showInformationMessage(`No selected CodeGuardian suggestions are ready. Skipped ${skipped}.`);
-    return;
+    return {};
   }
   const conflicts = detectSuggestionConflicts(openSuggestions);
   if (conflicts.length) {
     const names = conflicts.slice(0, 5).map((suggestion) => suggestion.target_name || suggestion.id).join(', ');
     logWarn(`Apply Selected blocked by conflicts: ${names}`);
     vscode.window.showWarningMessage(`Some selected suggestions modify overlapping code. Apply them one by one.${names ? ` Conflicts: ${names}` : ''}`);
-    return;
+    return {};
   }
   const reason = [
     applied ? `${applied} already applied` : '',
     changed ? `${changed} need refresh` : '',
   ].filter(Boolean).join(', ');
   const message = `Apply ${openSuggestions.length} ready suggestion(s)?\n\nSelected: ${suggestions.length}\nReady: ${openSuggestions.length}\nSkipped: ${skipped}${reason ? ` (${reason})` : ''}`;
-  await applySelectedSuggestions(openSuggestions, message);
+  const answer = await vscode.window.showWarningMessage(message, 'Apply');
+  if (answer !== 'Apply') {
+    return {};
+  }
+  return applySuggestionsWithCli(openSuggestions, data.artifact.commit);
 }
 
-async function applySelectedSuggestions(suggestions: Suggestion[], confirmationMessage?: string): Promise<void> {
+async function applySuggestionsWithCli(
+  suggestions: Suggestion[],
+  expectedCommit?: string,
+): Promise<Record<string, SuggestionStatus>> {
+  if (warnAboutDirtyTarget(suggestions, 'applying')) {
+    return {};
+  }
   const ids = suggestions.map((suggestion) => suggestion.id);
-  const answer = await vscode.window.showWarningMessage(
-    confirmationMessage || `Apply ${ids.length} ready CodeGuardian suggestion(s)?`,
-    { modal: true },
-    'Apply'
-  );
-  if (answer !== 'Apply') {
+  const command = ids.length === 1 ? 'apply' : 'apply-selected';
+  const args = ids.length === 1 ? ['--id', ids[0]] : ['--ids', ids.join(',')];
+  return runMutation(command, args, 'apply', ids, expectedCommit);
+}
+
+async function undoSuggestionsWithCli(
+  suggestions: Suggestion[],
+  expectedCommit?: string,
+): Promise<Record<string, SuggestionStatus>> {
+  if (warnAboutDirtyTarget(suggestions, 'undoing')) {
+    return {};
+  }
+  const ids = suggestions.map((suggestion) => suggestion.id);
+  const command = ids.length === 1 ? 'undo' : 'undo-selected';
+  const args = ids.length === 1 ? ['--id', ids[0]] : ['--ids', ids.join(',')];
+  return runMutation(command, args, 'undo', ids, expectedCommit);
+}
+
+function warnAboutDirtyTarget(suggestions: Suggestion[], action: 'applying' | 'undoing'): boolean {
+  const targets = new Set(suggestions.map((suggestion) => comparableFilePath(absoluteWorkspacePath(suggestion.file))));
+  const dirtyDocument = vscode.workspace.textDocuments.find((document) => (
+    document.uri.scheme === 'file'
+    && document.isDirty
+    && targets.has(comparableFilePath(document.uri.fsPath))
+  ));
+  if (!dirtyDocument) {
+    return false;
+  }
+  const relative = vscode.workspace.asRelativePath(dirtyDocument.uri, false);
+  logWarn(`Mutation blocked because ${relative} has unsaved changes.`);
+  vscode.window.showWarningMessage(`Save the changes in ${relative} before ${action} a CodeGuardian suggestion.`);
+  return true;
+}
+
+function comparableFilePath(filePath: string): string {
+  const normalized = path.normalize(filePath);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+async function verifyArtifactCommit(expectedCommit?: string): Promise<void> {
+  if (!expectedCommit) {
     return;
   }
+  const currentCommit = await optionalWorkspaceCommand(['rev-parse', 'HEAD']);
+  if (!currentCommit) {
+    throw new ArtifactContextError('CodeGuardian could not verify the current Git commit.');
+  }
+  const matches = currentCommit.startsWith(expectedCommit) || expectedCommit.startsWith(currentCommit);
+  if (!matches) {
+    throw new ArtifactContextError(
+      `The artifact was generated for ${shortHash(expectedCommit)}, but the local repository is at ${shortHash(currentCommit)}.`,
+    );
+  }
+}
 
+async function runMutation(
+  command: string,
+  commandArgs: string[],
+  operation: 'apply' | 'undo',
+  ids: string[],
+  expectedCommit?: string,
+): Promise<Record<string, SuggestionStatus>> {
   const python = configValue('pythonPath') || 'python';
   const cli = absoluteWorkspacePath(configValue('cliPath') || 'tools/codeguardian_cli.py');
-  const result = await runCliWithFallback(python, [
-    cli,
-    'apply-selected',
-    '--file',
-    resultsPath(),
-    '--ids',
-    ids.join(','),
-  ]);
-  logInfo(`Apply Selected completed: ${ids.length} ready suggestions.`);
-  vscode.window.showInformationMessage(firstLine(result.stdout) || 'CodeGuardian suggestions applied.');
+  const startedAt = Date.now();
+  const action = operation === 'apply' ? 'Applying' : 'Undoing';
+  const noun = ids.length === 1 ? 'CodeGuardian suggestion' : `${ids.length} CodeGuardian suggestions`;
+  let result: CliResult;
+  try {
+    result = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `${action} ${noun}...`,
+        cancellable: false,
+      },
+      async () => {
+        await verifyArtifactCommit(expectedCommit);
+        return runCliWithFallback(
+          python,
+          buildMutationCliArgs(cli, command, resultsPath(), commandArgs),
+        );
+      },
+    );
+  } catch (error) {
+    if (error instanceof ArtifactContextError) {
+      logWarn(`${operation} blocked: ${error.message}`);
+      vscode.window.showWarningMessage(`${error.message} Refresh the CodeGuardian results before continuing.`);
+      return {};
+    }
+    throw error;
+  }
+  logCliResult(operation, result, Date.now() - startedAt);
+  const summary = parseMutationSummary(result.stdout);
+  const statuses = mutationStatuses(summary, operation);
+  const hasProblems = summary.skipped > 0 || summary.failed > 0 || result.exitCode !== 0;
+  if (!hasProblems && summary.applied > 0) {
+    const message = operation === 'apply'
+      ? summary.applied === 1 ? 'Suggestion applied.' : `${summary.applied} suggestions applied.`
+      : summary.applied === 1 ? 'Suggestion undone.' : `${summary.applied} suggestions undone.`;
+    vscode.window.showInformationMessage(message);
+  }
+  if (hasProblems) {
+    const completed = operation === 'apply' ? 'applied' : 'undone';
+    const notCompleted = summary.skipped + summary.failed;
+    const firstProblem = summary.results.find((item) => !item.applied);
+    const reason = firstProblem?.blocked_reason || firstProblem?.message;
+    const warning = summary.applied === 0 && reason
+      ? reason
+      : `${summary.applied} ${completed}; ${notCompleted} skipped or failed.${reason ? ` ${reason}` : ''}`;
+    const choice = await vscode.window.showWarningMessage(
+      warning,
+      'Show details',
+    );
+    if (choice === 'Show details') {
+      outputChannel?.show(true);
+    }
+  }
+  return statuses;
+}
+
+function logCliResult(operation: string, result: CliResult, elapsedMs: number): void {
+  logInfo(`${operation} CLI finished in ${elapsedMs} ms with exit code ${result.exitCode}.`);
+  if (result.stdout.trim()) {
+    outputChannel?.appendLine(result.stdout.trim());
+  }
+  if (result.stderr.trim()) {
+    outputChannel?.appendLine(result.stderr.trim());
+  }
 }
 
 function detectSuggestionConflicts(suggestions: Suggestion[]): Suggestion[] {
@@ -4116,10 +4276,15 @@ function suggestionLineRange(suggestion: Suggestion): { start: number; end: numb
   return { start, end: start + Math.max(1, lines) - 1 };
 }
 
-async function loadSuggestionStatuses(): Promise<Record<string, SuggestionStatus>> {
+async function loadSuggestionStatuses(
+  suggestions = loadSuggestions(),
+): Promise<Record<string, SuggestionStatus>> {
   const python = configValue('pythonPath') || 'python';
   const cli = absoluteWorkspacePath(configValue('cliPath') || 'tools/codeguardian_cli.py');
   const result = await runCliWithFallback(python, [cli, 'status', '--file', resultsPath()]);
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr || result.stdout || 'CodeGuardian CLI status failed.');
+  }
   const parsed = JSON.parse(result.stdout || '{"suggestions":[]}');
   const statuses: Record<string, SuggestionStatus> = {};
   for (const item of parsed.suggestions || []) {
@@ -4127,11 +4292,14 @@ async function loadSuggestionStatuses(): Promise<Record<string, SuggestionStatus
       statuses[item.id] = item.status;
     }
   }
-  overlayOpenDocumentStatuses(statuses);
+  overlayOpenDocumentStatuses(statuses, suggestions);
   return statuses;
 }
 
-function overlayOpenDocumentStatuses(statuses: Record<string, SuggestionStatus>): void {
+function overlayOpenDocumentStatuses(
+  statuses: Record<string, SuggestionStatus>,
+  suggestions: Suggestion[],
+): void {
   const openDocuments = new Map<string, string>();
   for (const document of vscode.workspace.textDocuments) {
     if (document.uri.scheme !== 'file') {
@@ -4141,7 +4309,7 @@ function overlayOpenDocumentStatuses(statuses: Record<string, SuggestionStatus>)
     openDocuments.set(relative, document.getText());
   }
 
-  for (const suggestion of loadSuggestions()) {
+  for (const suggestion of suggestions) {
     const text = openDocuments.get(String(suggestion.file || '').replace(/\\/g, '/'));
     if (text === undefined) {
       continue;
@@ -4197,12 +4365,12 @@ async function runCliWithFallback(command: string, args: string[]): Promise<CliR
 function runCli(command: string, args: string[]): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     execFile(command, args, { cwd: workspaceRoot().uri.fsPath }, (error, stdout, stderr) => {
-      if (error) {
-        const message = stderr || stdout || error.message;
-        reject(new Error(`CodeGuardian apply failed: ${message}`));
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (error && typeof code !== 'number') {
+        reject(error);
         return;
       }
-      resolve({ stdout, stderr });
+      resolve({ stdout, stderr, exitCode: typeof code === 'number' ? code : 0 });
     });
   });
 }
