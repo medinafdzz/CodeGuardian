@@ -180,6 +180,7 @@ Do not commit `.env` or `.codeguardian.env`. They are ignored by this repository
 - Local JSON plus optional Jenkins artifact download.
 - No Bitbucket or SonarQube calls.
 - The CLI refuses to apply when `original_code` no longer matches the local file.
+- Apply and Undo run as local transactions. Undo restores the exact pre-apply file, including imports and auxiliary edits, only when the file has not changed since Apply.
 - Build progress is estimated; Jenkins does not always provide exact progress.
 - Automatic PR detection requires Bitbucket credentials.
 - Jenkins PR jobs must follow the `PR-<id>` multibranch convention.

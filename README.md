@@ -130,7 +130,7 @@ CodeGuardian can optionally export the final validated suggestions to a local `c
 CODEGUARDIAN_RESULTS_PATH=codeguardian-results.json
 ```
 
-The exported file can be consumed by `tools/codeguardian_cli.py` or by the MVP VS Code extension under `ide/vscode-codeguardian`. Both local tools apply suggestions only when the exported `original_code` still matches the current local file content.
+The exported file can be consumed by `tools/codeguardian_cli.py` or by the MVP VS Code extension under `ide/vscode-codeguardian`. Both local tools apply suggestions only when the exported `original_code` still matches the current local file content. Apply records an exact local transaction so Undo can restore the previous file, including imports and auxiliary edits, provided no later edit has changed it.
 
 ## Core Design
 

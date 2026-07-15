@@ -66,6 +66,20 @@ python tools/codeguardian_cli.py apply-selected --file codeguardian-results.json
 
 The CLI applies multiple suggestions from bottom to top inside each file to reduce line-shift problems.
 
+Undo one suggestion, including imports and auxiliary edits introduced by its apply transaction:
+
+```bash
+python tools/codeguardian_cli.py undo --file codeguardian-results.json --id <suggestion_id>
+```
+
+Undo several suggestions in safe reverse transaction order:
+
+```bash
+python tools/codeguardian_cli.py undo-selected --file codeguardian-results.json --ids id1,id2,id3
+```
+
+Apply stores an exact local snapshot in `.codeguardian/undo-state.json`. Undo restores that snapshot only when the file still matches the transaction's post-apply hash and the transaction is the latest active CodeGuardian change for that file. The state directory is added to the repository's local Git exclude file and is never intended for commit.
+
 ---
 
 ## VS Code Extension
@@ -301,11 +315,11 @@ The extension reads the Jenkins child jobs, lists jobs named `PR-*`, lets the de
 
 The IDE assistant never applies a suggestion automatically.
 
-Before applying a suggestion, the CLI checks that `original_code` still matches the current local file content in the expected line range. If the file has changed or the range no longer matches, the suggestion is skipped.
+Before applying a suggestion, the CLI checks that `original_code` still matches the current local file content in the expected line range. If the file has changed or the range no longer matches, the suggestion is skipped. Required imports, optional import removals and auxiliary edits are part of the same local transaction.
 
 The extension also blocks apply actions when the downloaded artifact is not validated for the current repository and commit.
 
-Required imports are printed or displayed, but they are not inserted automatically unless they are already part of the `original_code` and `proposed_code` replacement block.
+Undo is conservative: it restores the complete pre-apply snapshot only when no later user or CodeGuardian edit has changed the file. Otherwise it blocks without writing.
 
 ---
 
@@ -315,6 +329,6 @@ Required imports are printed or displayed, but they are not inserted automatical
 - It does not fetch comments from Bitbucket.
 - It does not call SonarQube or Gemini.
 - It does not stage, commit, push or modify Git state.
-- It does not automatically insert imports outside the replacement block.
+- Transaction history is local to the repository and can be cleaned with `state-clean` after completed transactions are no longer needed.
 - It is an MVP VS Code extension, not a full review platform.
 - It is not a replacement for compilation, tests, profiling or benchmarks.
