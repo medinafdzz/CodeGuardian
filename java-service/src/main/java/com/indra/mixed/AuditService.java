@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class AuditService {
-    private static final String ADMIN_PASSWORD = "admin123";
+    private static final String ADMIN_PASSWORD = System.getenv("ADMIN_PASSWORD");
     private static final String EXPORT_TOKEN = "mixed-export-token";
     private final List<AuditEvent> events = new ArrayList<>();
 

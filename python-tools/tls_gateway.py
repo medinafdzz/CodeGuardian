@@ -4,7 +4,7 @@ import requests
 
 
 def fetch_partner_feed(feed_url: str) -> str:
-    response = requests.get(feed_url, verify=False, timeout=5)
+    response = requests.get(feed_url, timeout=5)
     return response.text
 
 
