@@ -1,5 +1,4 @@
 import json
-import subprocess
 
 import pytest
 
@@ -134,16 +133,16 @@ def test_cli_applies_java_required_import_after_package(tmp_path):
     )
 
 
-def test_cli_rolls_back_java_change_when_build_validation_fails(tmp_path, monkeypatch):
+def test_cli_applies_java_change_without_running_local_build(tmp_path):
     source = tmp_path / "App.java"
-    original = (
+    source.write_text(
         "class App {\n"
         "    String run() {\n"
         "        return \"old\";\n"
         "    }\n"
-        "}\n"
+        "}\n",
+        encoding="utf-8",
     )
-    source.write_text(original, encoding="utf-8")
     (tmp_path / "pom.xml").write_text("<project />", encoding="utf-8")
     item = suggestion(
         "one",
@@ -154,16 +153,10 @@ def test_cli_rolls_back_java_change_when_build_validation_fails(tmp_path, monkey
         "    String run() {\n        return \"new\";\n    }",
     )
 
-    def fake_run(*_args, **_kwargs):
-        return subprocess.CompletedProcess(args=["mvn"], returncode=1, stdout="", stderr="compile failed")
-
-    monkeypatch.setattr("tools.codeguardian_cli.subprocess.run", fake_run)
-
     summary = apply_suggestions([item], tmp_path)
 
-    assert summary["applied"] == 0
-    assert "java build validation failed" in summary["results"][0]["message"]
-    assert source.read_text(encoding="utf-8") == original
+    assert summary["applied"] == 1
+    assert 'return "new";' in source.read_text(encoding="utf-8")
 
 
 def test_cli_rejects_invalid_required_import(tmp_path):
@@ -613,7 +606,7 @@ def test_cli_rejects_undo_below_later_transaction(tmp_path):
     assert source.read_text(encoding="utf-8") == "aa\nbb\n"
 
 
-def test_cli_undo_rolls_back_when_java_validation_fails(tmp_path, monkeypatch):
+def test_cli_undo_restores_java_change_without_running_local_build(tmp_path):
     source = tmp_path / "App.java"
     original = "class App {\n    String value() { return \"old\"; }\n}\n"
     source.write_text(original, encoding="utf-8")
@@ -626,26 +619,12 @@ def test_cli_undo_rolls_back_when_java_validation_fails(tmp_path, monkeypatch):
         '    String value() { return "old"; }',
         '    String value() { return "new"; }',
     )
-    calls = []
-
-    def fake_run(*_args, **_kwargs):
-        calls.append(1)
-        return subprocess.CompletedProcess(
-            args=["mvn"],
-            returncode=0 if len(calls) == 1 else 1,
-            stdout="",
-            stderr="undo compile failed",
-        )
-
-    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
     assert apply_suggestions([item], tmp_path)["applied"] == 1
-    applied_content = source.read_text(encoding="utf-8")
 
     summary = undo_suggestions([item], tmp_path)
 
-    assert summary["applied"] == 0
-    assert "java build validation failed" in summary["results"][0]["message"]
-    assert source.read_text(encoding="utf-8") == applied_content
+    assert summary["applied"] == 1
+    assert source.read_text(encoding="utf-8") == original
 
 
 def test_cli_undo_rejects_missing_transaction_state(tmp_path):

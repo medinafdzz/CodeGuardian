@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import stat
-import subprocess
 import sys
 import tempfile
 import time
@@ -227,56 +226,6 @@ def _repo_path(file_path: str, root: Path | None = None) -> Path:
     except ValueError as exc:
         raise ValueError(f"File path escapes the repository: {file_path}") from exc
     return candidate
-
-
-def _find_build_root(path: Path, root: Path | None = None) -> Path | None:
-    root = (root or Path.cwd()).resolve()
-    current = path.resolve().parent
-    while True:
-        if (current / "pom.xml").is_file() or (current / "build.gradle").is_file() or (current / "build.gradle.kts").is_file():
-            return current
-        if current == root or current.parent == current:
-            return None
-        current = current.parent
-
-
-def _java_build_command(build_root: Path) -> list[str] | None:
-    if (build_root / "pom.xml").is_file():
-        return ["mvn", "-q", "-DskipTests", "compile"]
-    if (build_root / "gradlew.bat").is_file():
-        return [str(build_root / "gradlew.bat"), "compileJava", "-q"]
-    if (build_root / "gradlew").is_file():
-        return [str(build_root / "gradlew"), "compileJava", "-q"]
-    if (build_root / "build.gradle").is_file() or (build_root / "build.gradle.kts").is_file():
-        return ["gradle", "compileJava", "-q"]
-    return None
-
-
-def _validate_java_build_if_available(path: Path, root: Path | None = None) -> tuple[bool, str]:
-    if path.suffix.lower() != ".java":
-        return True, ""
-    build_root = _find_build_root(path, root)
-    if build_root is None:
-        return True, ""
-    command = _java_build_command(build_root)
-    if command is None:
-        return True, ""
-    try:
-        result = subprocess.run(
-            command,
-            cwd=build_root,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-    except FileNotFoundError:
-        return False, f"build command not found: {command[0]}"
-    except subprocess.TimeoutExpired:
-        return False, "java build validation timed out"
-    if result.returncode != 0:
-        output = "\n".join(part for part in [result.stdout, result.stderr] if part).strip()
-        return False, "java build validation failed" + (f": {output[-1000:]}" if output else "")
-    return True, ""
 
 
 def _line_ending(text: str) -> str:
@@ -592,38 +541,19 @@ def _apply_suggestion_transaction(
             pending = _pending_suggestion_transaction(state, suggestion_id, relative_path)
             if pending is not None:
                 if previous_hash == pending.get("after_hash"):
-                    ok, reason = _validate_java_build_if_available(target_path, repository_root)
-                    if ok:
-                        pending["status"] = "committed"
-                        pending["committed_at"] = _utc_now()
-                        pending["recovered_after_interruption"] = True
-                        _save_undo_state(state_path, state)
-                        return _result(
-                            suggestion,
-                            True,
-                            "already applied",
-                            transaction_id=pending.get("transaction_id"),
-                            state_path=str(state_path),
-                            before_hash=pending.get("before_hash"),
-                            after_hash=pending.get("after_hash"),
-                        )
-                    before_bytes = _decode_snapshot(pending.get("before_content_b64"))
-                    if _sha256(before_bytes) != pending.get("before_hash"):
-                        reason = "Cannot recover the interrupted transaction because its stored snapshot is invalid."
-                        return _result(
-                            suggestion,
-                            False,
-                            reason,
-                            transaction_id=pending.get("transaction_id"),
-                            blocked_reason=reason,
-                        )
-                    before_mode = int(pending.get("before_mode") or stat.S_IMODE(target_path.stat().st_mode))
-                    _atomic_write_bytes(target_path, before_bytes, before_mode)
-                    pending["status"] = "rolled_back"
-                    pending["completed_at"] = _utc_now()
-                    pending["failure_reason"] = reason
+                    pending["status"] = "committed"
+                    pending["committed_at"] = _utc_now()
+                    pending["recovered_after_interruption"] = True
                     _save_undo_state(state_path, state)
-                    return _result(suggestion, False, reason, transaction_id=pending.get("transaction_id"))
+                    return _result(
+                        suggestion,
+                        True,
+                        "already applied",
+                        transaction_id=pending.get("transaction_id"),
+                        state_path=str(state_path),
+                        before_hash=pending.get("before_hash"),
+                        after_hash=pending.get("after_hash"),
+                    )
                 if previous_hash == pending.get("before_hash"):
                     pending["status"] = "rolled_back"
                     pending["completed_at"] = _utc_now()
@@ -732,23 +662,6 @@ def _apply_suggestion_transaction(
                     state_path=str(state_path),
                     failed=True,
                 )
-            ok, reason = _validate_java_build_if_available(path, repository_root)
-            if not ok:
-                _atomic_write_bytes(path, previous_bytes, original_mode)
-                transaction["status"] = "rolled_back"
-                transaction["completed_at"] = _utc_now()
-                transaction["failure_reason"] = reason
-                _save_undo_state(state_path, state)
-                return _result(
-                    suggestion,
-                    False,
-                    reason,
-                    transaction_id=transaction["transaction_id"],
-                    state_path=str(state_path),
-                    before_hash=transaction["before_hash"],
-                    after_hash=transaction["after_hash"],
-                )
-
             try:
                 transaction["status"] = "committed"
                 transaction["committed_at"] = _utc_now()
@@ -862,19 +775,7 @@ def _undo_suggestion_transaction(
                 )
 
             before_mode = int(transaction.get("before_mode") or stat.S_IMODE(path.stat().st_mode))
-            after_mode = int(transaction.get("after_mode") or stat.S_IMODE(path.stat().st_mode))
             _atomic_write_bytes(path, before_bytes, before_mode)
-            ok, reason = _validate_java_build_if_available(path, repository_root)
-            if not ok:
-                _atomic_write_bytes(path, after_bytes, after_mode)
-                return _result(
-                    suggestion,
-                    False,
-                    reason,
-                    transaction_id=transaction.get("transaction_id"),
-                    blocked_reason=reason,
-                    restored=False,
-                )
 
             transaction["status"] = "undone"
             transaction["undone_at"] = _utc_now()
