@@ -553,6 +553,11 @@ def test_cli_reapplies_after_manual_revert_to_original_content(tmp_path):
     assert undone["applied"] == 1
     assert source.read_text(encoding="utf-8") == original
 
+    cleanup = cli_module.cleanup_undo_state(tmp_path, older_than_days=0)
+    cleaned_state = json.loads(cli_module._undo_state_path(tmp_path).read_text(encoding="utf-8"))
+    assert cleanup["removed"] == 2
+    assert cleaned_state["transactions"] == []
+
 
 def test_cli_reapplies_imports_and_auxiliary_edits_after_manual_revert(tmp_path):
     source = tmp_path / "app.py"

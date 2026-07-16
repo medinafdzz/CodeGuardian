@@ -58,3 +58,11 @@ export function mutationStatuses(
   }
   return statuses;
 }
+
+export function mutationProgressTitle(operation: 'apply' | 'undo', count: number): string {
+  if (operation === 'apply') {
+    return count === 1 ? 'Aplicando sugerencia...' : 'Aplicando sugerencias...';
+  }
+  const noun = count === 1 ? 'CodeGuardian suggestion' : `${count} CodeGuardian suggestions`;
+  return `Undoing ${noun}...`;
+}

@@ -584,8 +584,32 @@ def _apply_suggestion_transaction(
                         before_hash=active.get("before_hash"),
                         after_hash=active.get("after_hash"),
                     )
-                reason = "Cannot apply safely because the file has changed since this suggestion was applied."
-                return _result(suggestion, False, reason, blocked_reason=reason)
+                active_for_file = _active_transactions(state, relative_path)
+                if not active_for_file or active_for_file[-1].get("transaction_id") != active.get("transaction_id"):
+                    reason = "Cannot apply safely because a later CodeGuardian change exists for this file."
+                    return _result(suggestion, False, reason, blocked_reason=reason)
+
+                manually_reverted = previous_hash == active.get("before_hash")
+                if not manually_reverted:
+                    try:
+                        manually_reverted = _locate_original_block(
+                            suggestion,
+                            repository_root,
+                            path=target_path,
+                            content=previous_content,
+                        ) is not None
+                    except AmbiguousBlockError:
+                        manually_reverted = False
+
+                if manually_reverted:
+                    active["status"] = "manually_reverted"
+                    active["completed_at"] = _utc_now()
+                    active["manually_reverted_at"] = active["completed_at"]
+                    active["manual_revert_matches_before_hash"] = previous_hash == active.get("before_hash")
+                    _save_undo_state(state_path, state)
+                else:
+                    reason = "Cannot apply safely because the file has changed since this suggestion was applied."
+                    return _result(suggestion, False, reason, blocked_reason=reason)
 
             try:
                 located = _locate_original_block(
@@ -944,7 +968,7 @@ def cleanup_undo_state(root: Path | None = None, older_than_days: int = 30) -> d
         for transaction in state["transactions"]:
             status_value = transaction.get("status")
             timestamp_value = transaction.get("undone_at") or transaction.get("completed_at")
-            removable = status_value in {"undone", "rolled_back"} and isinstance(timestamp_value, str)
+            removable = status_value in {"undone", "rolled_back", "manually_reverted"} and isinstance(timestamp_value, str)
             if removable:
                 try:
                     timestamp = datetime.fromisoformat(timestamp_value).timestamp()

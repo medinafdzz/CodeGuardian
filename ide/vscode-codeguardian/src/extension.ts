@@ -7,6 +7,7 @@ import { execFile } from 'child_process';
 import { URL } from 'url';
 import {
   buildMutationCliArgs,
+  mutationProgressTitle,
   mutationStatuses,
   parseMutationSummary,
 } from './cliProtocol';
@@ -4170,14 +4171,12 @@ async function runMutation(
   const python = configValue('pythonPath') || 'python';
   const cli = absoluteWorkspacePath(configValue('cliPath') || 'tools/codeguardian_cli.py');
   const startedAt = Date.now();
-  const action = operation === 'apply' ? 'Applying' : 'Undoing';
-  const noun = ids.length === 1 ? 'CodeGuardian suggestion' : `${ids.length} CodeGuardian suggestions`;
   let result: CliResult;
   try {
     result = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: `${action} ${noun}...`,
+        title: mutationProgressTitle(operation, ids.length),
         cancellable: false,
       },
       async () => {
