@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import {
   buildMutationCliArgs,
+  mutationProgressTitle,
   mutationStatuses,
   parseMutationSummary,
 } from './cliProtocol';
@@ -52,4 +53,10 @@ test('parses a structured CLI mutation result', () => {
 
 test('rejects unstructured CLI output', () => {
   assert.throws(() => parseMutationSummary('{"message":"not a summary"}'), /invalid mutation result/);
+});
+
+test('uses brief Spanish progress titles for apply operations', () => {
+  assert.equal(mutationProgressTitle('apply', 1), 'Aplicando sugerencia...');
+  assert.equal(mutationProgressTitle('apply', 3), 'Aplicando sugerencias...');
+  assert.equal(mutationProgressTitle('undo', 1), 'Undoing CodeGuardian suggestion...');
 });

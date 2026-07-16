@@ -526,6 +526,74 @@ def test_cli_repeated_apply_does_not_duplicate_transaction(tmp_path):
     assert len(state["transactions"]) == 1
 
 
+def test_cli_reapplies_after_manual_revert_to_original_content(tmp_path):
+    source = tmp_path / "app.py"
+    original = "def run():\n    return old\n"
+    source.write_text(original, encoding="utf-8")
+    item = suggestion("one", "app.py", 2, 2, "    return old", "    return new")
+
+    first = apply_suggestions([item], tmp_path)
+    source.write_text(original, encoding="utf-8")
+    second = apply_suggestions([item], tmp_path)
+
+    assert first["applied"] == 1
+    assert second["applied"] == 1
+    assert second["results"][0]["message"] == "applied"
+    assert source.read_text(encoding="utf-8") == "def run():\n    return new\n"
+
+    state = json.loads(cli_module._undo_state_path(tmp_path).read_text(encoding="utf-8"))
+    assert [transaction["status"] for transaction in state["transactions"]] == [
+        "manually_reverted",
+        "committed",
+    ]
+    assert state["transactions"][0]["transaction_id"] != state["transactions"][1]["transaction_id"]
+
+    undone = undo_suggestions([item], tmp_path)
+
+    assert undone["applied"] == 1
+    assert source.read_text(encoding="utf-8") == original
+
+
+def test_cli_reapplies_imports_and_auxiliary_edits_after_manual_revert(tmp_path):
+    source = tmp_path / "app.py"
+    original = "def helper():\n    return old\n\ndef run():\n    return old\n"
+    source.write_text(original, encoding="utf-8")
+    item = suggestion("one", "app.py", 4, 5, "def run():\n    return old", "def run():\n    return Path('new')")
+    item["required_imports"] = ["from pathlib import Path"]
+    item["auxiliary_edits"] = [{
+        "original_code": "def helper():\n    return old",
+        "proposed_code": "def helper():\n    return 'updated'",
+    }]
+
+    assert apply_suggestions([item], tmp_path)["applied"] == 1
+    source.write_text(original, encoding="utf-8")
+
+    reapplied = apply_suggestions([item], tmp_path)
+
+    assert reapplied["applied"] == 1
+    content = source.read_text(encoding="utf-8")
+    assert "from pathlib import Path" in content
+    assert "return 'updated'" in content
+    assert "return Path('new')" in content
+
+    assert undo_suggestions([item], tmp_path)["applied"] == 1
+    assert source.read_text(encoding="utf-8") == original
+
+
+def test_cli_reapply_stays_blocked_for_intermediate_content(tmp_path):
+    source = tmp_path / "app.py"
+    source.write_text("old\n", encoding="utf-8")
+    item = suggestion("one", "app.py", 1, 1, "old", "new")
+    assert apply_suggestions([item], tmp_path)["applied"] == 1
+    source.write_text("custom\n", encoding="utf-8")
+
+    summary = apply_suggestions([item], tmp_path)
+
+    assert summary["applied"] == 0
+    assert "file has changed" in summary["results"][0]["blocked_reason"]
+    assert source.read_text(encoding="utf-8") == "custom\n"
+
+
 def test_cli_recovers_pending_transaction_after_source_write(tmp_path):
     source = tmp_path / "app.py"
     source.write_text("old\n", encoding="utf-8")
