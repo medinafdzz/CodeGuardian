@@ -8,6 +8,16 @@ pipeline {
         BITBUCKET_WORKSPACE  = 'medinafdzz'
         CACHE_MODE           = 'explicit'
         CACHE_TTL            = '3600s'
+        CODEGUARDIAN_ENABLE_IMPROVEMENTS = 'true'
+        CODEGUARDIAN_MAX_IMPROVEMENTS    = '3'
+        CODEGUARDIAN_DEMO_FAST_MODE = 'true'
+        CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW = 'true'
+        CODEGUARDIAN_PERFORMANCE_MAX_SCOPES = '5'
+        CODEGUARDIAN_PERFORMANCE_ONLY_CHANGED_FILES = 'true'
+        CODEGUARDIAN_PERFORMANCE_BATCH_SIZE = '3'
+        CODEGUARDIAN_SKIP_PERFORMANCE_FOR_CONFIG_FILES = 'true'
+        CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN = 'true'
+        CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW = '12'
     }
 
     options {
@@ -26,7 +36,7 @@ pipeline {
 
                 script {
                     def commonExclusions = '**/node_modules/**,**/dist/**,**/build/**,**/target/**,**/.git/**'
-                    def analysisExclusions = "${commonExclusions},**/__pycache__/**,**/.venv/**,**/venv/**,**/.pytest_cache/**,**/coverage/**"
+                    def analysisExclusions = "${commonExclusions},**/__pycache__/**,**/.venv/**,**/venv/**,**/.codeguardian-venv/**,**/.pytest_cache/**,**/coverage/**"
 
                     env.REPO_NAME = sh(
                         script: 'basename "$(git config --get remote.origin.url)" .git',
@@ -37,24 +47,16 @@ pipeline {
 
                     def findFiles = { String pattern ->
                         sh(
-                            script: "find . -path '*/.git' -prune -o -path '*/node_modules' -prune -o -path '*/target' -prune -o -path '*/build' -prune -o -path '*/.venv' -prune -o -path '*/venv' -prune -o -name '${pattern}' -print | sed 's#^./##'",
+                            script: "find . -path '*/.git' -prune -o -path '*/node_modules' -prune -o -path '*/target' -prune -o -path '*/build' -prune -o -path '*/.venv' -prune -o -path '*/venv' -prune -o -path '*/.codeguardian-venv' -prune -o -name '${pattern}' -print | sed 's#^./##'",
                             returnStdout: true
                         ).trim().split('\n').findAll { it }
                     }
 
                     def mavenPoms = fileExists('pom.xml') ? ['pom.xml'] : findFiles('pom.xml')
-                    def gradleFiles = fileExists('build.gradle') || fileExists('build.gradle.kts') || fileExists('gradlew') ? ['.'] : findFiles('build.gradle') + findFiles('build.gradle.kts') + findFiles('gradlew')
-                    def nodePackages = fileExists('package.json') ? ['package.json'] : findFiles('package.json')
                     def pythonFiles = findFiles('requirements.txt') + findFiles('pyproject.toml') + findFiles('setup.py')
-                    def cfamilyCompileDbs = fileExists('compile_commands.json') ? ['compile_commands.json'] : findFiles('compile_commands.json')
-                    def cfamilyBuildFiles = findFiles('CMakeLists.txt') + findFiles('Makefile')
 
                     def hasMaven = !mavenPoms.isEmpty()
-                    def hasGradle = !gradleFiles.isEmpty()
-                    def hasNode = !nodePackages.isEmpty()
                     def hasPython = !pythonFiles.isEmpty()
-                    def hasCfamilyCompileDb = !cfamilyCompileDbs.isEmpty()
-                    def hasCfamilyBuildFiles = !cfamilyBuildFiles.isEmpty()
                     def detectedStacks = []
 
                     def runQuiet = { String cmd, String logFile, String label ->
@@ -104,93 +106,56 @@ pipeline {
                         if (hasMaven) {
                             detectedStacks.add('maven')
                             mavenPoms.eachWithIndex { pomFile, index ->
+                                def mavenCommand = env.CODEGUARDIAN_DEMO_FAST_MODE == 'true'
+                                    ? "mvn -B -q -ntp -f \"${pomFile}\" -DskipTests compile"
+                                    : "mvn -B -q -ntp -f \"${pomFile}\" clean test"
                                 runQuiet(
-                                    "mvn -B -q -ntp -f \"${pomFile}\" clean test",
+                                    mavenCommand,
                                     "maven-build-${index}.log",
                                     "Maven build and tests (${pomFile})"
                                 )
                             }
                         }
 
-                        if (hasGradle) {
-                            detectedStacks.add('gradle')
-                            gradleFiles.collect { it == '.' ? '.' : it.substring(0, it.lastIndexOf('/')) }.unique().eachWithIndex { gradleDir, index ->
-                                if (fileExists("${gradleDir}/gradlew")) {
-                                    runQuiet(
-                                        "cd \"${gradleDir}\" && chmod +x ./gradlew && ./gradlew --no-daemon -q test",
-                                        "gradle-build-${index}.log",
-                                        "Gradle build and tests (${gradleDir})"
-                                    )
-                                } else {
-                                    runQuiet(
-                                        "gradle -p \"${gradleDir}\" --no-daemon -q test",
-                                        "gradle-build-${index}.log",
-                                        "Gradle build and tests (${gradleDir})"
-                                    )
-                                }
-                            }
-                        }
-
-                        if (hasNode) {
-                            detectedStacks.add('node')
-                            nodePackages.eachWithIndex { packageFile, index ->
-                                def nodeDir = packageFile.contains('/') ? packageFile.substring(0, packageFile.lastIndexOf('/')) : '.'
-                                if (fileExists("${nodeDir}/package-lock.json")) {
-                                    runOptional(
-                                        "cd \"${nodeDir}\" && npm ci",
-                                        "node-build-${index}.log",
-                                        "NPM dependency installation (${nodeDir})"
-                                    )
-                                } else {
-                                    runOptional(
-                                        "cd \"${nodeDir}\" && npm install",
-                                        "node-build-${index}.log",
-                                        "NPM dependency installation (${nodeDir})"
-                                    )
-                                }
-
-                                def hasNpmTest = sh(
-                                    script: "cd \"${nodeDir}\" && node -e \"const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)\"",
-                                    returnStatus: true
-                                ) == 0
-
-                                if (hasNpmTest) {
-                                    runOptional(
-                                        "cd \"${nodeDir}\" && npm test",
-                                        "node-test-${index}.log",
-                                        "NPM tests (${nodeDir})"
-                                    )
-                                } else {
-                                    echo "No npm test script found in ${nodeDir}. Skipping Node.js tests."
-                                }
-                            }
-                        }
-
                         if (hasPython) {
                             detectedStacks.add('python')
+                            def pythonCommand = 'python3'
                             def requirementFiles = findFiles('requirements.txt')
-                            requirementFiles.eachWithIndex { requirementsFile, index ->
+                            if (!requirementFiles.isEmpty()) {
                                 runOptional(
-                                    "python3 -m pip install -q -r \"${requirementsFile}\"",
-                                    "python-build-${index}.log",
-                                    "Python dependency installation (${requirementsFile})"
+                                    'python3 -m venv .codeguardian-venv',
+                                    'python-build-venv.log',
+                                    'Python virtual environment creation'
                                 )
+                                pythonCommand = './.codeguardian-venv/bin/python'
+                                requirementFiles.eachWithIndex { requirementsFile, index ->
+                                    runOptional(
+                                        "${pythonCommand} -m pip install -q -r \"${requirementsFile}\"",
+                                        "python-build-${index}.log",
+                                        "Python dependency installation (${requirementsFile})"
+                                    )
+                                }
                             }
 
                             runOptional(
-                                'python3 -m compileall -q .',
+                                "${pythonCommand} -m compileall -q .",
                                 'python-build-compile.log',
                                 'Python syntax compilation'
                             )
 
                             def hasPythonTests = sh(
-                                script: "find . -path '*/.venv' -prune -o -path '*/venv' -prune -o -path '*/__pycache__' -prune -o -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) | grep -q .",
+                                script: "find . -path '*/.venv' -prune -o -path '*/venv' -prune -o -path '*/.codeguardian-venv' -prune -o -path '*/__pycache__' -prune -o -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) -print | grep -q .",
                                 returnStatus: true
                             ) == 0
 
                             if (hasPythonTests) {
                                 runOptional(
-                                    'python3 -m pytest -q',
+                                    "${pythonCommand} -m pip install -q pytest",
+                                    'python-build-pytest.log',
+                                    'Python pytest installation'
+                                )
+                                runOptional(
+                                    "${pythonCommand} -m pytest -q",
                                     'python-test-0.log',
                                     'Python tests'
                                 )
@@ -199,25 +164,31 @@ pipeline {
                             }
                         }
 
-                        if (hasCfamilyCompileDb) {
-                            detectedStacks.add('cfamily')
-                        } else if (hasCfamilyBuildFiles) {
-                            error('C/C++ project detected but compile_commands.json is missing.')
+                        if (!hasMaven && !hasPython) {
+                            error('This demo pipeline only supports the verified Java/Maven and Python sample project.')
                         }
 
-                        env.PROJECT_TYPE = detectedStacks ? detectedStacks.join(',') : 'generic'
+                        env.PROJECT_TYPE = detectedStacks.join(',')
 
                         def javaBinaries = sh(
                             script: "find . -type d \\( -path '*/target/classes' -o -path '*/build/classes' -o -path '*/build/classes/java/main' \\) | sed 's#^./##' | paste -sd, -",
                             returnStdout: true
                         ).trim()
 
-                        def scannerArgs = "-Dsonar.sources=. -Dsonar.exclusions=${analysisExclusions}"
+                        def sonarSources = []
+                        if (fileExists('java-service/src')) {
+                            sonarSources.add('java-service/src')
+                        }
+                        if (fileExists('python-tools')) {
+                            sonarSources.add('python-tools')
+                        }
+                        if (sonarSources.isEmpty()) {
+                            error('No verified Java or Python source directories found for SonarQube analysis.')
+                        }
+
+                        def scannerArgs = "-Dsonar.sources=${sonarSources.join(',')} -Dsonar.exclusions=${analysisExclusions}"
                         if (javaBinaries) {
                             scannerArgs = "${scannerArgs} -Dsonar.java.binaries=${javaBinaries}"
-                        }
-                        if (hasCfamilyCompileDb) {
-                            scannerArgs = "${scannerArgs} -Dsonar.cfamily.compile-commands=${cfamilyCompileDbs[0]}"
                         }
 
                         runScanner(scannerArgs)
@@ -241,6 +212,17 @@ pipeline {
                     string(credentialsId: 'atlassian-mcp-auth-header', variable: 'ATLASSIAN_MCP_AUTH_HEADER')
                 ]) {
                     script {
+                        def prHeadCommit = sh(
+                            returnStdout: true,
+                            script: '''
+                                if [ -n "${CHANGE_BRANCH:-}" ] && git rev-parse --verify "origin/${CHANGE_BRANCH}^{commit}" >/dev/null 2>&1; then
+                                    git rev-parse "origin/${CHANGE_BRANCH}^{commit}"
+                                else
+                                    git rev-parse HEAD
+                                fi
+                            '''
+                        ).trim()
+
                         def data = groovy.json.JsonOutput.prettyPrint(
                             groovy.json.JsonOutput.toJson([
                                 pr_id      : env.CHANGE_ID ?: '',
@@ -256,7 +238,9 @@ pipeline {
 
                         withEnv([
                             "AGENT_REPO_HOST_PATH=${agentRepoHostPath}",
-                            'ATLASSIAN_MCP_URL=https://mcp.atlassian.com/v1/mcp'
+                            'ATLASSIAN_MCP_URL=https://mcp.atlassian.com/v1/mcp',
+                            "CODEGUARDIAN_RESULTS_PATH=${env.WORKSPACE}/codeguardian-results.json",
+                            "CODEGUARDIAN_HEAD_COMMIT=${prHeadCommit}"
                         ]) {
                             sh '''
                             #!/bin/bash
@@ -276,6 +260,7 @@ pipeline {
 
     post {
         always {
+            archiveArtifacts artifacts: 'codeguardian-results.json', allowEmptyArchive: true
             sh 'rm -rf AIagent data.json build.log test.log *-build-*.log *-test-*.log sonar-scanner.log || true'
         }
     }
