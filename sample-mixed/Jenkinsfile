@@ -1,0 +1,267 @@
+pipeline {
+    agent any
+
+    environment {
+        SONARQUBE_HOST_URL   = 'http://sonarqube-server:9000'
+        AGENT_REPO_URL       = 'https://bitbucket.org/medinafdzz/codeguardian-core.git'
+        AGENT_REPO_REF       = 'main'
+        BITBUCKET_WORKSPACE  = 'medinafdzz'
+        CACHE_MODE           = 'explicit'
+        CACHE_TTL            = '3600s'
+        CODEGUARDIAN_ENABLE_IMPROVEMENTS = 'true'
+        CODEGUARDIAN_MAX_IMPROVEMENTS    = '3'
+        CODEGUARDIAN_DEMO_FAST_MODE = 'true'
+        CODEGUARDIAN_ENABLE_PERFORMANCE_REVIEW = 'true'
+        CODEGUARDIAN_PERFORMANCE_MAX_SCOPES = '5'
+        CODEGUARDIAN_PERFORMANCE_ONLY_CHANGED_FILES = 'true'
+        CODEGUARDIAN_PERFORMANCE_BATCH_SIZE = '3'
+        CODEGUARDIAN_SKIP_PERFORMANCE_FOR_CONFIG_FILES = 'true'
+        CODEGUARDIAN_PERFORMANCE_MIN_COMPLEXITY_GAIN = 'true'
+        CODEGUARDIAN_PERFORMANCE_CONTEXT_WINDOW = '12'
+    }
+
+    options {
+        skipDefaultCheckout()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    stages {
+        stage('Analyze PR') {
+            when {
+                changeRequest()
+            }
+            steps {
+                checkout scm
+
+                script {
+                    def commonExclusions = '**/node_modules/**,**/dist/**,**/build/**,**/target/**,**/.git/**'
+                    def analysisExclusions = "${commonExclusions},**/__pycache__/**,**/.venv/**,**/venv/**,**/.codeguardian-venv/**,**/.pytest_cache/**,**/coverage/**"
+
+                    env.REPO_NAME = sh(
+                        script: 'basename "$(git config --get remote.origin.url)" .git',
+                        returnStdout: true
+                    ).trim()
+
+                    env.SONARQUBE_PROJECT_KEY = env.REPO_NAME.replace('/', '_')
+
+                    def findFiles = { String pattern ->
+                        sh(
+                            script: "find . -path '*/.git' -prune -o -path '*/node_modules' -prune -o -path '*/target' -prune -o -path '*/build' -prune -o -path '*/.venv' -prune -o -path '*/venv' -prune -o -path '*/.codeguardian-venv' -prune -o -name '${pattern}' -print | sed 's#^./##'",
+                            returnStdout: true
+                        ).trim().split('\n').findAll { it }
+                    }
+
+                    def mavenPoms = fileExists('pom.xml') ? ['pom.xml'] : findFiles('pom.xml')
+                    def pythonFiles = findFiles('requirements.txt') + findFiles('pyproject.toml') + findFiles('setup.py')
+
+                    def hasMaven = !mavenPoms.isEmpty()
+                    def hasPython = !pythonFiles.isEmpty()
+                    def detectedStacks = []
+
+                    def runQuiet = { String cmd, String logFile, String label ->
+                        sh """
+                        #!/bin/bash
+                        set +x
+                        ${cmd} > ${logFile} 2>&1 || {
+                        code=\$?
+                        echo "${label} failed. Last 200 lines:"
+                        tail -n 200 ${logFile}
+                        exit \$code
+                        }
+                        """
+                    }
+
+                    def runOptional = { String cmd, String logFile, String label ->
+                        sh """
+                        #!/bin/bash
+                        set +x
+                        ${cmd} > ${logFile} 2>&1 || {
+                        code=\$?
+                        echo "${label} failed. Last 200 lines:"
+                        tail -n 200 ${logFile}
+                        exit \$code
+                        }
+                        """
+                    }
+
+                    withSonarQubeEnv('SonarQube-Server') {
+                        def runScanner = { String extraArgs ->
+                            runQuiet(
+                                """
+                                sonar-scanner \
+                                  -Dsonar.projectKey=${env.SONARQUBE_PROJECT_KEY} \
+                                  -Dsonar.projectName=${env.REPO_NAME} \
+                                  -Dsonar.host.url=${env.SONARQUBE_HOST_URL} \
+                                  -Dsonar.scm.exclusions.disabled=false \
+                                  -Dsonar.qualitygate.wait=false \
+                                  -Dsonar.log.level=WARN \
+                                  ${extraArgs}
+                                """.stripIndent().trim(),
+                                'sonar-scanner.log',
+                                'SonarScanner'
+                            )
+                        }
+
+                        if (hasMaven) {
+                            detectedStacks.add('maven')
+                            mavenPoms.eachWithIndex { pomFile, index ->
+                                def mavenCommand = env.CODEGUARDIAN_DEMO_FAST_MODE == 'true'
+                                    ? "mvn -B -q -ntp -f \"${pomFile}\" -DskipTests compile"
+                                    : "mvn -B -q -ntp -f \"${pomFile}\" clean test"
+                                runQuiet(
+                                    mavenCommand,
+                                    "maven-build-${index}.log",
+                                    "Maven build and tests (${pomFile})"
+                                )
+                            }
+                        }
+
+                        if (hasPython) {
+                            detectedStacks.add('python')
+                            def pythonCommand = 'python3'
+                            def requirementFiles = findFiles('requirements.txt')
+                            if (!requirementFiles.isEmpty()) {
+                                runOptional(
+                                    'python3 -m venv .codeguardian-venv',
+                                    'python-build-venv.log',
+                                    'Python virtual environment creation'
+                                )
+                                pythonCommand = './.codeguardian-venv/bin/python'
+                                requirementFiles.eachWithIndex { requirementsFile, index ->
+                                    runOptional(
+                                        "${pythonCommand} -m pip install -q -r \"${requirementsFile}\"",
+                                        "python-build-${index}.log",
+                                        "Python dependency installation (${requirementsFile})"
+                                    )
+                                }
+                            }
+
+                            runOptional(
+                                "${pythonCommand} -m compileall -q .",
+                                'python-build-compile.log',
+                                'Python syntax compilation'
+                            )
+
+                            def hasPythonTests = sh(
+                                script: "find . -path '*/.venv' -prune -o -path '*/venv' -prune -o -path '*/.codeguardian-venv' -prune -o -path '*/__pycache__' -prune -o -type f \\( -name 'test_*.py' -o -name '*_test.py' \\) -print | grep -q .",
+                                returnStatus: true
+                            ) == 0
+
+                            if (hasPythonTests) {
+                                runOptional(
+                                    "${pythonCommand} -m pip install -q pytest",
+                                    'python-build-pytest.log',
+                                    'Python pytest installation'
+                                )
+                                runOptional(
+                                    "${pythonCommand} -m pytest -q",
+                                    'python-test-0.log',
+                                    'Python tests'
+                                )
+                            } else {
+                                echo 'No Python tests found. Skipping Python tests.'
+                            }
+                        }
+
+                        if (!hasMaven && !hasPython) {
+                            error('This demo pipeline only supports the verified Java/Maven and Python sample project.')
+                        }
+
+                        env.PROJECT_TYPE = detectedStacks.join(',')
+
+                        def javaBinaries = sh(
+                            script: "find . -type d \\( -path '*/target/classes' -o -path '*/build/classes' -o -path '*/build/classes/java/main' \\) | sed 's#^./##' | paste -sd, -",
+                            returnStdout: true
+                        ).trim()
+
+                        def sonarSources = []
+                        if (fileExists('java-service/src')) {
+                            sonarSources.add('java-service/src')
+                        }
+                        if (fileExists('python-tools')) {
+                            sonarSources.add('python-tools')
+                        }
+                        if (sonarSources.isEmpty()) {
+                            error('No verified Java or Python source directories found for SonarQube analysis.')
+                        }
+
+                        def scannerArgs = "-Dsonar.sources=${sonarSources.join(',')} -Dsonar.exclusions=${analysisExclusions}"
+                        if (javaBinaries) {
+                            scannerArgs = "${scannerArgs} -Dsonar.java.binaries=${javaBinaries}"
+                        }
+
+                        runScanner(scannerArgs)
+                    }
+
+                    echo "Analysis completed for ${env.REPO_NAME} (${env.PROJECT_TYPE})"
+                }
+            }
+        }
+
+        stage('Run AI agent') {
+            when {
+                changeRequest()
+            }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'sonarqube-token', variable: 'SONARQUBE_AUTH_TOKEN'),
+                    string(credentialsId: 'LLM-token', variable: 'LLM_AUTH_TOKEN'),
+                    string(credentialsId: 'bitbucket_email', variable: 'BITBUCKET_EMAIL'),
+                    string(credentialsId: 'bitbucket-token', variable: 'BITBUCKET_API_TOKEN'),
+                    string(credentialsId: 'atlassian-mcp-auth-header', variable: 'ATLASSIAN_MCP_AUTH_HEADER')
+                ]) {
+                    script {
+                        def prHeadCommit = sh(
+                            returnStdout: true,
+                            script: '''
+                                if [ -n "${CHANGE_BRANCH:-}" ] && git rev-parse --verify "origin/${CHANGE_BRANCH}^{commit}" >/dev/null 2>&1; then
+                                    git rev-parse "origin/${CHANGE_BRANCH}^{commit}"
+                                else
+                                    git rev-parse HEAD
+                                fi
+                            '''
+                        ).trim()
+
+                        def data = groovy.json.JsonOutput.prettyPrint(
+                            groovy.json.JsonOutput.toJson([
+                                pr_id      : env.CHANGE_ID ?: '',
+                                project_key: env.SONARQUBE_PROJECT_KEY,
+                                repo_slug  : env.REPO_NAME,
+                                workspace  : env.BITBUCKET_WORKSPACE
+                            ])
+                        )
+
+                        def agentRepoHostPath = env.AGENT_REPO_URL.replaceFirst(/^https?:\\/\\//, '')
+
+                        writeFile file: 'data.json', text: data
+
+                        withEnv([
+                            "AGENT_REPO_HOST_PATH=${agentRepoHostPath}",
+                            'ATLASSIAN_MCP_URL=https://mcp.atlassian.com/v1/mcp',
+                            "CODEGUARDIAN_RESULTS_PATH=${env.WORKSPACE}/codeguardian-results.json",
+                            "CODEGUARDIAN_HEAD_COMMIT=${prHeadCommit}"
+                        ]) {
+                            sh '''
+                            #!/bin/bash
+
+                            set +x
+                            git clone --quiet --depth 1 --single-branch -b "$AGENT_REPO_REF" \
+                            "https://x-bitbucket-api-token-auth:${BITBUCKET_API_TOKEN}@${AGENT_REPO_HOST_PATH}" AIagent > /dev/null 2>&1
+
+                            python3 -u AIagent/agent.py --file data.json
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'codeguardian-results.json', allowEmptyArchive: true
+            sh 'rm -rf AIagent data.json build.log test.log *-build-*.log *-test-*.log sonar-scanner.log || true'
+        }
+    }
+}

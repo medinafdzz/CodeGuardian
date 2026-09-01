@@ -1,0 +1,11 @@
+target/
+build/
+*.class
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.log
+codeguardian-results.json
+.env
+.codeguardian.env
