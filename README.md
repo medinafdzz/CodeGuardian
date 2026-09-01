@@ -38,43 +38,9 @@ The original repository histories are preserved in the Git history of this unifi
 
 The following diagram summarizes the automated and manual parts of the workflow:
 
-```mermaid
-flowchart LR
-    DEV[Developer]
-    PR[Bitbucket Pull Request]
-    JENKINS[Jenkins pipeline]
-    SONAR[SonarQube]
-    CORE[CodeGuardian Core<br/>Python agent]
-    GEMINI[Gemini<br/>LLM]
-    COMMENTS[Bitbucket comments]
-    JSON[codeguardian-results.json]
-    VSCODE[VS Code extension]
-    CLI[CodeGuardian CLI]
-    REPO[Local repository]
-    PG[Pushgateway]
-    PROM[Prometheus]
-    GRAFANA[Grafana]
+![CodeGuardian architecture and workflow](codeguardian-core/docs/Diagrams/workflow/workflow.png)
 
-    DEV -->|opens or updates| PR
-    PR -->|webhook| JENKINS
-    JENKINS -->|checks out and analyses| SONAR
-    SONAR -->|findings| CORE
-    JENKINS -->|starts with PR metadata| CORE
-    CORE -->|requests correction proposals| GEMINI
-    GEMINI -->|structured suggestions| CORE
-    CORE -->|validated review feedback| COMMENTS
-    CORE -->|validated suggestions| JSON
-    JSON --> VSCODE
-    VSCODE -->|invokes| CLI
-    CLI -->|applies selected changes| REPO
-    DEV -->|reviews and decides| VSCODE
-    DEV -->|updates PR after local changes| PR
-    CORE -->|execution metrics| PG
-    PG --> PROM
-    PROM --> GRAFANA
-```
-
-For a rendered version, the repository also includes the original workflow diagram at [`codeguardian-core/docs/Diagrams/workflow/workflow.png`](codeguardian-core/docs/Diagrams/workflow/workflow.png), with its editable source in [`workflow.mmd`](codeguardian-core/docs/Diagrams/workflow/workflow.mmd).
+The editable source of the diagram is available at [`workflow.mmd`](codeguardian-core/docs/Diagrams/workflow/workflow.mmd).
 
 ## Main Components
 
