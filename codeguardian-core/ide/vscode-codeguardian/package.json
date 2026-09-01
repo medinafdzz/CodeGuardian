@@ -1,0 +1,271 @@
+{
+  "name": "vscode-codeguardian",
+  "displayName": "CodeGuardian IDE Assistant",
+  "description": "View, preview and apply CodeGuardian suggestions from codeguardian-results.json.",
+  "version": "0.1.0",
+  "publisher": "codeguardian",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:codeguardianDashboard",
+    "onView:codeguardianSuggestions",
+    "onCommand:codeguardian.refreshSuggestions",
+    "onCommand:codeguardian.openSuggestion",
+    "onCommand:codeguardian.previewSuggestion",
+    "onCommand:codeguardian.diffSuggestion",
+    "onCommand:codeguardian.applySuggestion",
+    "onCommand:codeguardian.applySelectedSuggestion",
+    "onCommand:codeguardian.downloadLatestResults",
+    "onCommand:codeguardian.selectPullRequest",
+    "onCommand:codeguardian.importCredentialsFromEnv",
+    "onCommand:codeguardian.clearStoredCredentials",
+    "onCommand:codeguardian.showCredentialStatus",
+    "onCommand:codeguardian.watchJenkinsBuild",
+    "onCommand:codeguardian.stopJenkinsBuildWatch",
+    "onCommand:codeguardian.openGitDiff",
+    "onCommand:codeguardian.openActivityLog"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codeguardian",
+          "title": "CodeGuardian",
+          "icon": "resources/codeguardian.svg"
+        }
+      ]
+    },
+    "views": {
+      "codeguardian": [
+        {
+          "id": "codeguardianDashboard",
+          "name": "Review Dashboard",
+          "type": "webview"
+        },
+        {
+          "id": "codeguardianSuggestions",
+          "name": "File Tree"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codeguardian.refreshSuggestions",
+        "title": "CodeGuardian: Refresh Suggestions"
+      },
+      {
+        "command": "codeguardian.downloadLatestResults",
+        "title": "CodeGuardian: Download Latest Results"
+      },
+      {
+        "command": "codeguardian.selectPullRequest",
+        "title": "CodeGuardian: Select Pull Request"
+      },
+      {
+        "command": "codeguardian.openSuggestion",
+        "title": "CodeGuardian: Open Suggestion"
+      },
+      {
+        "command": "codeguardian.previewSuggestion",
+        "title": "CodeGuardian: Preview Suggestion"
+      },
+      {
+        "command": "codeguardian.diffSuggestion",
+        "title": "CodeGuardian: Diff Suggestion"
+      },
+      {
+        "command": "codeguardian.applySuggestion",
+        "title": "CodeGuardian: Apply Suggestion"
+      },
+      {
+        "command": "codeguardian.applySelectedSuggestion",
+        "title": "CodeGuardian: Apply Selected Suggestions"
+      },
+      {
+        "command": "codeguardian.importCredentialsFromEnv",
+        "title": "CodeGuardian: Import Credentials From .env"
+      },
+      {
+        "command": "codeguardian.clearStoredCredentials",
+        "title": "CodeGuardian: Clear Stored Credentials"
+      },
+      {
+        "command": "codeguardian.showCredentialStatus",
+        "title": "CodeGuardian: Show Credential Status"
+      },
+      {
+        "command": "codeguardian.watchJenkinsBuild",
+        "title": "CodeGuardian: Watch Jenkins Build"
+      },
+      {
+        "command": "codeguardian.stopJenkinsBuildWatch",
+        "title": "CodeGuardian: Stop Jenkins Build Watch"
+      },
+      {
+        "command": "codeguardian.openGitDiff",
+        "title": "CodeGuardian: Open Git Diff"
+      },
+      {
+        "command": "codeguardian.openActivityLog",
+        "title": "CodeGuardian: Open Activity Log"
+      }
+    ],
+    "configuration": {
+      "title": "CodeGuardian",
+      "properties": {
+        "codeguardian.resultsFile": {
+          "type": "string",
+          "default": "codeguardian-results.json",
+          "description": "Path to the CodeGuardian results JSON file, relative to the workspace root."
+        },
+        "codeguardian.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python executable used to run the CodeGuardian CLI."
+        },
+        "codeguardian.cliPath": {
+          "type": "string",
+          "default": "tools/codeguardian_cli.py",
+          "description": "Path to the CodeGuardian CLI script, relative to the workspace root."
+        },
+        "codeguardian.jenkinsArtifactUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Optional full Jenkins artifact URL for codeguardian-results.json. When set, this takes precedence over jenkinsUrl and jenkinsJobPath."
+        },
+        "codeguardian.jenkinsUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base Jenkins URL, for example http://localhost:8080."
+        },
+        "codeguardian.jenkinsJobPath": {
+          "type": "string",
+          "default": "",
+          "description": "Jenkins job path using slash-separated names. Use the repository multibranch path, for example CodeGuardian/sample-mixed, to enable PR selection. Use CodeGuardian/sample-mixed/PR-1 to pin one PR."
+        },
+        "codeguardian.jenkinsBuildSelector": {
+          "type": "string",
+          "default": "lastBuild",
+          "description": "Jenkins build selector used when building the artifact URL. lastBuild lets CodeGuardian check whether the latest build has finished and contains the artifact."
+        },
+        "codeguardian.jenkinsArtifactName": {
+          "type": "string",
+          "default": "codeguardian-results.json",
+          "description": "Archived Jenkins artifact name to download."
+        },
+        "codeguardian.jenkinsUser": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Jenkins user for Basic authentication."
+        },
+        "codeguardian.jenkinsApiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Jenkins API token for Basic authentication. Prefer storing this in user settings, not workspace settings."
+        },
+        "codeguardian.bitbucketEmail": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Bitbucket email for discovering the open PR associated with the current branch."
+        },
+        "codeguardian.bitbucketApiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Bitbucket API token or app password for discovering the open PR associated with the current branch. Prefer user settings."
+        },
+        "codeguardian.autoDownload": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically poll Jenkins and download codeguardian-results.json when a completed build artifact is available for the current branch PR."
+        },
+        "codeguardian.pollIntervalSeconds": {
+          "type": "number",
+          "default": 45,
+          "minimum": 15,
+          "description": "Polling interval in seconds used when codeguardian.autoDownload is enabled."
+        },
+        "codeguardian.allowApplyWithUnknownArtifact": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow Apply when codeguardian-results.json lacks enough metadata to validate repository, PR and commit context. Disabled by default for safety."
+        },
+        "codeguardian.watchBuildOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, CodeGuardian starts watching the Jenkins PR build on activation if the local artifact is missing or stale."
+        },
+        "codeguardian.watchBuildOnGitChange": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, CodeGuardian watches for local Git HEAD or branch changes and refreshes the Jenkins build watcher."
+        },
+        "codeguardian.maxBuildWatchMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "description": "Maximum number of minutes to watch a Jenkins PR build before timing out."
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "codeguardian.downloadLatestResults",
+          "when": "view == codeguardianSuggestions",
+          "group": "navigation"
+        },
+        {
+          "command": "codeguardian.selectPullRequest",
+          "when": "view == codeguardianSuggestions",
+          "group": "navigation"
+        },
+        {
+          "command": "codeguardian.refreshSuggestions",
+          "when": "view == codeguardianSuggestions",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "codeguardian.openSuggestion",
+          "when": "view == codeguardianSuggestions && viewItem == suggestion",
+          "group": "inline"
+        },
+        {
+          "command": "codeguardian.previewSuggestion",
+          "when": "view == codeguardianSuggestions && viewItem == suggestion",
+          "group": "inline"
+        },
+        {
+          "command": "codeguardian.diffSuggestion",
+          "when": "view == codeguardianSuggestions && viewItem == suggestion",
+          "group": "inline"
+        },
+        {
+          "command": "codeguardian.applySuggestion",
+          "when": "view == codeguardianSuggestions && viewItem == suggestion",
+          "group": "inline"
+        },
+        {
+          "command": "codeguardian.applySelectedSuggestion",
+          "when": "view == codeguardianSuggestions && viewItem == suggestion",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "test": "npm run compile && node --test out/cliProtocol.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

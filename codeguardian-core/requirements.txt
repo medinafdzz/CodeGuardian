@@ -1,0 +1,16 @@
+# HTTP requests and API calls
+httpx
+
+# LLM providers
+google-genai
+
+# Model Context Protocol SDK (for MCP client communication)
+mcp
+
+# Data validation and metrics
+pydantic
+prometheus-client
+
+# Tests
+pytest
+pytest-asyncio
