@@ -1,0 +1,119 @@
+networks:
+  services-net:
+    name: "services-net"
+    driver: "bridge" # Allows communication between containers on the same network
+
+services:
+
+  # -- JENKINS WITH BLUE OCEAN --
+  jenkins-blueocean:
+
+    container_name: "jenkins-blueocean"
+
+    # Build using the project's Dockerfile
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    group_add:
+      - "999" # Add Jenkins user to the Docker group (group ID 999) to allow Docker socket access
+      - "0"   # Add Jenkins user to the root group to allow Docker socket access
+
+    # Environment variables; the rest are defined in the Dockerfile
+    environment:
+      - TZ=Europe/Madrid # Set timezone for consistent SonarQube and Jenkins logs
+      - ATLASSIAN_MCP_URL=https://mcp.atlassian.com/v1/mcp
+
+    networks:
+      - "services-net"
+
+    ports:
+      - "50000:50000/tcp"
+      - "8080:8080/tcp"
+
+    restart: "on-failure"
+    
+    volumes:
+      - "jenkins-data:/var/jenkins_home"
+      - "/var/run/docker.sock:/var/run/docker.sock" # Allow Jenkins to control Docker on the host
+
+  # -- SONARQUBE SERVER --
+  sonarqube-server:
+
+    container_name: "sonarqube-server"
+
+    environment:
+      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
+
+    image: "sonarqube:community"
+
+    networks:
+      - "services-net"
+
+    ports:
+      - "9000:9000/tcp"
+
+    volumes:
+      - "sonarqube_logs:/opt/sonarqube/logs"
+      - "sonarqube_data:/opt/sonarqube/data"
+      - "sonarqube_temp:/opt/sonarqube/temp"
+      - "sonarqube_extensions:/opt/sonarqube/extensions"
+  
+
+  # -- PROMETHEUS, PUSHGATEWAY AND GRAFANA --
+  prometheus:
+    image: prom/prometheus:v3.10.0
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus_data:/prometheus
+    networks:
+      - services-net
+    ports:
+      - "9090:9090"
+
+  # Pushgateway to receive metrics from the agent and expose them to Prometheus
+  pushgateway:
+    image: prom/pushgateway:v1.11.2
+    container_name: pushgateway
+    command:
+      - "--persistence.file=/data/metrics.data"
+      - "--persistence.interval=1m"
+    volumes:
+      - ./pushgateway_data:/data
+    networks:
+      - services-net
+    ports:
+      - "9091:9091"
+
+  # Grafana to visualize the metrics stored in Prometheus
+  grafana:
+    image: grafana/grafana:12.4.2
+    container_name: grafana
+    volumes:
+      - ./grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - services-net
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+
+volumes:
+  jenkins-data:
+    external: true
+    name: "infraestructura_jenkins-data"
+  sonarqube_logs:
+    external: true
+    name: "infraestructura_sonarqube_logs"
+  sonarqube_data:
+    external: true
+    name: "infraestructura_sonarqube_data"
+  sonarqube_temp:
+    external: true
+    name: "infraestructura_sonarqube_temp"
+  sonarqube_extensions:
+    external: true
+    name: "infraestructura_sonarqube_extensions"
