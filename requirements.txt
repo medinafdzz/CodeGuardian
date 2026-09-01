@@ -1,9 +1,0 @@
-# HTTP requests and API calls
-requests
-
-# LLM providers
-google-generativeai
-openai
-
-# Model Context Protocol SDK (for MCP client communication)
-mcp

@@ -1,6 +1,0 @@
-services:
-  tfg:
-    image: tfg
-    build:
-      context: .
-      dockerfile: ./Dockerfile
